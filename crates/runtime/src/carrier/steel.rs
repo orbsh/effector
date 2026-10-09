@@ -223,7 +223,10 @@ fn bind_event_handlers(engine: &mut Engine) {
 }
 
 /// Ctx-fn stubs for the introspection throwaway engine ONLY (never the
-/// resident session — there the real host bridge functions must win):
+/// resident session — there the real host bridge functions must win).
+/// The list mirrors aura's ctx bridge (`crates/realm/src/ctx.rs`
+/// host_bridge_for) EXACTLY — ctx_timer_* landed there 2026-10-09
+/// (ADR-0016 §3b):
 /// scripts reference `ctx_*` host fns at load time (steel resolves free
 /// identifiers when the define is compiled), but the host bridge is not
 /// available during introspection. The stubs exist so the script loads;
