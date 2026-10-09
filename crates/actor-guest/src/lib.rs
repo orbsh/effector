@@ -10,7 +10,7 @@
 //! executes the engine calls through the SAME executor path the dynamic
 //! mode uses (same bytes, compiled schema).
 //!
-//! Wire contract (the probe carrier's existing ABI, unchanged):
+//! Wire contract (the effector carrier's existing ABI, unchanged):
 //! - import `aura_host.emit(ptr: i32, len: i32) -> i64` — the guest
 //!   hands over one `OpFrame` (okm-wire encoding, request ops ride the
 //!   standard tags); the host answers with one packed `(ptr << 32 |

@@ -235,7 +235,7 @@ impl Sessions {
             source,
             host,
             sandbox,
-            probe_protocol::ChannelEncoding::Json,
+            effector_protocol::ChannelEncoding::Json,
             f,
         )
     }
@@ -255,7 +255,7 @@ impl Sessions {
         source: &str,
         host: Option<&HostBridge>,
         sandbox: &crate::sandbox::SandboxPolicy,
-        encoding: probe_protocol::ChannelEncoding,
+        encoding: effector_protocol::ChannelEncoding,
         f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
     ) -> Result<Value> {
         let slot = {
@@ -328,7 +328,7 @@ fn spawn_session(
     source: &str,
     host: Option<&HostBridge>,
     sandbox: &crate::sandbox::SandboxPolicy,
-    encoding: probe_protocol::ChannelEncoding,
+    encoding: effector_protocol::ChannelEncoding,
 ) -> Result<Box<dyn ResidentSession>> {
     // `source` is consumed by the wasmtime arm (compile at spawn); the
     // other arms ignore it (the spawn spec is argv) or one or both.
@@ -368,7 +368,7 @@ fn spawn_session(
         // other carriers load lazily inside `load`. Same session shape.
         #[cfg(feature = "wasmtime")]
         "wasmtime" => Box::new(super::wasmtime::WasmSession::from_source(source, host)?),
-        other => anyhow::bail!("language not resident-carried by this probe build: {other}"),
+        other => anyhow::bail!("language not resident-carried by this effector build: {other}"),
     })
 }
 

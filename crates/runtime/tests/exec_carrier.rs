@@ -8,8 +8,8 @@
 //! --examples`); a missing binary fails the test loudly — a stale build
 //! is a recipe error, never a skip.
 
-use probe_runtime::carrier::session::StreamOp;
-use probe_runtime::carrier::HostBridge;
+use effector_runtime::carrier::session::StreamOp;
+use effector_runtime::carrier::HostBridge;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -32,8 +32,8 @@ fn bin(name: &str) -> String {
     path.to_str().unwrap().to_string()
 }
 
-fn sessions() -> probe_runtime::carrier::session::Sessions {
-    probe_runtime::carrier::session::Sessions::new()
+fn sessions() -> effector_runtime::carrier::session::Sessions {
+    effector_runtime::carrier::session::Sessions::new()
 }
 
 /// Plain call through the resident session: request frame out, result
@@ -48,7 +48,7 @@ fn bgi_call_round_trip() {
             "bgi",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| sess.call("echo", &json!({"x": 1})),
         )
         .unwrap();
@@ -63,7 +63,7 @@ fn bgi_call_round_trip() {
             "bgi",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| sess.call("echo", &json!({"y": 2})),
         )
         .unwrap();
@@ -85,7 +85,7 @@ fn bgi_host_call_crosses_the_seam() {
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host", "echo": arg}))
-            }) as probe_runtime::carrier::HostFn,
+            }) as effector_runtime::carrier::HostFn,
         );
         b
     };
@@ -97,7 +97,7 @@ fn bgi_host_call_crosses_the_seam() {
             "bgi",
             &argv,
             Some(&bridge),
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| {
                 sess.call(
                     "ctx_round_trip",
@@ -130,7 +130,7 @@ fn bgi_iterate_stream() {
             "bgi",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             move |sess| sess.iterate(op.clone()),
         )
         .unwrap()
@@ -165,7 +165,7 @@ fn bgi_iterate_stream() {
             "bgi",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| {
                 sess.iterate(StreamOp::Next {
                     stream_id: "s1".into(),
@@ -197,7 +197,7 @@ fn exec_oneshot_runs_per_call() {
             "exec",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             move |sess| sess.call("echo", &v),
         )
         .unwrap()
@@ -224,7 +224,7 @@ fn exec_oneshot_iterate_is_a_named_error() {
         "exec",
         &argv,
         None,
-        &probe_runtime::sandbox::SandboxPolicy::None,
+        &effector_runtime::sandbox::SandboxPolicy::None,
         |sess| {
             let start = sess.iterate(StreamOp::Start {
                 stream_id: "s1".into(),
@@ -260,7 +260,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     let s = sessions();
     let argv = bgi_bin();
     // Spawn + one call.
-    s.with_session("box/k4", "bgi", &argv, None, &probe_runtime::sandbox::SandboxPolicy::None, |sess| {
+    s.with_session("box/k4", "bgi", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
         sess.call("echo", &json!(1))
     })
     .unwrap();
@@ -273,10 +273,10 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
             "bgi",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| {
                 sess.as_any()
-                    .downcast_mut::<probe_runtime::carrier::exec::BgiSession>()
+                    .downcast_mut::<effector_runtime::carrier::exec::BgiSession>()
                     .and_then(|e| e.child_pid().map(|p| json!({ "pid": p })))
                     .ok_or_else(|| anyhow::anyhow!("not a bgi session"))
             },
@@ -298,7 +298,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     }
     assert!(swept.contains(&"box/k4".to_string()), "the dead slot is swept: {swept:?}");
     let out = s
-        .with_session("box/k4", "bgi", &argv, None, &probe_runtime::sandbox::SandboxPolicy::None, |sess| {
+        .with_session("box/k4", "bgi", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
             sess.call("echo", &json!("after respawn"))
         })
         .unwrap();
@@ -331,7 +331,7 @@ fn nu_bgi_call_round_trip_and_residency() {
             "bgi",
             &spec,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             move |sess| sess.call(event, &args),
         )
         .unwrap()
@@ -362,7 +362,7 @@ fn nu_bgi_host_call_crosses_the_seam() {
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host", "echo": arg}))
-            }) as probe_runtime::carrier::HostFn,
+            }) as effector_runtime::carrier::HostFn,
         );
         b
     };
@@ -374,7 +374,7 @@ fn nu_bgi_host_call_crosses_the_seam() {
             "bgi",
             &spec,
             Some(&bridge),
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| sess.call("ctx_round_trip", &json!({"q": 1})),
         )
         .unwrap();
@@ -399,7 +399,7 @@ fn nu_bgi_iterate_stream() {
             "bgi",
             &spec,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             move |sess| sess.iterate(op.clone()),
         )
         .unwrap()
@@ -434,15 +434,15 @@ fn nu_bgi_iterate_stream() {
 fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
     let s = sessions();
     let spec = nu_bgi_spec();
-    s.with_session("box/nu4", "bgi", &spec, None, &probe_runtime::sandbox::SandboxPolicy::None, |sess| {
+    s.with_session("box/nu4", "bgi", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
         sess.call("echo", &json!("x"))
     })
     .unwrap();
     let got = s
-        .with_session("box/nu4", "bgi", &spec, None, &probe_runtime::sandbox::SandboxPolicy::None, |sess| {
+        .with_session("box/nu4", "bgi", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
             let b = sess
                 .as_any()
-                .downcast_mut::<probe_runtime::carrier::exec::BgiSession>()
+                .downcast_mut::<effector_runtime::carrier::exec::BgiSession>()
                 .ok_or_else(|| anyhow::anyhow!("not a bgi session"))?;
             let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
             let dir = b
@@ -487,7 +487,7 @@ fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
 /// differs).
 #[test]
 fn bgi_cbor_round_trip() {
-    use probe_protocol::ChannelEncoding;
+    use effector_protocol::ChannelEncoding;
     let s = sessions();
     let argv = bgi_bin();
     let out = s
@@ -496,7 +496,7 @@ fn bgi_cbor_round_trip() {
             "bgi",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             ChannelEncoding::Cbor,
             |sess| sess.call("echo", &json!({"x": 1})),
         )
@@ -510,7 +510,7 @@ fn bgi_cbor_round_trip() {
             "bgi",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             ChannelEncoding::Cbor,
             |sess| sess.iterate(StreamOp::Start {
                 stream_id: "cs1".into(),
@@ -527,7 +527,7 @@ fn bgi_cbor_round_trip() {
 /// with a CBOR host_reply — the whole duplex on the binary codec.
 #[test]
 fn bgi_cbor_host_call_crosses_the_seam() {
-    use probe_protocol::ChannelEncoding;
+    use effector_protocol::ChannelEncoding;
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = {
         let seen = seen.clone();
@@ -537,7 +537,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host", "echo": arg}))
-            }) as probe_runtime::carrier::HostFn,
+            }) as effector_runtime::carrier::HostFn,
         );
         b
     };
@@ -549,7 +549,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
             "bgi",
             &argv,
             Some(&bridge),
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             ChannelEncoding::Cbor,
             |sess| sess.call("ctx_round_trip", &json!({"q": 1})),
         )
@@ -574,7 +574,7 @@ fn bgi_untyped_host_frame_fails_at_decode() {
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host"}))
-            }) as probe_runtime::carrier::HostFn,
+            }) as effector_runtime::carrier::HostFn,
         );
         b
     };
@@ -586,7 +586,7 @@ fn bgi_untyped_host_frame_fails_at_decode() {
             "bgi",
             &argv,
             Some(&bridge),
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| sess.call("bad_host_frame", &json!({"q": 1})),
         )
         .unwrap();
@@ -604,7 +604,7 @@ fn bgi_untyped_host_frame_fails_at_decode() {
 /// protocol-free shape, binary codec.
 #[test]
 fn exec_cbor_round_trip() {
-    use probe_protocol::ChannelEncoding;
+    use effector_protocol::ChannelEncoding;
     let s = sessions();
     let argv = one_shot_bin();
     let out = s
@@ -613,7 +613,7 @@ fn exec_cbor_round_trip() {
             "exec",
             &argv,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             ChannelEncoding::Cbor,
             |sess| sess.call("echo", &json!({"n": 1})),
         )
@@ -626,7 +626,7 @@ fn exec_cbor_round_trip() {
 /// criterion routes it to JSON; the spec must say so).
 #[test]
 fn nu_cbor_declaration_is_an_error() {
-    use probe_protocol::ChannelEncoding;
+    use effector_protocol::ChannelEncoding;
     let s = sessions();
     let spec = nu_bgi_spec();
     let err = s
@@ -635,7 +635,7 @@ fn nu_cbor_declaration_is_an_error() {
             "bgi",
             &spec,
             None,
-            &probe_runtime::sandbox::SandboxPolicy::None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
             ChannelEncoding::Cbor,
             |sess| sess.call("echo", &json!({})),
         )

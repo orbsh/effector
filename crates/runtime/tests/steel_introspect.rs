@@ -1,4 +1,4 @@
-use probe_runtime::carrier::steel::introspect;
+use effector_runtime::carrier::steel::introspect;
 
 #[test]
 fn steel_introspect_derives_and_merges() {

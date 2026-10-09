@@ -12,8 +12,8 @@
 //! a loud pass-through) when the artifact is absent: building it needs
 //! the wasm32-unknown-unknown rust target installed.
 
-use probe_runtime::carrier::{HostBridge, HostFn};
-use probe_runtime::carrier::session::Sessions;
+use effector_runtime::carrier::{HostBridge, HostFn};
+use effector_runtime::carrier::session::Sessions;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -98,7 +98,7 @@ mod storage {
         );
         let bytes = std::fs::read(path).expect("artifact");
         let source = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let schema = probe_runtime::carrier::introspect("wasmtime", &source).unwrap();
+        let schema = effector_runtime::carrier::introspect("wasmtime", &source).unwrap();
         println!("SCHEMA = {schema:#}");
         assert!(
             schema.get("storage").is_some(),
@@ -112,15 +112,15 @@ mod storage {
             panic!("counter_actor.wasm missing — build it: cargo build -p actor-guest --example counter_actor --target wasm32-unknown-unknown");
         };
         let sessions = Sessions::new();
-        let call = |handler: &'static str, s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+        let call = |handler: &'static str, s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
             s.call(handler, &serde_json::json!(null))
         };
         // bump twice, read back: two RMW round trips through the bridge.
-        let out = sessions.with_session("k", "wasmtime", &source, Some(&bridge()), &probe_runtime::sandbox::SandboxPolicy::None, |s| call("bump", s)).unwrap();
+        let out = sessions.with_session("k", "wasmtime", &source, Some(&bridge()), &effector_runtime::sandbox::SandboxPolicy::None, |s| call("bump", s)).unwrap();
         assert_eq!(out, Value::from(1));
-        let out = sessions.with_session("k", "wasmtime", &source, Some(&bridge()), &probe_runtime::sandbox::SandboxPolicy::None, |s| call("bump", s)).unwrap();
+        let out = sessions.with_session("k", "wasmtime", &source, Some(&bridge()), &effector_runtime::sandbox::SandboxPolicy::None, |s| call("bump", s)).unwrap();
         assert_eq!(out, Value::from(2));
-        let out = sessions.with_session("k", "wasmtime", &source, Some(&bridge()), &probe_runtime::sandbox::SandboxPolicy::None, |s| call("peek", s)).unwrap();
+        let out = sessions.with_session("k", "wasmtime", &source, Some(&bridge()), &effector_runtime::sandbox::SandboxPolicy::None, |s| call("peek", s)).unwrap();
         assert_eq!(out, Value::from(2));
     }
 }

@@ -980,6 +980,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "effector-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "effector-protocol"
+version = "0.1.0"
+dependencies = [
+ "effector-config",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "effector-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "ciborium",
+ "effector-config",
+ "effector-protocol",
+ "futures-util",
+ "hex",
+ "im-rc",
+ "libc",
+ "okm-core",
+ "okm-python",
+ "okm-steel",
+ "okm-wire",
+ "pyo3",
+ "sandbox-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "steel-core",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "ureq",
+ "wasmtime",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2715,53 +2762,6 @@ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "probe-config"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "probe-protocol"
-version = "0.1.0"
-dependencies = [
- "probe-config",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "probe-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "ciborium",
- "futures-util",
- "hex",
- "im-rc",
- "libc",
- "okm-core",
- "okm-python",
- "okm-steel",
- "okm-wire",
- "probe-config",
- "probe-protocol",
- "pyo3",
- "sandbox-runtime",
- "serde",
- "serde_json",
- "sha2",
- "steel-core",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "ureq",
- "wasmtime",
 ]
 
 [[package]]

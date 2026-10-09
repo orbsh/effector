@@ -1,21 +1,21 @@
-//! Probe registration and capability configuration.
+//! Effector registration and capability configuration.
 //!
 //! Registration credential = user credential (outbound connection carries
 //! "whose machine am I"). The capability list is written into the user's
-//! namespace registry by the control plane; this file is the Probe-side
+//! namespace registry by the control plane; this file is the Effector-side
 //! declaration of the same surface.
 
 use serde::{Deserialize, Serialize};
 
-/// Per-probe capability surface.
+/// Per-effector capability surface.
 ///
-/// The Probe ships NO built-in operations: every operation (`read_file`,
+/// The Effector ships NO built-in operations: every operation (`read_file`,
 /// `list_processes`, ...) is a user-written or AI-generated script/booth
 /// delivered through a carrier. What this surface declares is (a) which
 /// carriers the node carries — the registration's capability list is
 /// exactly this — and (b) the scope constraints enforced on delivered
 /// scripts at execution time. Whether an operation is AI-generated-live or
-/// pre-audited is a control-plane (Gravity/Krystallizer) policy; the Probe
+/// pre-audited is a control-plane (Gravity/Krystallizer) policy; the Effector
 /// executes what it is handed.
 ///
 /// This is the ONLY containment layer (no per-operation container
@@ -66,13 +66,13 @@ pub enum NetworkPolicy {
     Open,
 }
 
-/// Probe startup configuration (Phase 3): where to register and what to claim.
+/// Effector startup configuration (Phase 3): where to register and what to claim.
 fn default_true() -> bool {
     true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProbeConfig {
+pub struct EffectorConfig {
     /// Control plane endpoint for the outbound registration connection
     /// WS only — no degraded fallback (long-polling explicitly rejected).
     pub control_plane_url: String,

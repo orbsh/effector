@@ -1,4 +1,4 @@
-use probe_runtime::carrier::python::introspect;
+use effector_runtime::carrier::python::introspect;
 use serde_json::json;
 
 // ADR-0026 §4: the python script declares its collections with class

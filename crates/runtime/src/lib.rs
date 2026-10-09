@@ -1,4 +1,4 @@
-//! Probe runtime: executes the task contract inside a container-isolated node.
+//! Effector runtime: executes the task contract inside a container-isolated node.
 //!
 //! Carriers live in `carrier` (steel / python / wasmtime embedded,
 //! feature-gated). Executable documentation for the carrier contract is in

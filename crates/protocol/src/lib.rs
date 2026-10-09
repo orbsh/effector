@@ -4,9 +4,9 @@
 //! outbound WS connection, the degraded chunked-delivery channel, or any
 //! future carrier. Nothing here knows about serialization beyond serde.
 //!
-//! The Probe is skill-blind: it executes the operation handed to it and
+//! The Effector is skill-blind: it executes the operation handed to it and
 //! nothing else. Skills live in the Krystallizer graph and are resolved by
-//! Gravity / the LLM; what reaches the Probe is only an operation and its
+//! Gravity / the LLM; what reaches the Effector is only an operation and its
 //! arguments.
 
 use serde::{Deserialize, Serialize};
@@ -55,9 +55,9 @@ pub enum ChannelEncoding {
     Cbor,
 }
 
-/// One operation arriving at the Probe.
+/// One operation arriving at the Effector.
 ///
-/// The Probe ships no built-in operations and keeps no registry. `session`
+/// The Effector ships no built-in operations and keeps no registry. `session`
 /// is the caller's opaque residency identity and `entry` names the point the
 /// delivered code exposes; `code` always carries its executable part.
 /// `language` names the carrier to run it in — the node must carry it
@@ -83,17 +83,17 @@ pub struct ToolCall {
     /// identity, no new machinery.
     #[serde(default)]
     pub stream: Option<String>,
-    /// Opaque residency identity, minted by the caller: the Probe keys its
+    /// Opaque residency identity, minted by the caller: the Effector keys its
     /// resident session by this value, so calls sharing a `session` share
     /// runtime state (VM / module globals) and calls with different values
-    /// never do. The Probe derives nothing from it beyond identity — an
+    /// never do. The Effector derives nothing from it beyond identity — an
     /// upstream booth's `type/key` is the natural value. It cannot be the
     /// per-call id: residency needs an identity that is stable across calls,
     /// or every call would start a cold runtime.
     pub session: String,
     /// Entry point inside the delivered code — the function/event name the
     /// code binds, whichever convention it uses. This is NOT a lookup key:
-    /// the Probe resolves nothing against it (no registration, no
+    /// the Effector resolves nothing against it (no registration, no
     /// validation). A name the code does not bind falls back to the
     /// conventional `execute` entry when the code defines one, and is an
     /// error value otherwise.
@@ -114,7 +114,7 @@ pub struct ToolCall {
     /// (data-path discipline).
     pub args: serde_json::Value,
     /// The operation's code. Always present: there is no native-operation
-    /// path — the Probe provides runtimes, not logic. One delivery form
+    /// path — the Effector provides runtimes, not logic. One delivery form
     /// (ADR-0027): bytes left the control frame — code is content-
     /// addressed, every remote call rides a reference.
     pub code: CodeRef,
@@ -128,7 +128,7 @@ pub struct ToolCall {
 /// its own `/{hash}` path, so the URL is self-verifying by construction).
 /// `sha256` is asserted BY THIS FRAME, never parsed from the URL: a CDN
 /// may rewrite the path, and verification derived from a transport detail
-/// stands on the wrong side. The probe fetches on demand, verifies
+/// stands on the wrong side. The effector fetches on demand, verifies
 /// against this hash (mismatch = error, never a silent accept), and
 /// caches by hash — a discardable hot layer, same legitimacy tier as the
 /// resident session itself.
@@ -139,10 +139,10 @@ pub struct CodeRef {
     pub sha256: String,
 }
 
-/// The Probe's answer, message-sized by discipline.
+/// The Effector's answer, message-sized by discipline.
 ///
 /// Large artifacts never enter the control plane: the operation handles them
-/// on the Probe side (local fs, user-configured transfer tooling, transport
+/// on the Effector side (local fs, user-configured transfer tooling, transport
 /// skills). `Result` stays a summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -152,24 +152,24 @@ pub struct ToolResult {
 
 
 /// Transport envelope over the outbound connection (Phase 3). The control
-/// plane sends exactly one frame per WS message; the probe replies likewise.
+/// plane sends exactly one frame per WS message; the effector replies likewise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Frame {
-    /// Probe to control plane, once per connection.
+    /// Effector to control plane, once per connection.
     Register {
         node_alias: String,
         credential: String,
         carriers: Vec<String>,
     },
-    /// Control plane to probe: a `Register` was accepted.
+    /// Control plane to effector: a `Register` was accepted.
     Registered,
-    /// Control plane to probe: one operation.
+    /// Control plane to effector: one operation.
     Call(ToolCall),
-    /// Probe to control plane: the operation's answer.
+    /// Effector to control plane: the operation's answer.
     Result(ToolResult),
     /// Bidirectional: a host-function round trip (ctx bridge over the
-    /// wire). Probe -> control plane = Call, control plane -> probe =
+    /// wire). Effector -> control plane = Call, control plane -> effector =
     /// Result; the `host_call_id` correlates. The control plane resolves
     /// the call against the BOOTH INSTANCE that the enclosing ToolCall was
     /// routed to (the gateway tracks call_id -> instance; ctx state is
@@ -226,7 +226,7 @@ pub enum HostOp {
     },
     /// One okm Collection instruction (ADR-0026 §3's op document —
     /// `{collection, op, …}` as the script wrote it), carried as DATA.
-    /// The probe never parses it: the schema lives with the type
+    /// The effector never parses it: the schema lives with the type
     /// registration on the control plane, the wire's job is to move the
     /// instruction and deliver the answer. (Phase 4.14 gate 1.)
     ///

@@ -1,5 +1,5 @@
-use probe_runtime::carrier::session::Sessions;
-use probe_runtime::carrier::HostBridge;
+use effector_runtime::carrier::session::Sessions;
+use effector_runtime::carrier::HostBridge;
 
 #[test]
 fn python_event_name_addressing() {
@@ -17,7 +17,7 @@ def remove(args):
 "##;
     let sessions = Sessions::new();
     let out = sessions
-        .with_session("inst-1", "python", src, None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+        .with_session("inst-1", "python", src, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
             s.call("add_to_cart", &serde_json::json!({"item": "book", "user_id": "u1"}))
         })
         .unwrap();
@@ -33,7 +33,7 @@ fn steel_event_name_addressing() {
 "##;
     let sessions = Sessions::new();
     let out = sessions
-        .with_session("inst-1", "steel", src, None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+        .with_session("inst-1", "steel", src, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
             s.call("add_to_cart", &serde_json::json!({"item": "book"}))
         })
         .unwrap();
@@ -63,33 +63,33 @@ def bump(args):
     let sessions = Sessions::new();
     let host: Option<&HostBridge> = None;
 
-    let out = sessions.with_session("a1", "python", py_src, host, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let out = sessions.with_session("a1", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("bump", &serde_json::json!({"by": 1}))
     }).unwrap();
     assert_eq!(out["count"], 1);
-    let out = sessions.with_session("a1", "python", py_src, host, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let out = sessions.with_session("a1", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("bump", &serde_json::json!({"by": 1}))
     }).unwrap();
     assert_eq!(out["count"], 2, "python: same instance accumulates");
 
-    let out = sessions.with_session("s1", "steel", steel_src, host, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let out = sessions.with_session("s1", "steel", steel_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("bump", &serde_json::json!({"by": 5}))
     }).unwrap();
     assert_eq!(out["count"], 5);
-    let out = sessions.with_session("s1", "steel", steel_src, host, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let out = sessions.with_session("s1", "steel", steel_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("bump", &serde_json::json!({"by": 5}))
     }).unwrap();
     assert_eq!(out["count"], 10, "steel: same instance accumulates");
 
     // A DIFFERENT instance key = a fresh session (no cross-talk).
-    let out = sessions.with_session("a2", "python", py_src, host, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let out = sessions.with_session("a2", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("bump", &serde_json::json!({"by": 100}))
     }).unwrap();
     assert_eq!(out["count"], 100, "fresh instance starts at zero");
 
     // Evict wipes the instance; the next call rebuilds from zero.
     sessions.evict("a1");
-    let out = sessions.with_session("a1", "python", py_src, host, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let out = sessions.with_session("a1", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("bump", &serde_json::json!({"by": 1}))
     }).unwrap();
     assert_eq!(out["count"], 1, "evicted instance restarted fresh");

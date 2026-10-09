@@ -2,8 +2,8 @@
 //! schema derivation, host imports. Fixtures are hand-written WAT — the
 //! full ABI is exercised without a rustc wasm target.
 
-use probe_runtime::carrier::session::Sessions;
-use probe_runtime::carrier::{HostBridge, HostFn};
+use effector_runtime::carrier::session::Sessions;
+use effector_runtime::carrier::{HostBridge, HostFn};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -56,7 +56,7 @@ fn fixint(b: u8) -> Value {
 
 fn run(language: &str, src: &str, handler: &str, args: &Value) -> anyhow::Result<Value> {
     let sessions = Sessions::new();
-    sessions.with_session("t1", language, src, None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    sessions.with_session("t1", language, src, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call(handler, args)
     })
 }
@@ -75,15 +75,15 @@ fn wasm_entry_and_abi() {
 #[test]
 fn wasm_state_persists_across_calls() {
     let sessions = Sessions::new();
-    let call = |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let call = |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("bump", &serde_json::json!(null))
     };
-    sessions.with_session("i", "wasmtime", PURE_WAT, None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, call).unwrap();
-    let out = sessions.with_session("i", "wasmtime", PURE_WAT, None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, call).unwrap();
+    sessions.with_session("i", "wasmtime", PURE_WAT, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, call).unwrap();
+    let out = sessions.with_session("i", "wasmtime", PURE_WAT, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, call).unwrap();
     assert_eq!(out, fixint(2)); // the global survived the first call
 
     // A different instance key gets a FRESH module (fresh global).
-    let out2 = sessions.with_session("j", "wasmtime", PURE_WAT, None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, call).unwrap();
+    let out2 = sessions.with_session("j", "wasmtime", PURE_WAT, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, call).unwrap();
     assert_eq!(out2, fixint(1));
 }
 
@@ -118,7 +118,7 @@ fn wasm_host_import_round_trip() {
     );
     let sessions = Sessions::new();
     let out = sessions
-        .with_session("t", "wasmtime", HOST_WAT, Some(&bridge), &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+        .with_session("t", "wasmtime", HOST_WAT, Some(&bridge), &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
             s.call("hosted", &serde_json::json!(null))
         })
         .unwrap();
@@ -130,7 +130,7 @@ fn wasm_host_import_round_trip() {
 fn wasm_introspect_export_list_derivation() {
     // No interface_schema export: receives derives purely from the export
     // list — every function export except aura_alloc/memory is a handler.
-    let schema = probe_runtime::carrier::introspect("wasmtime", PURE_WAT).unwrap();
+    let schema = effector_runtime::carrier::introspect("wasmtime", PURE_WAT).unwrap();
     assert_eq!(
         schema,
         serde_json::json!({
@@ -145,9 +145,9 @@ fn wasm_introspect_export_list_derivation() {
 #[cfg(feature = "wasmtime")]
 #[test]
 fn wasm_one_shot_execute_is_gone() {
-    let err = probe_runtime::carrier::execute(
+    let err = effector_runtime::carrier::execute(
         "wasmtime",
-        probe_runtime::carrier::ExecRequest {
+        effector_runtime::carrier::ExecRequest {
             source: "",
             entry: None,
             args: &serde_json::json!(null),

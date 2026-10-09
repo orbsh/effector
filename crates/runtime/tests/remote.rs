@@ -1,9 +1,9 @@
 //! Phase 3 acceptance: a fake control plane over a real WS endpoint.
 //! Register -> Registered -> push one ToolCall -> assert the ToolResult.
 
-use probe_config::{CapabilitySurface, NetworkPolicy, ProbeConfig};
-use probe_protocol::{CodeRef, Frame, ToolCall, ToolResult};
-use probe_runtime::remote;
+use effector_config::{CapabilitySurface, NetworkPolicy, EffectorConfig};
+use effector_protocol::{CodeRef, Frame, ToolCall, ToolResult};
+use effector_runtime::remote;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -35,12 +35,12 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     // name are separate: residency is keyed by `session` alone.
     let call = ToolCall {
         call_id: "c-1".into(),
-        kind: probe_protocol::CallKind::IterateStart,
+        kind: effector_protocol::CallKind::IterateStart,
         stream: Some("s-1".into()),
         session: "counter/k1".into(),
         entry: "counter".into(),
         language: "steel".into(),
-        encoding: probe_protocol::ChannelEncoding::Json,
+        encoding: effector_protocol::ChannelEncoding::Json,
         args: serde_json::json!({"n": 3}),
         code: code.clone(),
     };
@@ -85,10 +85,10 @@ async fn outbound_registration_and_task_downlink() {
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(fake_control_plane(listener, code));
 
-    let config = ProbeConfig {
+    let config = EffectorConfig {
         control_plane_url: format!("ws://127.0.0.1:{port}"),
         sandbox: true,
-        credential_env: "PROBE_TEST_CREDENTIAL".into(),
+        credential_env: "EFFECTOR_TEST_CREDENTIAL".into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "test-node".into(),
@@ -96,10 +96,10 @@ async fn outbound_registration_and_task_downlink() {
             ..Default::default()
         },
     };
-    std::env::set_var("PROBE_TEST_CREDENTIAL", "secret-token");
+    std::env::set_var("EFFECTOR_TEST_CREDENTIAL", "secret-token");
 
-    // The probe serves one connection; the fake plane drops it after
-    // asserting, then run() reconnects forever — bound the probe with a
+    // The effector serves one connection; the fake plane drops it after
+    // asserting, then run() reconnects forever — bound the effector with a
     // timeout (the server task holds the real assertions).
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), remote::run(config)).await;
     server.await.unwrap();
@@ -107,7 +107,7 @@ async fn outbound_registration_and_task_downlink() {
 
 // --------------------------------- ADR-0027: content-addressed payloads ----
 
-/// Serve code bytes over plain HTTP (any number of requests — the probe's
+/// Serve code bytes over plain HTTP (any number of requests — the effector's
 /// per-hash cache must keep request count at ONE across repeated calls of
 /// the same code); returns (port, sha256 hex, hits).
 fn serve_code(bytes: Vec<u8>) -> (u16, String, Arc<std::sync::atomic::AtomicUsize>) {
@@ -165,12 +165,12 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         // Link call with the CORRECT hash: fetch, verify, execute.
         let call = ToolCall {
             call_id: "c-link".into(),
-            kind: probe_protocol::CallKind::IterateStart,
+            kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
             session: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: probe_protocol::ChannelEncoding::Json,
+        encoding: effector_protocol::ChannelEncoding::Json,
             args: serde_json::json!({"n": 5}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
@@ -194,12 +194,12 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         // the HTTP source stays at exactly one hit across the exchange.
         let call = ToolCall {
             call_id: "c-cached".into(),
-            kind: probe_protocol::CallKind::IterateStart,
+            kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
             session: "triple/k2".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: probe_protocol::ChannelEncoding::Json,
+        encoding: effector_protocol::ChannelEncoding::Json,
             args: serde_json::json!({"n": 2}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
@@ -226,12 +226,12 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         // Link call with a WRONG hash: error value, never a silent accept.
         let call = ToolCall {
             call_id: "c-bad".into(),
-            kind: probe_protocol::CallKind::IterateStart,
+            kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
             session: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: probe_protocol::ChannelEncoding::Json,
+        encoding: effector_protocol::ChannelEncoding::Json,
             args: serde_json::json!({"n": 5}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
@@ -251,10 +251,10 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         }
     });
 
-    let config = ProbeConfig {
+    let config = EffectorConfig {
         control_plane_url: format!("ws://127.0.0.1:{ws_port}"),
         sandbox: true,
-        credential_env: "PROBE_LINK_CREDENTIAL".into(),
+        credential_env: "EFFECTOR_LINK_CREDENTIAL".into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "link-node".into(),
@@ -262,7 +262,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             ..Default::default()
         },
     };
-    std::env::set_var("PROBE_LINK_CREDENTIAL", "tok");
+    std::env::set_var("EFFECTOR_LINK_CREDENTIAL", "tok");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), remote::run(config)).await;
     server.await.unwrap();
 }

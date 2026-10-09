@@ -1,4 +1,4 @@
-use probe_runtime::carrier::python::introspect;
+use effector_runtime::carrier::python::introspect;
 
 #[test]
 fn py_introspect_derives_receives() {

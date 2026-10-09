@@ -1,10 +1,10 @@
-use probe_protocol::{ChannelEncoding, CodeRef, ToolCall};
+use effector_protocol::{ChannelEncoding, CodeRef, ToolCall};
 
 #[test]
 fn roundtrip_call_carries_a_code_reference() {
     let call = ToolCall {
         call_id: "c1".into(),
-        kind: probe_protocol::CallKind::IterateStart,
+        kind: effector_protocol::CallKind::IterateStart,
         stream: None,
         session: "notes/7".into(),
         entry: "read_file".into(),
@@ -44,18 +44,18 @@ fn store_emit_carries_the_instruction_as_data() {
     // Phase 4.14 gate 1 (ADR-0026 §3 over the wire): the okm Collection
     // instruction rides inside `op: "store_emit"` with its payload under
     // `instruction` — the field must NOT be `op` (the discriminator
-    // collides). The probe never parses the instruction; this test is
+    // collides). The effector never parses the instruction; this test is
     // the shape lock the type system deliberately does not carry.
-    let op = probe_protocol::HostOp::StoreEmit {
+    let op = effector_protocol::HostOp::StoreEmit {
         instruction: serde_json::json!({
             "collection": "counters", "op": "get_document", "key": {"id": 1}
         }),
     };
     let s = serde_json::to_string(&op).unwrap();
     assert!(s.starts_with(r#"{"op":"store_emit","instruction":"#), "wire shape: {s}");
-    let back: probe_protocol::HostOp = serde_json::from_str(&s).unwrap();
+    let back: effector_protocol::HostOp = serde_json::from_str(&s).unwrap();
     match back {
-        probe_protocol::HostOp::StoreEmit { instruction } => {
+        effector_protocol::HostOp::StoreEmit { instruction } => {
             assert_eq!(instruction["collection"], "counters");
             assert_eq!(instruction["op"], "get_document", "the instruction's own op token survives");
         }
@@ -65,8 +65,8 @@ fn store_emit_carries_the_instruction_as_data() {
 
 #[test]
 fn capability_surface_defaults_deny() {
-    let c = probe_config::CapabilitySurface::default();
+    let c = effector_config::CapabilitySurface::default();
     assert!(c.fs_scope.is_empty());
     assert!(!c.command_exec);
-    assert!(matches!(c.network, probe_config::NetworkPolicy::None));
+    assert!(matches!(c.network, effector_config::NetworkPolicy::None));
 }

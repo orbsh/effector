@@ -148,7 +148,7 @@ fn dispatch(
     // terminal. A plain handler replies with a bare value (no `done`
     // field); the carrier wraps it to `{done:true,value}` (0036 §2).
     // The bare `call` kind rides the same arms: it stays the
-    // carrier-internal primitive (introspection, probe-side tests)
+    // carrier-internal primitive (introspection, effector-side tests)
     // while the aura dispatch seam has folded onto the stream verb.
     match (kind.as_str(), event.as_str()) {
         // Introspection answers the same schema either way.

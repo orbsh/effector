@@ -6,12 +6,12 @@
 //! called per event. These tests double as the reference for how a booth
 //! looks in each carried language.
 
-use probe_runtime::carrier::session::Sessions;
-use probe_runtime::carrier::{execute, HostBridge};
+use effector_runtime::carrier::session::Sessions;
+use effector_runtime::carrier::{execute, HostBridge};
 
 fn run(language: &str, src: &str, handler: &str, args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let sessions = Sessions::new();
-    sessions.with_session("t1", language, src, None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    sessions.with_session("t1", language, src, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call(handler, args)
     })
 }
@@ -34,11 +34,11 @@ fn py_state_persists() {
     let src = "acc = []\ndef push(args):\n    acc.append(args[\"item\"])\n    return acc\n";
     let sessions = Sessions::new();
     let host: Option<&HostBridge> = None;
-    let call = |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+    let call = |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("push", &serde_json::json!({"item": "book"}))
     };
-    sessions.with_session("i", "python", src, host, &probe_runtime::sandbox::SandboxPolicy::None, call).unwrap();
-    let out = sessions.with_session("i", "python", src, host, &probe_runtime::sandbox::SandboxPolicy::None, call).unwrap();
+    sessions.with_session("i", "python", src, host, &effector_runtime::sandbox::SandboxPolicy::None, call).unwrap();
+    let out = sessions.with_session("i", "python", src, host, &effector_runtime::sandbox::SandboxPolicy::None, call).unwrap();
     assert_eq!(out, serde_json::json!(["book", "book"]));
 }
 
@@ -71,13 +71,13 @@ fn steel_entry_with_args() {
 }
 
 // A language the node does not carry is an error value: the control plane
-// declares, the Probe only validates. (Surfaces at session spawn.)
+// declares, the Effector only validates. (Surfaces at session spawn.)
 #[cfg(feature = "steel")]
 #[test]
 fn unknown_language_is_error_value() {
     let sessions = Sessions::new();
     let err = sessions
-        .with_session("t1", "koto", "(+ 1 2)", None::<&HostBridge>, &probe_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn probe_runtime::carrier::session::ResidentSession| {
+        .with_session("t1", "koto", "(+ 1 2)", None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
             s.call("f", &serde_json::json!(null))
         })
         .unwrap_err();
@@ -89,7 +89,7 @@ fn unknown_language_is_error_value() {
 fn one_shot_execute_is_gone() {
     let err = execute(
         "steel",
-        probe_runtime::carrier::ExecRequest {
+        effector_runtime::carrier::ExecRequest {
             source: "",
             entry: None,
             args: &serde_json::json!(null),

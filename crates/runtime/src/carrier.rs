@@ -9,7 +9,7 @@ use serde_json::Value;
 /// What a carrier needs to execute one operation.
 /// Host-provided functions callable from inside an operation. Each takes
 /// one JSON argument and returns a JSON result (or an error). The caller
-/// (actuator or embedded host) supplies state access, invoke, emit — the
+/// (effector or embedded host) supplies state access, invoke, emit — the
 /// carrier only marshals values across the VM boundary.
 pub type HostFn = std::sync::Arc<dyn Fn(Value) -> anyhow::Result<Value> + Send + Sync>;
 
@@ -90,7 +90,7 @@ pub mod exec;
 pub mod session;
 
 /// Dispatch by declared language. Unknown language = error value, never a
-/// panic: the control plane declared it, the Probe only validates.
+/// panic: the control plane declared it, the Effector only validates.
 pub fn execute(language: &str, _req: ExecRequest) -> anyhow::Result<Value> {
     match language {
         #[cfg(feature = "steel")]
@@ -99,7 +99,7 @@ pub fn execute(language: &str, _req: ExecRequest) -> anyhow::Result<Value> {
         "python" => anyhow::bail!("python is resident-only: use carrier::session"),
         #[cfg(feature = "wasmtime")]
         "wasmtime" => anyhow::bail!("wasmtime is resident-only: use carrier::session"),
-        other => anyhow::bail!("language not carried by this probe build: {other}"),
+        other => anyhow::bail!("language not carried by this effector build: {other}"),
     }
 }
 
@@ -107,7 +107,7 @@ pub fn execute(language: &str, _req: ExecRequest) -> anyhow::Result<Value> {
 /// assembles/merges `interface_schema` behind this one call — the host
 /// never knows how each language collects its declarations.
 pub fn introspect(language: &str, source: &str) -> anyhow::Result<Value> {
-    introspect_encoded(language, source, probe_protocol::ChannelEncoding::Json)
+    introspect_encoded(language, source, effector_protocol::ChannelEncoding::Json)
 }
 
 /// The declared-encoding form (ADR-0037 §2): the process carriers spawn
@@ -117,7 +117,7 @@ pub fn introspect(language: &str, source: &str) -> anyhow::Result<Value> {
 pub fn introspect_encoded(
     language: &str,
     source: &str,
-    encoding: probe_protocol::ChannelEncoding,
+    encoding: effector_protocol::ChannelEncoding,
 ) -> anyhow::Result<Value> {
     match language {
         #[cfg(feature = "steel")]

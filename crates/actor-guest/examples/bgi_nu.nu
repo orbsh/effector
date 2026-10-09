@@ -49,7 +49,7 @@ def --env dispatch [m] {
     let kind = ($m.kind? | default "call")
     let event = ($m.event? | default "")
     # Unified seam (ADR-0036): a plain handler arrives as either kind —
-    # `call` (the carrier-internal primitive: introspection, probe-side
+    # `call` (the carrier-internal primitive: introspection, effector-side
     # tests) or `iterate_start` (the dispatch seam: invoke is the stream
     # whose first round is terminal — the bare reply below is wrapped to
     # {done:true,value} by the carrier).

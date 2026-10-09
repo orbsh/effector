@@ -1,6 +1,6 @@
 //! The remote wrapper (Phase 3): outbound WS to the control plane, register
 //! presence + capability, then serve pushed-down calls against the resident
-//! carrier sessions. No inbound ports — the probe always dials out; the
+//! carrier sessions. No inbound ports — the effector always dials out; the
 //! connection carries both directions. No degraded fallback exists by
 //! design: long-polling was explicitly rejected (WS-only is the contract —
 //! the control determines compromise, not the industry's conservative
@@ -9,8 +9,8 @@
 use anyhow::{Context, Result};
 use std::io::Read as _;
 use futures_util::{SinkExt, StreamExt};
-use probe_config::ProbeConfig;
-use probe_protocol::{CodeRef, Frame, HostCall, HostFrame, HostOp, ToolCall, ToolResult};
+use effector_config::EffectorConfig;
+use effector_protocol::{CodeRef, Frame, HostCall, HostFrame, HostOp, ToolCall, ToolResult};
 use std::sync::Mutex as StdMutex;
 use crate::carrier::session::Sessions;
 use crate::carrier::HostBridge;
@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 async fn serve_connection(
     ws_url: &str,
     credential: &str,
-    config: &ProbeConfig,
+    config: &EffectorConfig,
     sessions: &Sessions,
     code_cache: &Arc<CodeCache>,
 ) -> Result<()> {
@@ -53,7 +53,7 @@ async fn serve_connection(
 
     // Bidirectional loop: a writer task drains an mpsc into the sink; the
     // reader dispatches incoming frames. Host calls (ctx bridge) flow
-    // probe->control-plane while a ToolCall is executing — the two task
+    // effector->control-plane while a ToolCall is executing — the two task
     // structure makes the connection full-duplex at the frame level.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
     let writer = tokio::spawn(async move {
@@ -108,10 +108,10 @@ type PendingHost = std::sync::Mutex<
 
 /// Execute one ToolCall against the resident sessions. Phase 4 adds the
 /// `link` payload form; today only inline bytes are consumed (a `link`
-/// payload is an explicit error, not a silent fetch — the probe initiates
+/// payload is an explicit error, not a silent fetch — the effector initiates
 /// no fetch of its own).
 async fn execute_call(
-    config: &ProbeConfig,
+    config: &EffectorConfig,
     sessions: &Sessions,
     call: &ToolCall,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
@@ -124,7 +124,7 @@ async fn execute_call(
 }
 
 async fn execute_call_inner(
-    config: &ProbeConfig,
+    config: &EffectorConfig,
     sessions: &Sessions,
     call: &ToolCall,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
@@ -139,7 +139,7 @@ async fn execute_call_inner(
     let source = code_cache.resolve(&call.code)?;
 
     // Args carry no partition here — the control plane's booth model owns
-    // partitioning; the probe only keys residency by the caller's session
+    // partitioning; the effector only keys residency by the caller's session
     // identity (below).
     // Host bridge: ctx ops ride Frame::Host over the same connection, each
     // with a unique host_call_id; the closure awaits the correlated reply.
@@ -148,7 +148,7 @@ async fn execute_call_inner(
     // calls sharing a `session` share VM/module state, different ones never
     // do. The node alias in the key is only for readability (the registry is
     // process-local). `entry` names the point the delivered code exposes.
-    let key = format!("probe/{}/{}", config.capabilities.node_alias, call.session);
+    let key = format!("effector/{}/{}", config.capabilities.node_alias, call.session);
     let sessions = sessions.clone();
     let language = call.language.clone();
     let entry = call.entry.clone();
@@ -175,16 +175,16 @@ async fn execute_call_inner(
             // (plain handlers answer bare, the carrier wraps to
             // `{done:true,value}`). The generator/envelope verbs drive
             // the session's iterate surface exactly as ADR-0034; the
-            // stream_id is minted by the control plane — the probe
+            // stream_id is minted by the control plane — the effector
             // derives nothing from it.
             move |s: &mut dyn crate::carrier::session::ResidentSession| match kind {
-                probe_protocol::CallKind::IterateStart => s.iterate(
+                effector_protocol::CallKind::IterateStart => s.iterate(
                     crate::carrier::session::StreamOp::Start { stream_id, handler: entry, args },
                 ),
-                probe_protocol::CallKind::IterateNext => s.iterate(
+                effector_protocol::CallKind::IterateNext => s.iterate(
                     crate::carrier::session::StreamOp::Next { stream_id, handler: entry, args },
                 ),
-                probe_protocol::CallKind::IterateDispose => s.iterate(
+                effector_protocol::CallKind::IterateDispose => s.iterate(
                     crate::carrier::session::StreamOp::Dispose { stream_id, handler: entry, args },
                 ),
             },
@@ -259,7 +259,7 @@ fn build_host_bridge(
     // three ops. The control plane mints the stream_id at start and
     // echoes it back; the cursor loop lives in the script wrapper.
     // `ctx_store_emit` joins the loop (Phase 4.14 gate 1): the script's
-    // okm Collection instruction is pure DATA here — the probe decodes
+    // okm Collection instruction is pure DATA here — the effector decodes
     // a JSON string argument at most, never the instruction's schema
     // (the schema lives with the type registration on the control plane).
     {
@@ -391,7 +391,7 @@ fn fetch_verified(url: &str, expected_sha256: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Top-level loop: dial, register, serve; reconnect with backoff on drop.
-pub async fn run(config: ProbeConfig) -> Result<()> {
+pub async fn run(config: EffectorConfig) -> Result<()> {
     let credential = std::env::var(&config.credential_env)
         .with_context(|| format!("credential env var {} not set", config.credential_env))?;
     let sessions = Sessions::new();
@@ -413,7 +413,7 @@ pub async fn run(config: ProbeConfig) -> Result<()> {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
     }
-}fn sandbox_policy_for(config: &ProbeConfig) -> crate::sandbox::SandboxPolicy {
+}fn sandbox_policy_for(config: &EffectorConfig) -> crate::sandbox::SandboxPolicy {
     use crate::sandbox::SandboxPolicy;
     SandboxPolicy::Bubblewrap {
         allow_write: config.capabilities.fs_scope.clone(),

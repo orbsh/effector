@@ -1,6 +1,6 @@
 //! Sandbox policy: process-boundary containment for code-executing
 //! sessions. Belongs to the DEPLOYMENT FORM, not the execution mechanism —
-//! probe (unattended machine, external code) wraps session processes in a
+//! effector (unattended machine, external code) wraps session processes in a
 //! bwrap sandbox; aura in-process (user's own trust domain) passes None.
 
 use serde::{Deserialize, Serialize};

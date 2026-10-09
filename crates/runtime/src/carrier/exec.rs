@@ -49,7 +49,7 @@
 use super::session::{ResidentSession, StreamOp};
 use super::HostBridge;
 use anyhow::{anyhow, Result};
-use probe_protocol::ChannelEncoding;
+use effector_protocol::ChannelEncoding;
 use serde::Deserialize;
 use serde_json::Value;
 use std::ffi::CString;
@@ -64,7 +64,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 /// discriminator at the frame-structure layer turns a typo'd shape into a
 /// decode error (an error value back into the child), never a silent
 /// unknown-op miss in the bridge table. The store payload stays DATA —
-/// the probe never parses the okm instruction (schema-blind rule; §3's
+/// the effector never parses the okm instruction (schema-blind rule; §3's
 /// retirement is the ENTRY's retirement, not the instruction document's).
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -161,7 +161,7 @@ enum BgiKind {
     },
 }
 
-/// Session dirs carry the process pid + a sequence so concurrent probes
+/// Session dirs carry the process pid + a sequence so concurrent effectors
 /// never collide (same rule as the PTY carrier).
 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -227,10 +227,10 @@ impl BgiSession {
         let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = match policy {
             crate::sandbox::SandboxPolicy::None => {
-                std::env::temp_dir().join(format!("probe-bgi-nu-{}-{id}", std::process::id()))
+                std::env::temp_dir().join(format!("effector-bgi-nu-{}-{id}", std::process::id()))
             }
             crate::sandbox::SandboxPolicy::Bubblewrap { cwd, .. } => {
-                Path::new(cwd).join(format!("probe-bgi-nu-{}-{id}", std::process::id()))
+                Path::new(cwd).join(format!("effector-bgi-nu-{}-{id}", std::process::id()))
             }
         };
         std::fs::create_dir_all(&dir)?;
@@ -729,7 +729,7 @@ impl ResidentSession for OneShotSession {
 // -------------------------------------------------------------- spawn --
 
 /// Fork/exec argv[0] (or the bwrap wrapper) with piped stdio; stderr is
-/// inherited (the child's diagnostics reach the probe's log, never the
+/// inherited (the child's diagnostics reach the effector's log, never the
 /// result channel). The declared frame codec crosses as the
 /// `BGI_ENCODING` env ("json" | "cbor") — the child-side protocol library
 /// branches on it (an env, not an appended argv: the fifo shape passes

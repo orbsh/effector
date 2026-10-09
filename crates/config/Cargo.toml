@@ -1,5 +1,5 @@
 [package]
-name = "probe-config"
+name = "effector-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
