@@ -45,7 +45,7 @@ fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyMod
     let reg: Py<PyList> = registry.clone().unbind();
     let module_handle: Py<PyModule> = module.clone().unbind();
     let on = PyCFunction::new_closure(py, None, None, move |args, kw| {
-        let py = unsafe { Python::assume_gil_acquired() };
+        let py = unsafe { Python::assume_attached() };
         let reg = reg.bind(py);
         // Two call shapes: `on("event", key=...)` (declaration — returns an
         // identity decorator) and `decorator(fn)` (application — returns
@@ -66,7 +66,7 @@ fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyMod
             // captured (no sys.modules lookup: our module is synthetic).
             let module_handle = module_handle.clone_ref(py);
             let binder = PyCFunction::new_closure(py, None, None, move |a: &Bound<'_, pyo3::types::PyTuple>, _kw: Option<&Bound<'_, pyo3::types::PyDict>>| {
-                let py = unsafe { Python::assume_gil_acquired() };
+                let py = unsafe { Python::assume_attached() };
                 let f = a.get_item(0)?;
                 module_handle.bind(py).setattr(event.clone(), &f)?;
                 Ok::<_, pyo3::PyErr>(f.unbind())
@@ -180,7 +180,7 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
         .ok()
         .map(|f| f.unbind());
     let merge = PyCFunction::new_closure(py, None, None, move |_args, _kw| {
-        let py = unsafe { Python::assume_gil_acquired() };
+        let py = unsafe { Python::assume_attached() };
         let reg = reg_handle.bind(py);
         // Derived half from the @on registry: [(event, key), ...].
         let mut receives = serde_json::Map::new();
@@ -264,7 +264,7 @@ impl PythonSession {
 
 impl super::session::ResidentSession for PythonSession {
     fn load(&mut self, source: &str) -> anyhow::Result<()> {
-        Python::with_gil(|py| -> anyhow::Result<()> {
+        Python::attach(|py| -> anyhow::Result<()> {
             let (module, _registry) = load_module(py, source)
                 .map_err(|e| anyhow::anyhow!("python load: {e}"))?;
             // Host functions bind once at load and stay for the session's
@@ -273,7 +273,7 @@ impl super::session::ResidentSession for PythonSession {
                 for (name, f) in &bridge.functions {
                     let f: HostFn = f.clone();
                     let call = PyCFunction::new_closure(py, None, None, move |args, _kw| {
-                        let py = unsafe { Python::assume_gil_acquired() };
+                        let py = unsafe { Python::assume_attached() };
                         let raw: String = args.get_item(0)?.extract()?;
                         let decoded: Value = serde_json::from_str(&raw)
                             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("host arg not JSON: {e}")))?;
@@ -287,7 +287,7 @@ impl super::session::ResidentSession for PythonSession {
                         // between two python booths).
                         let out = {
                             let f = f.clone();
-                            py.allow_threads(move || (f)(decoded))
+                            py.detach(move || (f)(decoded))
                         }
                             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                         Ok::<_, pyo3::PyErr>(json_to_py(py, &out)?.unbind())
@@ -322,7 +322,7 @@ impl super::session::ResidentSession for PythonSession {
     }
 
     fn call(&mut self, handler: &str, args: &Value) -> anyhow::Result<Value> {
-        Python::with_gil(|py| -> anyhow::Result<Value> {
+        Python::attach(|py| -> anyhow::Result<Value> {
             let module = self.module.as_ref()
                 .ok_or_else(|| anyhow::anyhow!("python session: call before load"))?
                 .bind(py);
@@ -351,7 +351,7 @@ impl super::session::ResidentSession for PythonSession {
     /// entry — idempotent. Mid-stream exceptions surface as errors
     /// (failure values, ADR-0012).
     fn iterate(&mut self, op: StreamOp) -> anyhow::Result<Value> {
-        Python::with_gil(|py| -> anyhow::Result<Value> {
+        Python::attach(|py| -> anyhow::Result<Value> {
             let module = self
                 .module
                 .as_ref()
@@ -467,7 +467,7 @@ impl super::session::ResidentSession for PythonSession {
 /// half merges with the script's explicit partial declaration (which may
 /// add lifecycle etc.). Same call contract as steel/wasm/bgi.
 pub fn introspect(source: &str) -> ExecResult {
-    Python::with_gil(|py| -> ExecResult {
+    Python::attach(|py| -> ExecResult {
         let (module, _registry) = load_module(py, source)
             .map_err(|e| anyhow::anyhow!("python load: {e}"))?;
         let schema_fn = module
@@ -559,14 +559,14 @@ fn json_from_py(py: Python<'_>, v: &Bound<'_, PyAny>) -> ExecResult {
     if let Ok(s) = v.extract::<String>() {
         return Ok(Value::String(s));
     }
-    if let Ok(list) = v.downcast::<PyList>() {
+    if let Ok(list) = v.cast::<PyList>() {
         let mut out = Vec::with_capacity(list.len());
         for item in list.iter() {
             out.push(json_from_py(py, &item)?);
         }
         return Ok(Value::Array(out));
     }
-    if let Ok(dict) = v.downcast::<PyDict>() {
+    if let Ok(dict) = v.cast::<PyDict>() {
         let mut map = serde_json::Map::new();
         for (k, val) in dict.iter() {
             let key: String = k.extract()?;
