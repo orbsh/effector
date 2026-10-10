@@ -82,7 +82,16 @@ fn run_json() {
                     Some(Ok(inner)) => {
                         if let Ok(v) = serde_json::from_str::<Value>(inner.trim()) {
                             if let Some(hr) = v.get("host_reply") {
-                                break hr.get("ok").cloned().unwrap_or(Value::Null);
+                                // Surface the error arm into the result
+                                // (a swallowed Null made the parent's
+                                // failure invisible in assertions).
+                                break match hr.get("ok") {
+                                    Some(Value::Null) | None => hr
+                                        .get("error")
+                                        .cloned()
+                                        .unwrap_or(Value::Null),
+                                    Some(ok) => ok.clone(),
+                                };
                             }
                         }
                     }

@@ -281,11 +281,68 @@ impl super::session::ResidentSession for PythonSession {
                 let new_ns = || -> pyo3::PyResult<Bound<'_, pyo3::PyAny>> {
                     Ok(types_mod.getattr("SimpleNamespace")?.call0()?.into_any())
                 };
+                // A prefix that is ALSO a leaf key ("store" with both a
+                // `store` fn and a `store.frame` fn — the wasm raw plane)
+                // must be a callable namespace: instances of a generated
+                // class whose __call__ delegates to a `_fn` attribute.
+                // Pure groups stay SimpleNamespace.
+                let node_type_src = CString::new(
+                    "type('AuraCtxNode', (), {'__call__': lambda self, arg: self._fn(arg)})",
+                )?;
+                let node_type = py.eval(node_type_src.as_c_str(), None, None)?;
                 let ctx_obj = new_ns()?;
-                // Insert in key order (BTreeMap: parents before children —
-                // "iterate" never collides with "iterate.start" because
-                // the group node is created by the first child's split).
+                // Pass 1: materialize every group path, parents first, in
+                // order-independent fashion (the BTreeMap byte order puts
+                // `store` before `store.frame`: binding the leaf first and
+                // descending into it would setattr on a PyCFunction — no
+                // __dict__ — AttributeError. This is the bug the single
+                // pass shipped).
+                let mut prefixes: Vec<String> = bridge
+                    .functions
+                    .keys()
+                    .flat_map(|k| {
+                        let p: Vec<&str> = k.split('.').collect();
+                        (1..p.len()).map(move |i| p[..i].join("."))
+                    })
+                    .collect();
+                // group-depth stable sort keeps siblings in map order, so
+                // the dedup below runs on sorted runs (sort_unstable by
+                // depth alone would scatter duplicates).
+                prefixes.sort_by(|a, b| {
+                    a.matches('.')
+                        .count()
+                        .cmp(&b.matches('.').count())
+                        .then_with(|| a.cmp(b))
+                });
+                prefixes.dedup();
+                let mut group_nodes: std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>> =
+                    Default::default();
+                for g in &prefixes {
+                    let parts: Vec<&str> = g.split('.').collect();
+                    let parent: pyo3::Py<pyo3::PyAny> = if parts.len() == 1 {
+                        ctx_obj.clone().unbind()
+                    } else {
+                        group_nodes[&parts[..parts.len() - 1].join(".")].clone_ref(py)
+                    };
+                    let node = if bridge.functions.contains_key(g.as_str()) {
+                        node_type.call0()?.into_any().unbind()
+                    } else {
+                        new_ns()?.unbind()
+                    };
+                    parent.bind_borrowed(py).setattr(parts[parts.len() - 1], &node)?;
+                    group_nodes.insert(g.clone(), node);
+                }
+                // Pass 2: bind leaves — a double-role key stores its
+                // callable on the node's `_fn`; a plain leaf binds onto
+                // its (already existing) group.
                 for (key, f) in &bridge.functions {
+                    // A leaf that is ALSO a group prefix (double-role):
+                    // the node exists as a callable AuraCtxNode, its
+                    // function rides `_fn`.
+                    let is_prefix = bridge
+                        .functions
+                        .keys()
+                        .any(|k| k.starts_with(&format!("{key}.")));
                     let f: HostFn = f.clone();
                     let call = PyCFunction::new_closure(py, None, None, move |args, _kw| {
                         let py = unsafe { Python::assume_attached() };
@@ -307,22 +364,24 @@ impl super::session::ResidentSession for PythonSession {
                             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                         Ok::<_, pyo3::PyErr>(json_to_py(py, &out)?.unbind())
                     })?;
-                    // Split the dotted path: descend/create a
-                    // SimpleNamespace per group, bind the leaf callable.
+                    // Split the dotted path: descend the group tree built
+                    // in pass 1, bind the leaf callable.
                     let mut node = ctx_obj.clone().into_any();
                     let parts: Vec<&str> = key.split('.').collect();
                     let (groups, leaf) = parts.split_at(parts.len() - 1);
                     for g in groups {
-                        node = match node.getattr(*g) {
-                            Ok(existing) => existing,
-                            Err(_) => {
-                                let group = new_ns()?;
-                                node.setattr(*g, &group)?;
-                                group
-                            }
-                        };
+                        node = node.getattr(*g)?;
                     }
-                    node.setattr(leaf[0], call)?;
+                    if is_prefix {
+                        // The double-role node already exists (pass 1 made
+                        // it an AuraCtxNode): descend ONE more level and
+                        // hang the callable off it — `ctx.store(arg)`
+                        // routes through __call__ -> _fn.
+                        node = node.getattr(leaf[0])?;
+                        node.setattr("_fn", call)?;
+                    } else {
+                        node.setattr(leaf[0], call)?;
+                    }
                 }
                 module.add("ctx", ctx_obj)?;
             }

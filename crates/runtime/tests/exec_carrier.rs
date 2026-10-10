@@ -591,11 +591,14 @@ fn bgi_untyped_host_frame_fails_at_decode() {
         )
         .unwrap();
     assert!(seen.lock().unwrap().is_empty(), "the bridge fn must NOT run on an untyped frame");
-    // The parent's error reply carries no `ok` — the child's helper
-    // lands the recorded note (the error value crossed the seam).
+    // The parent's error reply carries no `ok` — the fixture's host
+    // helper forwards the error string itself (surfaced, not swallowed
+    // to Null): the error value crossed the seam.
     assert!(
-        out.get("note").is_some() || out.get("error").is_some(),
-        "the decode failure surfaced as an error value, got: {out}"
+        out.as_str().is_some_and(|s| s.contains("bad host frame"))
+            || out.get("note").is_some()
+            || out.get("error").is_some(),
+        "the decode failure landed as an error value, got: {out}"
     );
 }
 
