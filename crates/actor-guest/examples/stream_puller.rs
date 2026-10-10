@@ -1,6 +1,7 @@
 //! ADR-0034 consumer-side fixture: a real rustc-compiled wasm booth that
 //! PULLS a sibling booth's stream to done through the aura_host iterate
-//! imports (ctx_iter_start / ctx_iter_next / ctx_iter_dispose). The wasm
+//! imports (ctx.iterate.start / ctx.iterate.next / ctx.iterate.dispose —
+//! the flat wasm ABI of the ADR-0043 ctx methods). The wasm
 //! side of "python 生产摊位 → wasm/python 消费" acceptance; the envelope
 //! crosses as CBOR (carrier marshal), the guest never speaks JSON.
 //!
@@ -16,8 +17,11 @@ use serde_json::Value;
 
 #[link(wasm_import_module = "aura_host")]
 extern "C" {
+    #[link_name = "iterate.start"]
     fn ctx_iter_start(ptr: i32, len: i32) -> i64;
+    #[link_name = "iterate.next"]
     fn ctx_iter_next(ptr: i32, len: i32) -> i64;
+    #[link_name = "iterate.dispose"]
     fn ctx_iter_dispose(ptr: i32, len: i32) -> i64;
 }
 

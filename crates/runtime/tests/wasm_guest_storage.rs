@@ -1,6 +1,6 @@
 //! Wasm guest storage path (ADR-0026 §4 full-power path): a REAL
 //! rustc-compiled module (`actor-guest`'s counter_actor example) runs
-//! the in-module Collection API over the `aura_host.emit` bridge. The
+//! the in-module Collection API over the `aura_host.store.frame` bridge. The
 //! host arm decodes the okm-wire `OpFrame`, executes it against a real
 //! in-process engine (the same shape the realm's executor uses), and
 //! answers with `OpResponse` — the dynamic and static storage modes
@@ -66,7 +66,7 @@ mod storage {
     fn bridge() -> HostBridge {
         let mut bridge = HostBridge::default();
         bridge.functions.insert(
-            "emit".into(),
+            "store.frame".into(),
             Arc::new(move |arg: Value| {
                 // The carrier marshals the guest's (ptr,len) bytes into a
                 // JSON value?? No — the arg here IS the CBOR-decoded value
@@ -74,7 +74,7 @@ mod storage {
                 // (raw okm-wire bytes), not a JSON value. The generic
                 // HostFn seam is JSON; the storage bridge needs BYTES.
                 // Handled by WasmSession's raw-byte host arm: a host fn
-                // named `emit` gets the request bytes as a JSON array of
+                // named `store.frame` gets the request bytes as a JSON array of
                 // numbers (bytes survive the JSON detour losslessly).
                 let bytes: Vec<u8> = arg
                     .as_array()

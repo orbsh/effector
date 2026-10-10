@@ -106,16 +106,20 @@ impl super::session::ResidentSession for SteelSession {
     }
 }
 
-/// Expose each host function as a steel builtin taking one JSON-string arg
-/// and returning a native steel value — scripts get hashes/numbers/bools,
-/// not JSON strings to re-parse.
+/// Expose each host function as a steel builtin named `ctx.<bridge key>`
+/// taking one JSON-string arg and returning a native steel value —
+/// scripts get hashes/numbers/bools, not JSON strings to re-parse.
+/// ADR-0043: one `ctx` object surface. Steel has no member access, but
+/// the reader resolves full dotted symbol strings (`ctx.store` is one
+/// name), so the object form is literal: a script writes `(ctx.store …)`,
+/// `(ctx.iterate.start …)`, `(ctx.timer.register …)`.
 fn register_host(engine: &mut Engine, host: Option<&HostBridge>) {
     let Some(bridge) = host else { return };
     for (name, f) in &bridge.functions {
         let f = f.clone();
         // Steel's register_fn requires 'static — leak the name (small,
         // bounded by the declared host functions) and clone the HostFn Arc.
-        let name: &'static str = Box::leak(name.clone().into_boxed_str());
+        let name: &'static str = Box::leak(format!("ctx.{name}").into_boxed_str());
         engine.register_fn(name, move |arg: SteelVal| -> Result<SteelVal, String> {
             // Arg marshal: a steel string is tried as JSON first (object
             // form `{"field": ...}`) and falls back to a bare string value
@@ -225,18 +229,19 @@ fn bind_event_handlers(engine: &mut Engine) {
 /// Ctx-fn stubs for the introspection throwaway engine ONLY (never the
 /// resident session — there the real host bridge functions must win).
 /// The list mirrors aura's ctx bridge (`crates/realm/src/ctx.rs`
-/// host_bridge_for) EXACTLY — ctx_timer_* landed there 2026-10-09
-/// (ADR-0016 §3b):
-/// scripts reference `ctx_*` host fns at load time (steel resolves free
+/// host_bridge_for) EXACTLY under the ADR-0043 dotted method paths
+/// (timer/queue landed 2026-10-09, ADR-0016 §3b; ctx_timer_* renamed with
+/// the ctx object):
+/// scripts reference `ctx.*` host fns at load time (steel resolves free
 /// identifiers when the define is compiled), but the host bridge is not
 /// available during introspection. The stubs exist so the script loads;
 /// they error if ever invoked (introspection never calls a handler).
 fn register_ctx_stubs(engine: &mut Engine) {
     const CTX_STUBS: &[&str] = &[
-        "ctx_invoke", "ctx_store_emit", "ctx_interface_schema",
-        "ctx_queue_depth", "ctx_skip_to_head",
-        "ctx_timer_register", "ctx_timer_cancel",
-        "ctx_iter_start", "ctx_iter_next", "ctx_iter_dispose",
+        "ctx.invoke", "ctx.store", "ctx.schema",
+        "ctx.queue.depth", "ctx.queue.skip_to_head",
+        "ctx.timer.register", "ctx.timer.cancel",
+        "ctx.iterate.start", "ctx.iterate.next", "ctx.iterate.dispose",
     ];
     for name in CTX_STUBS {
         let name: &'static str = Box::leak((*name).to_string().into_boxed_str());

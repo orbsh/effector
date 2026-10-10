@@ -48,7 +48,8 @@ pub struct StorageCollection {
 /// entry over this engine and registers it into the module namespace
 /// under the collection name — the script's binding face, zero
 /// translation. Other carriers ignore the slot (steel envelope ops
-/// ride `ctx_store_emit`; wasmtime rides its own raw `emit` HostFn).
+/// ride `store` (ctx.store); wasmtime rides its own raw `store.frame`
+/// HostFn).
 pub struct StorageSlot {
     pub ns: u16,
     pub collections: Vec<StorageCollection>,
@@ -129,16 +130,16 @@ pub fn introspect_encoded(
             // Explicit `interface_schema` export wins; otherwise the
             // receives half derives from the export list. One throwaway
             // session, same shape as every carrier's introspection.
-            // The bridge carries a STUB `emit` (the steel register_ctx_stubs
-            // precedent): a wasm storage module imports aura_host.emit, but
+            // The bridge carries a STUB `store.frame` (the steel register_ctx_stubs
+            // precedent): a wasm storage module imports aura_host.store.frame, but
             // at introspection time no store plan exists — the import must
             // be satisfied for instantiation without being callable (the
-            // schema export is a pure declaration, never an emit).
+            // schema export is a pure declaration, never a frame write).
             let mut stub = HostBridge::default();
             stub.functions.insert(
-                "emit".into(),
+                "store.frame".into(),
                 std::sync::Arc::new(|_arg: Value| {
-                    anyhow::bail!("emit is not callable during introspection")
+                    anyhow::bail!("ctx.store.frame is not callable during introspection")
                 }),
             );
             let sessions = session::Sessions::new();

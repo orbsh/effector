@@ -91,8 +91,9 @@ fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyMod
     )
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("okm schema DSL: {e}")))?;
 
-    // ADR-0034 consumer wrapper: `ctx_iterate` turns the three host fns
-    // (ctx_iter_start/next/dispose, bound right after the module is
+    // ADR-0034 consumer wrapper: `ctx_iterate` turns the three ctx.iterate
+    // host methods (ctx.iterate.start/next/dispose, bound right after the
+    // module is
     // loaded when a bridge exists) into ONE native generator. The
     // consumer writes `for tok in ctx_iterate(...)`: the first envelope
     // arrives with the Start round trip (stream_id merged by the realm),
@@ -103,7 +104,7 @@ fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyMod
     // opened, no stream_id present), and the terminal round may carry a
     // `value`; it lands on `ctx_iterate.last_value` for the consumer
     // that wants it (native `for` iteration discards it — the ADR §3
-    // rule; `ctx_invoke` is the shape that unwraps values).
+    // rule; `ctx.invoke` is the shape that unwraps values).
     // Args marshal as JSON strings
     // — the PyCFunction seam extracts String (same contract the other
     // ctx host fns use).
@@ -114,7 +115,7 @@ fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyMod
 import json as _aura_json
 
 def ctx_iterate(booth_type, booth_key, handler, args=None):
-    env = ctx_iter_start(_aura_json.dumps({
+    env = ctx.iterate.start(_aura_json.dumps({
         "type": booth_type, "key": booth_key,
         "handler": handler, "args": args if args is not None else {},
     }))
@@ -125,7 +126,7 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
     try:
         while True:
             yield env["item"]
-            env = ctx_iter_next(_aura_json.dumps({"stream_id": stream_id}))
+            env = ctx.iterate.next(_aura_json.dumps({"stream_id": stream_id}))
             ctx_iterate.last_value = env.get("value")
             if env.get("done"):
                 break
@@ -134,7 +135,7 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
         # done): dispose is the mandatory dual. Idempotent realm-side —
         # a stream already ended or failed answers success.
         if not env.get("done"):
-            ctx_iter_dispose(_aura_json.dumps({"stream_id": stream_id}))
+            ctx.iterate.dispose(_aura_json.dumps({"stream_id": stream_id}))
 "#,
         )?
         .as_c_str(),
@@ -269,8 +270,22 @@ impl super::session::ResidentSession for PythonSession {
                 .map_err(|e| anyhow::anyhow!("python load: {e}"))?;
             // Host functions bind once at load and stay for the session's
             // whole life — same marshal contract as the old one-shot path.
+            // ADR-0043: the host bridge is ONE module-level object `ctx`,
+            // its attribute tree mirroring the dotted bridge keys
+            // ("store" -> ctx.store, "iterate.start" -> ctx.iterate.start,
+            // …). Each leaf is a PyCFunction with the same JSON-string
+            // marshal the flat injection used; the bare `ctx_*` globals
+            // retire (breaking rename, no aliases).
             if let Some(bridge) = &self.host {
-                for (name, f) in &bridge.functions {
+                let types_mod = py.import("types")?;
+                let new_ns = || -> pyo3::PyResult<Bound<'_, pyo3::PyAny>> {
+                    Ok(types_mod.getattr("SimpleNamespace")?.call0()?.into_any())
+                };
+                let ctx_obj = new_ns()?;
+                // Insert in key order (BTreeMap: parents before children —
+                // "iterate" never collides with "iterate.start" because
+                // the group node is created by the first child's split).
+                for (key, f) in &bridge.functions {
                     let f: HostFn = f.clone();
                     let call = PyCFunction::new_closure(py, None, None, move |args, _kw| {
                         let py = unsafe { Python::assume_attached() };
@@ -283,7 +298,7 @@ impl super::session::ResidentSession for PythonSession {
                         // session needs the GIL. Holding it across the
                         // block is a guaranteed deadlock; allow_threads is
                         // the pyo3 contract for exactly this (ADR-0034 e2e
-                        // caught it; the same shape applies to ctx_invoke
+                        // caught it; the same shape applies to ctx.invoke
                         // between two python booths).
                         let out = {
                             let f = f.clone();
@@ -292,8 +307,24 @@ impl super::session::ResidentSession for PythonSession {
                             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                         Ok::<_, pyo3::PyErr>(json_to_py(py, &out)?.unbind())
                     })?;
-                    module.add(name.as_str(), call)?;
+                    // Split the dotted path: descend/create a
+                    // SimpleNamespace per group, bind the leaf callable.
+                    let mut node = ctx_obj.clone().into_any();
+                    let parts: Vec<&str> = key.split('.').collect();
+                    let (groups, leaf) = parts.split_at(parts.len() - 1);
+                    for g in groups {
+                        node = match node.getattr(*g) {
+                            Ok(existing) => existing,
+                            Err(_) => {
+                                let group = new_ns()?;
+                                node.setattr(*g, &group)?;
+                                group
+                            }
+                        };
+                    }
+                    node.setattr(leaf[0], call)?;
                 }
+                module.add("ctx", ctx_obj)?;
             }
             // Storage injection (ADR-0037 4.16a): one Collection per
             // declared entry over the HOST's engine, registered into the

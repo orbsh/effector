@@ -199,7 +199,7 @@ pub(crate) fn envelope_pull(session: &mut dyn ResidentSession, op: &StreamOp) ->
 /// Per-instance slot: the session plus its own lock. The lock is held only
 /// for the duration of one call on THAT instance — other instances proceed
 /// concurrently, and host functions that call back into other instances
-/// (ctx_invoke) never contend on a global lock.
+/// (ctx.invoke) never contend on a global lock.
 type Slot = Mutex<Box<dyn ResidentSession>>;
 
 /// Session registry: per booth-instance key, one live session.

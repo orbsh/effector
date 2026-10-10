@@ -5,13 +5,13 @@
 //! `#[derive(KeyEncode/DocumentEncode)]` run at wasm build time, the
 //! schema IS code in the artifact) and implements its storage plane as
 //! one [`EmitStore`] — a `VirtualStorage` impl whose every primitive is
-//! one `aura_host.emit` host round trip carrying an okm-wire `OpFrame`.
+//! one `aura_host.store.frame` host round trip carrying an okm-wire `OpFrame`.
 //! The module then runs the real `Collection` API in-module; the engine
 //! executes the engine calls through the SAME executor path the dynamic
 //! mode uses (same bytes, compiled schema).
 //!
 //! Wire contract (the effector carrier's existing ABI, unchanged):
-//! - import `aura_host.emit(ptr: i32, len: i32) -> i64` — the guest
+//! - import `aura_host.store.frame(ptr: i32, len: i32) -> i64` — the guest
 //!   hands over one `OpFrame` (okm-wire encoding, request ops ride the
 //!   standard tags); the host answers with one packed `(ptr << 32 |
 //!   len)` pointing at the `OpResponse` bytes it wrote through the
@@ -35,11 +35,13 @@ use okm_core::{OpFrame, OpResponse};
 use okm_wire::{OP_DELETE, OP_GET, OP_PUT, OP_SCAN};
 
 // The host import. Signature per the carrier ABI: `(ptr, len) -> i64`
-// packed return. Linked under `aura_host.emit` — the wasm import module
-// MUST be `aura_host` (the carrier resolves host imports there).
+// packed return. Linked under `aura_host.store.frame` — the wasm import
+// module MUST be `aura_host` (the carrier resolves host imports there);
+// the field name is the flat import ABI (ADR-0043 §6: the WASM ABI stays
+// flat — the source-level `ctx.store.frame` maps onto this name).
 #[link(wasm_import_module = "aura_host")]
 extern "C" {
-    #[link_name = "emit"]
+    #[link_name = "store.frame"]
     fn host_emit(ptr: i32, len: i32) -> i64;
 }
 

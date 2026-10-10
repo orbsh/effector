@@ -71,7 +71,7 @@ fn bgi_call_round_trip() {
 }
 
 /// The ctx seam crosses the boundary: the child sends a host frame
-/// (ctx_invoke) mid-call, the parent's bridge answers on stdin, the
+/// (invoke / ctx.invoke) mid-call, the parent's bridge answers on stdin, the
 /// child forwards the reply into its result. This is ADR-0035's §3
 /// `host` / `host_reply` pair over real pipes.
 #[test]
@@ -81,7 +81,7 @@ fn bgi_host_call_crosses_the_seam() {
         let seen = seen.clone();
         let mut b = HostBridge::default();
         b.functions.insert(
-            "ctx_invoke".into(),
+            "invoke".into(),
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host", "echo": arg}))
@@ -358,7 +358,7 @@ fn nu_bgi_host_call_crosses_the_seam() {
         let seen = seen.clone();
         let mut b = HostBridge::default();
         b.functions.insert(
-            "ctx_invoke".into(),
+            "invoke".into(),
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host", "echo": arg}))
@@ -533,7 +533,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
         let seen = seen.clone();
         let mut b = HostBridge::default();
         b.functions.insert(
-            "ctx_invoke".into(),
+            "invoke".into(),
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host", "echo": arg}))
@@ -559,7 +559,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
 }
 
 /// The typing kills the document-layer mistake (ADR-0037 §2): a child
-/// sending the RETIRED untyped shape (`{"op": "ctx_invoke"}` with no
+/// sending the RETIRED untyped shape (`{"op": "invoke"}` with no
 /// discriminator) fails at the parent's typed-frame DECODE — the bridge
 /// fn never runs, and the child sees an error reply (no `ok`). The free
 /// op-name lookup that silently missed the table is gone.
@@ -570,7 +570,7 @@ fn bgi_untyped_host_frame_fails_at_decode() {
         let seen = seen.clone();
         let mut b = HostBridge::default();
         b.functions.insert(
-            "ctx_invoke".into(),
+            "invoke".into(),
             Arc::new(move |arg: Value| {
                 seen.lock().unwrap().push(arg.clone());
                 Ok(json!({"from": "host"}))

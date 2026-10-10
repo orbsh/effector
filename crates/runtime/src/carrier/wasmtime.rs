@@ -78,14 +78,21 @@ impl WasmSession {
                 // blocking closure by contract — every caller site runs
                 // under spawn_blocking (the ctx bridge blocks on the async
                 // ctx inside it). No async host import machinery needed.
-                // `emit` is the RAW-BYTE host arm (ADR-0026 §4 wasm
+                // `store.frame` (ADR-0043 rename of the bare `emit`) is
+                // the RAW-BYTE host arm (ADR-0026 §4 wasm
                 // storage): the guest hands over okm-wire OpFrame bytes —
                 // NOT a CBOR value — and expects raw OpResponse bytes
                 // back. The JSON HostFn seam carries the bytes as JSON
                 // number arrays (lossless; the storage bridge is not a
                 // hot path at the JSON-detour cost). Every other host fn
-                // keeps the CBOR value marshal.
-                let is_emit = name == "emit";
+                // keeps the CBOR value marshal. NOTE (ADR-0043 §6): the
+                // WASM import ABI stays FLAT by design — import field
+                // names are the dotted bridge keys verbatim
+                // (`aura_host.invoke`, `aura_host.store.frame`,
+                // `aura_host.iterate.start`, …); the ctx object is the
+                // SOURCE-level shape and the guest SDK maps source
+                // `ctx.store` onto the flat import.
+                let is_emit = name == "store.frame";
                 linker
                     .func_wrap(
                         HOST_NS,

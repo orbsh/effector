@@ -183,11 +183,11 @@ The mapping from script function to wire op:
 
 | script fn | `op.op` | payload |
 |---|---|---|
-| `ctx_invoke` | `invoke` | `target_type`, `target_key`, `handler`, `args` |
-| `ctx_iter_start` | `iterate` | `target_type`, `target_key`, `handler`, `args` |
-| `ctx_iter_next` | `iterate_next` | `stream_id` |
-| `ctx_iter_dispose` | `iterate_dispose` | `stream_id` |
-| `ctx_store_emit` | `store_emit` | `instruction` — one okm Collection instruction, carried as data (`{"collection": …, "op": …, …}` as the script wrote it; the control plane executes it against the type's own storage plan) |
+| `ctx.invoke` | `invoke` | `target_type`, `target_key`, `handler`, `args` |
+| `ctx.iterate.start` | `iterate` | `target_type`, `target_key`, `handler`, `args` |
+| `ctx.iterate.next` | `iterate_next` | `stream_id` |
+| `ctx.iterate.dispose` | `iterate_dispose` | `stream_id` |
+| `ctx.store` | `store_emit` | `instruction` — one okm Collection instruction, carried as data (`{"collection": …, "op": …, …}` as the script wrote it; the control plane executes it against the type's own storage plan) |
 
 ```json
 {
@@ -215,7 +215,7 @@ The mapping from script function to wire op:
   connection drops. Answer every `host` call.
 - Host calls arrive **while** the enclosing `call` is still running — a
   half-duplex "read a call, answer it, read the next" server cannot carry this.
-- `ctx_store_emit` is persistence over the wire: the effector never parses the
+- `ctx.store` is persistence over the wire: the effector never parses the
   instruction (the schema lives with the type registration on the control
   plane); a type with no declared storage answers an error string.
 

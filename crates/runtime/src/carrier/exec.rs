@@ -8,7 +8,7 @@
 //! nushell fifo adapter (the "fcgi-adapts-cgi" move — see `BgiKind`).
 //! Frame line:
 //!   parent → child: {"id":N,"kind":"call|iterate_start|iterate_next|iterate_dispose","event":"...","op":"start|next|dispose","args":...,"stream_id":"..."}
-//!   child → parent: {"host":{"type":"invoke|iterate|store|interface_schema",…}} — TYPED frames (ADR-0037 §2): the discriminator fails at decode, never as a silent unknown-op string lookup
+//!   child → parent: {"host":{"type":"invoke|iterate.start|iterate.next|iterate.dispose|store|schema",…}} — TYPED frames (ADR-0037 §2): the discriminator fails at decode, never as a silent unknown-op string lookup. Arms are the ctx method paths (ADR-0043): a wrong type is a decode error, never a table miss.
 //!   → parent answers {"host_reply":{"ok":...}}
 //!   child → parent: {"result":...} (terminates one request; success only — failures ride the outer Result, ADR-0012)
 //!
@@ -69,45 +69,37 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TypedHostFrame {
-    /// `ctx_invoke`: the target selection object rides as args.
+    /// `ctx.invoke` (bridge key `invoke`): the target selection object rides as args.
     Invoke { args: Value },
     /// The ADR-0034 consumer legs — one frame type, the verb inside
     /// (start carries the target selection, next/dispose the stream id).
-    Iterate { op: IterVerb, args: Value },
-    /// `ctx_store_emit`: one okm Collection instruction as data.
+    #[serde(rename = "iterate.start")]
+    IterateStart { args: Value },
+    #[serde(rename = "iterate.next")]
+    IterateNext { args: Value },
+    #[serde(rename = "iterate.dispose")]
+    IterateDispose { args: Value },
+    /// `ctx.store` (bridge key `store`): one okm Collection instruction as data.
+    #[serde(rename = "store")]
     Store { op: Value },
-    /// `ctx_interface_schema`: the declared schema, no arguments.
-    InterfaceSchema {},
-}
-
-/// The iterate verb inside a typed `Iterate` frame — a wrong verb fails
-/// at decode (the typing kills the document-layer mistake, §2), never a
-/// silent fallback.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum IterVerb {
-    Start,
-    Next,
-    Dispose,
+    /// `ctx.schema` (bridge key `schema`): the declared schema, no arguments.
+    #[serde(rename = "schema")]
+    Schema {},
 }
 
 impl TypedHostFrame {
-    /// Map onto the bridge's named-function table (the in-process carriers
-    /// register the same names; the typed frame is the process seam's
-    /// shape, not a new vocabulary). Returns (fn name, arg).
+    /// Map onto the bridge's named-function table (ADR-0043: the names
+    /// are the dotted ctx method paths — the in-process carriers inject
+    /// these same keys as one `ctx` object; the typed frame is the
+    /// process seam's shape, not a new vocabulary). Returns (fn name, arg).
     fn dispatch(self) -> (&'static str, Value) {
         match self {
-            TypedHostFrame::Invoke { args } => ("ctx_invoke", args),
-            TypedHostFrame::Iterate { op, args } => (
-                match op {
-                    IterVerb::Start => "ctx_iter_start",
-                    IterVerb::Next => "ctx_iter_next",
-                    IterVerb::Dispose => "ctx_iter_dispose",
-                },
-                args,
-            ),
-            TypedHostFrame::Store { op } => ("ctx_store_emit", op),
-            TypedHostFrame::InterfaceSchema {} => ("ctx_interface_schema", Value::Null),
+            TypedHostFrame::Invoke { args } => ("invoke", args),
+            TypedHostFrame::IterateStart { args } => ("iterate.start", args),
+            TypedHostFrame::IterateNext { args } => ("iterate.next", args),
+            TypedHostFrame::IterateDispose { args } => ("iterate.dispose", args),
+            TypedHostFrame::Store { op } => ("store", op),
+            TypedHostFrame::Schema {} => ("schema", Value::Null),
         }
     }
 }
@@ -118,7 +110,7 @@ impl TypedHostFrame {
 pub struct BgiSession {
     /// Host functions for the child's ctx round trips — the child sends
     /// them inside a TYPED host frame (ADR-0037 §2), mapped to these
-    /// names at dispatch ("ctx_invoke", "ctx_store_emit", …).
+    /// dotted keys at dispatch ("invoke", "store", …, ADR-0043).
     host: HostBridge,
     kind: BgiKind,
     next_id: u64,

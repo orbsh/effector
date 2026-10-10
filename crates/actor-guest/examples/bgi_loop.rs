@@ -186,7 +186,7 @@ fn dispatch(
         // parent's typed decode — the bridge's fn never runs, and the
         // child sees the decode failure as an error value.
         ("call" | "iterate_start", "bad_host_frame") => {
-            let mut out = host(serde_json::json!({"host": {"op": "ctx_invoke", "args": args}}));
+            let mut out = host(serde_json::json!({"host": {"op": "invoke", "args": args}}));
             if out.is_null() {
                 out = serde_json::json!({"note": "host_reply.ok was null (decode error lands as error field, not ok)"});
             }

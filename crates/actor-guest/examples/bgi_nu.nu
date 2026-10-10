@@ -16,13 +16,13 @@
 # - `$env` writes do NOT escape an `each` closure — the batch loop is a
 #   `for` (block scope, persists), the PTY carrier's residency rule.
 
-def ctx-invoke [args] {
+def ctx.invoke [args] {
     print ({host: {type: "invoke", args: $args}} | to json --raw)
     let rep = (open --raw $env.BGI_REP | lines | first | from json)
     $rep.host_reply.ok? | default {__error: ($rep.host_reply.error? | default "")}
 }
 
-def ctx-store-emit [instruction] {
+def ctx.store [instruction] {
     print ({host: {type: "store", op: $instruction}} | to json --raw)
     let rep = (open --raw $env.BGI_REP | lines | first | from json)
     $rep.host_reply.ok? | default {__error: ($rep.host_reply.error? | default "")}
@@ -60,11 +60,11 @@ def --env dispatch [m] {
             # nu pipelines survive the bgi shape untouched (the retired
             # PTY carrier's structured-data demos).
             "sum" => { {sum: ($args.items | math sum)} }
-            "ctx_round_trip" => { {invoked: (ctx-invoke $args)} }
+            "ctx_round_trip" => { {invoked: (ctx.invoke $args)} }
             "store_round_trip" => {
                 let put = ($args | get -o put | default {})
-                ctx-store-emit $put | ignore
-                let read_back = (ctx-store-emit ($args | get -o get | default {}))
+                ctx.store $put | ignore
+                let read_back = (ctx.store ($args | get -o get | default {}))
                 {read_back: $read_back}
             }
             "count" => { $env.C = (($env.C? | default 0) + 1); {count: $env.C} }

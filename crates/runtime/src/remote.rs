@@ -206,7 +206,7 @@ fn build_host_bridge(
     let pending = pending_host.clone();
     let mut bridge = HostBridge::default();
     {
-        let name = "ctx_invoke";
+        let name = "invoke";
         let tx = tx.clone();
         let pending = pending.clone();
         let call_id = call_id.clone();
@@ -215,7 +215,7 @@ fn build_host_bridge(
             let host_call_id = format!("host-{}", std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?.as_nanos());
             let op = match name {
-                "ctx_invoke" => {
+                "invoke" => {
                     let m = match &arg {
                         serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
                             .unwrap_or(serde_json::Value::Null),
@@ -255,19 +255,20 @@ fn build_host_bridge(
     }
     // ADR-0034 consumer legs over the wire: a remote script booth
     // starting, pulling, and disposing a stream rides the same
-    // Frame::Host round trip as ctx_invoke — one send/receive path,
+    // Frame::Host round trip as invoke — one send/receive path,
     // three ops. The control plane mints the stream_id at start and
     // echoes it back; the cursor loop lives in the script wrapper.
-    // `ctx_store_emit` joins the loop (Phase 4.14 gate 1): the script's
+    // `store` (ADR-0043: the ctx.store method; formerly ctx_store_emit)
+    // joins the loop (Phase 4.14 gate 1): the script's
     // okm Collection instruction is pure DATA here — the effector decodes
     // a JSON string argument at most, never the instruction's schema
     // (the schema lives with the type registration on the control plane).
     {
         let ops = [
-            ("ctx_iter_start", HostOpArm::Start),
-            ("ctx_iter_next", HostOpArm::Next),
-            ("ctx_iter_dispose", HostOpArm::Dispose),
-            ("ctx_store_emit", HostOpArm::StoreEmit),
+            ("iterate.start", HostOpArm::Start),
+            ("iterate.next", HostOpArm::Next),
+            ("iterate.dispose", HostOpArm::Dispose),
+            ("store", HostOpArm::StoreEmit),
         ];
         for (name, arm) in ops {
             let tx = tx.clone();
