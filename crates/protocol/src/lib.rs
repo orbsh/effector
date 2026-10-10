@@ -236,6 +236,15 @@ pub enum HostOp {
     StoreEmit {
         instruction: serde_json::Value,
     },
+    /// `ctx.emit` over the wire (ADR-0043 §2's publish, remote shape):
+    /// event name + data, resolved by the control plane's realm. The
+    /// fire-and-forget semantics are the METHOD's contract — this hop
+    /// still request/response at the frame layer (the reply pairing is
+    /// protocol, not business; the answer is Null on success).
+    Emit {
+        event: String,
+        data: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -269,6 +269,7 @@ fn build_host_bridge(
             ("iterate.next", HostOpArm::Next),
             ("iterate.dispose", HostOpArm::Dispose),
             ("store", HostOpArm::StoreEmit),
+            ("emit", HostOpArm::Emit),
         ];
         for (name, arm) in ops {
             let tx = tx.clone();
@@ -299,6 +300,12 @@ fn build_host_bridge(
                         // carried as data, schema-blind (see above).
                         instruction: m.clone(),
                     },
+                    HostOpArm::Emit => HostOp::Emit {
+                        // ctx.emit over the wire: the script passed
+                        // {event, data}; the control plane resolves routes.
+                        event: gs_s("event"),
+                        data: gs("data"),
+                    },
                 };
                 pending.lock().unwrap().insert(host_call_id.clone(), op_tx);
                 tx.send(Frame::Host(HostFrame::Call(HostCall {
@@ -326,6 +333,7 @@ enum HostOpArm {
     Next,
     Dispose,
     StoreEmit,
+    Emit,
 }
 
 

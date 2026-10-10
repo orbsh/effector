@@ -238,7 +238,7 @@ fn bind_event_handlers(engine: &mut Engine) {
 /// they error if ever invoked (introspection never calls a handler).
 fn register_ctx_stubs(engine: &mut Engine) {
     const CTX_STUBS: &[&str] = &[
-        "ctx.invoke", "ctx.store", "ctx.schema",
+        "ctx.invoke", "ctx.store", "ctx.schema", "ctx.emit",
         "ctx.queue.depth", "ctx.queue.skip_to_head",
         "ctx.timer.register", "ctx.timer.cancel",
         "ctx.iterate.start", "ctx.iterate.next", "ctx.iterate.dispose",

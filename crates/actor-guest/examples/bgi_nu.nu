@@ -28,6 +28,13 @@ def ctx.store [instruction] {
     $rep.host_reply.ok? | default {__error: ($rep.host_reply.error? | default "")}
 }
 
+# ctx.emit (ADR-0043 §5): fire-and-forget by contract — the parent
+# resolves routes, sends, and answers NOTHING; a publish failure lands
+# on the parent's stderr. Reading a reply here would block the loop.
+def ctx.emit [event data] {
+    print ({host: {type: "emit", args: {event: $event, data: $data}}} | to json --raw)
+}
+
 def --env interface_schema [] {
     { receives: { echo: {}, sum: {}, ctx_round_trip: {}, store_round_trip: {}, count: {} },
       wildcard_receives: [],

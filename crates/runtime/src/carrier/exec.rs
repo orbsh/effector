@@ -85,21 +85,31 @@ enum TypedHostFrame {
     /// `ctx.schema` (bridge key `schema`): the declared schema, no arguments.
     #[serde(rename = "schema")]
     Schema {},
+    /// `ctx.emit` (bridge key `emit`): fire-and-forget by contract
+    /// (ADR-0043 §5) — the parent resolves routes and sends, the guest
+    /// does NOT wait for a reply; no host_reply frame goes back, and a
+    /// publish failure lands on the parent's stderr, never as an error
+    /// value into the child. Reliability rides the event log / pull
+    /// planes, not this frame.
+    #[serde(rename = "emit")]
+    Emit { args: Value },
 }
 
 impl TypedHostFrame {
     /// Map onto the bridge's named-function table (ADR-0043: the names
     /// are the dotted ctx method paths — the in-process carriers inject
     /// these same keys as one `ctx` object; the typed frame is the
-    /// process seam's shape, not a new vocabulary). Returns (fn name, arg).
-    fn dispatch(self) -> (&'static str, Value) {
+    /// process seam's shape, not a new vocabulary). Returns
+    /// (fn name, arg, expects_reply).
+    fn dispatch(self) -> (&'static str, Value, bool) {
         match self {
-            TypedHostFrame::Invoke { args } => ("invoke", args),
-            TypedHostFrame::IterateStart { args } => ("iterate.start", args),
-            TypedHostFrame::IterateNext { args } => ("iterate.next", args),
-            TypedHostFrame::IterateDispose { args } => ("iterate.dispose", args),
-            TypedHostFrame::Store { op } => ("store", op),
-            TypedHostFrame::Schema {} => ("schema", Value::Null),
+            TypedHostFrame::Invoke { args } => ("invoke", args, true),
+            TypedHostFrame::IterateStart { args } => ("iterate.start", args, true),
+            TypedHostFrame::IterateNext { args } => ("iterate.next", args, true),
+            TypedHostFrame::IterateDispose { args } => ("iterate.dispose", args, true),
+            TypedHostFrame::Store { op } => ("store", op, true),
+            TypedHostFrame::Schema {} => ("schema", Value::Null, true),
+            TypedHostFrame::Emit { args } => ("emit", args, false),
         }
     }
 }
@@ -367,16 +377,30 @@ impl BgiSession {
                 // verb / shape is a decode failure, an error value back
                 // into the child (no silent unknown-op table miss). The
                 // store payload is never parsed here (schema-blind).
-                let outcome = match serde_json::from_value::<TypedHostFrame>(host.clone()) {
-                    Ok(typed) => {
-                        let (name, arg) = typed.dispatch();
-                        match self.host.functions.get(name) {
-                            Some(f) => (f)(arg),
-                            None => Err(anyhow!("bgi carrier: host fn '{name}' not bridged")),
-                        }
+                // Exception: `emit` is fire-and-forget by contract
+                // (ADR-0043 §5) — it rides the same dispatch but answers
+                // NOTHING; a publish failure lands on stderr, never as an
+                // error value into a guest that stopped listening.
+                let typed = serde_json::from_value::<TypedHostFrame>(host.clone());
+                let (name, arg, expects_reply) = match typed {
+                    Ok(typed) => typed.dispatch(),
+                    Err(e) => {
+                        let reply =
+                            serde_json::json!({"host_reply": {"error": format!("bgi carrier: bad host frame: {e}")}});
+                        self.send_reply(&reply)?;
+                        continue;
                     }
-                    Err(e) => Err(anyhow!("bgi carrier: bad host frame: {e}")),
                 };
+                let outcome = match self.host.functions.get(name) {
+                    Some(f) => (f)(arg),
+                    None => Err(anyhow!("bgi carrier: host fn '{name}' not bridged")),
+                };
+                if !expects_reply {
+                    if let Err(e) = outcome {
+                        eprintln!("[bgi] ctx.{name} (fire-and-forget) failed: {e}");
+                    }
+                    continue;
+                }
                 let reply = match outcome {
                     Ok(v) => serde_json::json!({"host_reply": {"ok": v}}),
                     Err(e) => serde_json::json!({"host_reply": {"error": e.to_string()}}),
