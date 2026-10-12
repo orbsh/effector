@@ -22,8 +22,8 @@ pub trait ResidentSession: Send {
     /// job seam: every handler response is an envelope, and `call` is
     /// the raw carrier-internal primitive underneath it, never the
     /// dispatch seam). Envelope-mode carriers (steel,
-    /// wasm — languages without a host-drivable generator protocol; a
-    /// Rust wasm guest maps its own `Iterator` inside the
+    /// the process carriers — languages without a host-drivable generator
+    /// protocol; the handler writes the envelope explicitly
     /// module and returns the envelope at the ABI edge) delegate to
     /// `envelope_pull`; carriers with a native generator the host can
     /// park and step (python) override and never let the handler see
@@ -31,7 +31,7 @@ pub trait ResidentSession: Send {
     /// `{done: true, value: <ret>}` — the carrier wraps, the handler
     /// never writes the envelope sugar for an invoke (0036 §2).
     fn iterate(&mut self, op: StreamOp) -> Result<Value>;
-    /// Downcast support (carrier-specific introspection, e.g. wasm's
+    /// Downcast support (carrier-specific introspection, e.g.
     /// export-list derivation).
     fn as_any(&mut self) -> &mut dyn std::any::Any;
 }
@@ -334,7 +334,6 @@ fn spawn_session(
     // other arms ignore it (the spawn spec is argv) or one or both.
     // `encoding` is consumed by the process carriers only (bgi/exec —
     // ADR-0037 §2); the embedded carriers have no channel.
-    #[cfg_attr(not(feature = "wasmtime"), allow(unused_variables))]
     let _ = (language, source, host, sandbox, encoding);
     Ok(match language {
         #[cfg(feature = "steel")]
@@ -366,8 +365,6 @@ fn spawn_session(
         }
         // Wasm compiles AT SPAWN (from_source) — its `load` is a no-op;
         // other carriers load lazily inside `load`. Same session shape.
-        #[cfg(feature = "wasmtime")]
-        "wasmtime" => Box::new(super::wasmtime::WasmSession::from_source(source, host)?),
         other => anyhow::bail!("language not resident-carried by this effector build: {other}"),
     })
 }

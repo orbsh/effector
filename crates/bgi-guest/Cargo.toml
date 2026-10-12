@@ -13,3 +13,11 @@ anyhow = "1"
 [[example]]
 name = "bgi_demo"
 crate-type = ["bin"]
+
+[[example]]
+name = "bgi_loop"
+crate-type = ["bin"]
+
+[[example]]
+name = "one_shot"
+crate-type = ["bin"]

@@ -85,8 +85,6 @@ pub type ExecResult = anyhow::Result<Value>;
 pub mod steel;
 #[cfg(feature = "python")]
 pub mod python;
-#[cfg(feature = "wasmtime")]
-pub mod wasmtime;
 pub mod exec;
 pub mod session;
 
@@ -98,8 +96,6 @@ pub fn execute(language: &str, _req: ExecRequest) -> anyhow::Result<Value> {
         "steel" => anyhow::bail!("steel is resident-only: use carrier::session"),
         #[cfg(feature = "python")]
         "python" => anyhow::bail!("python is resident-only: use carrier::session"),
-        #[cfg(feature = "wasmtime")]
-        "wasmtime" => anyhow::bail!("wasmtime is resident-only: use carrier::session"),
         other => anyhow::bail!("language not carried by this effector build: {other}"),
     }
 }
@@ -125,39 +121,6 @@ pub fn introspect_encoded(
         "steel" => steel::introspect(source),
         #[cfg(feature = "python")]
         "python" => python::introspect(source),
-        #[cfg(feature = "wasmtime")]
-        "wasmtime" => {
-            // Explicit `interface_schema` export wins; otherwise the
-            // receives half derives from the export list. One throwaway
-            // session, same shape as every carrier's introspection.
-            // The bridge carries a STUB `store.frame` (the steel register_ctx_stubs
-            // precedent): a wasm storage module imports aura_host.store.frame, but
-            // at introspection time no store plan exists — the import must
-            // be satisfied for instantiation without being callable (the
-            // schema export is a pure declaration, never a frame write).
-            let mut stub = HostBridge::default();
-            stub.functions.insert(
-                "store.frame".into(),
-                std::sync::Arc::new(|_arg: Value| {
-                    anyhow::bail!("ctx.store.frame is not callable during introspection")
-                }),
-            );
-            let sessions = session::Sessions::new();
-            sessions.with_session(
-                "__introspect",
-                language,
-                source,
-                Some(&stub),
-                &crate::sandbox::SandboxPolicy::None,
-                |s: &mut dyn crate::carrier::session::ResidentSession| match s
-                    .as_any()
-                    .downcast_mut::<wasmtime::WasmSession>()
-                {
-                    Some(w) => w.introspect(),
-                    None => s.call(crate::carrier::wasmtime::SCHEMA, &Value::Null),
-                },
-            )
-        }
         // Languages without collectors: the script hand-writes the whole
         // `interface_schema` — run it in a THROWAWAY resident session
         // (load, call the schema function, drop). Same contract, no

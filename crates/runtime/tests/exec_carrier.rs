@@ -4,9 +4,9 @@
 //! (exec — the `one_shot` fixture: no protocol, one JSON in, one JSON
 //! out, nothing survives the call).
 //!
-//! Fixtures are built by the workspace (`cargo build -p actor-guest
-//! --examples`); a missing binary fails the test loudly — a stale build
-//! is a recipe error, never a skip.
+//! Fixtures are built by the workspace (`cargo build -p bgi-guest
+//! --examples`; the nu author script lives beside them); a missing binary
+//! fails the test loudly — a stale build is a recipe error, never a skip.
 
 use effector_runtime::carrier::session::StreamOp;
 use effector_runtime::carrier::HostBridge;
@@ -27,7 +27,7 @@ fn bin(name: &str) -> String {
         .join(format!("../../target/debug/examples/{name}"));
     assert!(
         path.exists(),
-        "{name} missing — build it: cargo build -p actor-guest --examples"
+        "{name} missing — build it: cargo build -p bgi-guest --examples"
     );
     path.to_str().unwrap().to_string()
 }
@@ -313,7 +313,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
 /// stdin only because nu cannot block-read a pipe.
 fn nu_bgi_spec() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../actor-guest/examples/bgi_nu.nu");
+        .join("../bgi-guest/examples/bgi_nu.nu");
     assert!(path.exists(), "nu bgi fixture missing: {}", path.display());
     format!("nu {}", path.display())
 }

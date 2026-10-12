@@ -23,17 +23,14 @@ im-rc = { version = "15.1.0", optional = true }
 pyo3 = { version = "0.29", optional = true, features = ["auto-initialize"] }
 okm-python = { git = "https://github.com/orbsh/okm", default-features = false, optional = true }
 okm-steel = { git = "https://github.com/orbsh/okm", optional = true }
-wasmtime = { version = "34", optional = true }
 # bgi/exec CBOR encoding (ADR-0037 §2, dual-protocol) — not feature-gated:
 # the process carriers have no gate; wasmtime rides it too.
 ciborium = { version = "0.2" }
-base64 = { version = "0.22", optional = true }
 
 [features]
 default = ["steel"]
 steel = ["dep:steel-core", "dep:im-rc", "dep:okm-steel"]
 python = ["dep:pyo3", "dep:okm-python"]
-wasmtime = ["dep:wasmtime", "dep:base64"]
 # (the nushell PTY feature retired per ADR-0035 §6 — nu rides the bgi
 # carrier's fifo adapter, which needs no feature gate: spawn + pipes only.)
 
