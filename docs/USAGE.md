@@ -93,7 +93,7 @@ The first frame the effector sends is `register`; the control plane must answer
 | CP → effector | `registered` | handshake accepted |
 | CP → effector | `call` | one operation |
 | effector → CP | `result` | that operation's answer |
-| effector → CP | `host` (`kind: "call"`) | a `ctx_*` host call the running script made |
+| effector → CP | `host` (`kind: "call"`) | a `ctx.*` host call the running script made |
 | CP → effector | `host` (`kind: "result"`) | the answer to that host call |
 
 ### 4.1 `call` / `result`
@@ -143,12 +143,15 @@ language is an error value in `result`, not a dropped call.
   "stream": "stream-13",
   "session": "heavy/1",
   "entry": "main",
-  "language": "wasmtime",
+  "language": "bgi",
   "args": {},
-  "code": { "type": "link", "url": "https://cdn.example/op.wasm",
+  "code": { "type": "link", "url": "https://cdn.example/op",
             "version": "sha256:abc123", "expected_sha256": "abc123" }
 }
 ```
+
+(The `wasmtime` carrier retired with PLAN 4.21 — compiled languages ride `bgi`
+native children; `code.link` serves the content-addressed binary the same way.)
 
 `code` has exactly two forms:
 
@@ -188,6 +191,14 @@ The mapping from script function to wire op:
 | `ctx.iterate.next` | `iterate_next` | `stream_id` |
 | `ctx.iterate.dispose` | `iterate_dispose` | `stream_id` |
 | `ctx.store` | `store_emit` | `instruction` — one okm Collection instruction, carried as data (`{"collection": …, "op": …, …}` as the script wrote it; the control plane executes it against the type's own storage plan) |
+| `ctx.emit` | `emit` | `event`, `data` — the control plane resolves routes in its realm; fire-and-forget on the business plane, still request/response at the frame layer (the answer is Null) |
+
+**Remote-plane scope (ADR-0043 sync note)**: the wire carries the arms above —
+`timer.register/cancel`, `queue.depth/skip_to_head`, and `schema` are
+in-process-carrier members without remote arms yet. A remote booth calling
+them gets an unbound name (steel: load failure; python: AttributeError) —
+not a silent no-op. They join the wire the same way `emit` did: protocol
+enum arm + control-plane resolver + effector binding, one wave.
 
 ```json
 {

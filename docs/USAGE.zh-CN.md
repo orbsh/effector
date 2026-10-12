@@ -67,7 +67,7 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
 | CP → effector | `registered` | 握手被接受 |
 | CP → effector | `call` | 一个操作 |
 | effector → CP | `result` | 该操作的应答 |
-| effector → CP | `host`（`kind: "call"`） | 运行中的脚本发起的 `ctx_*` 宿主调用 |
+| effector → CP | `host`（`kind: "call"`） | 运行中的脚本发起的 `ctx.*` 宿主调用 |
 | CP → effector | `host`（`kind: "result"`） | 该宿主调用的应答 |
 
 ### 4.1 `call` / `result`
@@ -102,12 +102,15 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
   "stream": "stream-13",
   "session": "heavy/1",
   "entry": "main",
-  "language": "wasmtime",
+  "language": "bgi",
   "args": {},
-  "code": { "type": "link", "url": "https://cdn.example/op.wasm",
+  "code": { "type": "link", "url": "https://cdn.example/op",
             "version": "sha256:abc123", "expected_sha256": "abc123" }
 }
 ```
+
+（`wasmtime` 载体随 PLAN 4.21 退役——编译型语言骑 `bgi` 原生子进程；`code.link` 以同样
+的内容寻址方式投递二进制。）
 
 `code` 只有两种形态：
 
@@ -134,6 +137,12 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
 | `ctx.iterate.next` | `iterate_next` | `stream_id` |
 | `ctx.iterate.dispose` | `iterate_dispose` | `stream_id` |
 | `ctx.store` | `store_emit` | `instruction` —— 一条 okm Collection 指令，作为数据承载（脚本写出的 `{"collection": …, "op": …, …}` 原样；控制端按该类型自己的存储计划执行） |
+| `ctx.emit` | `emit` | `event`、`data` —— 控制端在自己的 realm 解析路由；业务面 fire-and-forget，帧层仍是请求/应答（成功应答为 Null） |
+
+**远程面范围（ADR-0043 同步注记）**：线上承载上表各臂——`timer.register/cancel`、
+`queue.depth/skip_to_head`、`schema` 目前是进程内 carrier 的成员，尚无远程臂。远程摊位
+调用它们得到的是未绑定名（steel：加载失败；python：AttributeError）——不是静默 no-op。
+它们以 `emit` 同样的方式上线：协议 enum 臂 + 控制端 resolver + effector 绑定，一波完成。
 
 ```json
 {
