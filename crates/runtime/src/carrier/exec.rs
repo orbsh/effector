@@ -1,8 +1,8 @@
-//! BGI + exec carriers (ADR-0035): out-of-process booths in two shapes
+//! Induction + exec carriers (ADR-0035): out-of-process booths in two shapes
 //! that do NOT share a protocol — the fcgi/cgi split, named precisely.
 //!
-//! **bgi (Booth Gateway Interface — resident, framed)**: the child lives
-//! as long as the residency and speaks the line protocol — request
+//! **induction (resident, framed)**: the child lives as long as the residency
+//! and speaks the line protocol — request
 //! frames in, result frames out, ctx round trips inline (host frames the
 //! parent answers). The author's code runs a loop: its own, or the
 //! nushell fifo adapter (the "fcgi-adapts-cgi" move — see `BgiKind`).
@@ -145,10 +145,10 @@ impl BgiSession {
             let author = argv
                 .get(1)
                 .filter(|_| argv.len() == 2)
-                .ok_or_else(|| anyhow!("bgi/nu adapter: spawn spec must be exactly [nu <author.nu>]"))?;
+                .ok_or_else(|| anyhow!("induction/nu adapter: spawn spec must be exactly [nu <author.nu>]"))?;
             anyhow::ensure!(
                 encoding == Encoding::Json,
-                "bgi/nu adapter: nushell speaks JSON-lines only (no CBOR codec in its stdlib) — declare encoding json"
+                "induction/nu adapter: nushell speaks JSON-lines only (no CBOR codec in its stdlib) — declare encoding json"
             );
             return Self::spawn_fifo(Path::new(author), host, policy);
         }
@@ -174,7 +174,7 @@ impl BgiSession {
         policy: &crate::sandbox::SandboxPolicy,
     ) -> Result<Self> {
         if !author.exists() {
-            anyhow::bail!("bgi/nu adapter: author script {} not found", author.display());
+            anyhow::bail!("induction/nu adapter: author script {} not found", author.display());
         }
         // Sandbox dirs follow the PTY carrier's precedent: under a
         // Bubblewrap policy /tmp is tmpfs-mounted (files written outside
@@ -196,10 +196,10 @@ impl BgiSession {
             // Unlink a same-named node first: mkfifo fails on leftovers.
             let _ = std::fs::remove_file(fifo);
             let c = CString::new(fifo.to_string_lossy().as_bytes())
-                .map_err(|_| anyhow!("bgi/nu adapter: fifo path has interior NUL"))?;
+                .map_err(|_| anyhow!("induction/nu adapter: fifo path has interior NUL"))?;
             if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
                 anyhow::bail!(
-                    "bgi/nu adapter: mkfifo {}: {}",
+                    "induction/nu adapter: mkfifo {}: {}",
                     fifo.display(),
                     std::io::Error::last_os_error()
                 );
@@ -306,21 +306,21 @@ impl BgiSession {
                     let reader = match &mut self.kind {
                         BgiKind::Pipes { reader, .. } | BgiKind::Fifo { reader, .. } => reader
                             .as_mut()
-                            .ok_or_else(|| anyhow!("bgi carrier: no stdout"))?,
+                            .ok_or_else(|| anyhow!("induction carrier: no stdout"))?,
                     };
                     let n = reader
                         .read_line(&mut line)
-                        .map_err(|e| anyhow!("bgi carrier: read: {e}"))?;
+                        .map_err(|e| anyhow!("induction carrier: read: {e}"))?;
                     if n == 0 {
                         self.teardown();
-                        return Err(anyhow!("bgi carrier: child closed stdout (exited or crashed)"));
+                        return Err(anyhow!("induction carrier: child closed stdout (exited or crashed)"));
                     }
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
                     serde_json::from_str(trimmed)
-                        .map_err(|e| anyhow!("bgi carrier: malformed frame {trimmed}: {e}"))?
+                        .map_err(|e| anyhow!("induction carrier: malformed frame {trimmed}: {e}"))?
                 }
                 Encoding::Cbor => {
                     // Self-delimited CBOR reading: decode_one_value from a
@@ -330,10 +330,10 @@ impl BgiSession {
                     let rd: &mut dyn Read = match &mut self.kind {
                         BgiKind::Pipes { reader, .. } | BgiKind::Fifo { reader, .. } => reader
                             .as_mut()
-                            .ok_or_else(|| anyhow!("bgi carrier: no stdout"))?,
+                            .ok_or_else(|| anyhow!("induction carrier: no stdout"))?,
                     };
                     ciborium::de::from_reader(rd)
-                        .map_err(|e| anyhow!("bgi carrier: malformed cbor frame: {e}"))?
+                        .map_err(|e| anyhow!("induction carrier: malformed cbor frame: {e}"))?
                 }
             };
             if msg.get("host").is_some() {
@@ -344,7 +344,7 @@ impl BgiSession {
                 // store payload is never parsed here (schema-blind).
                 let Some(host) = HostFrame::from_value(&msg) else {
                     let reply = Reply::error(format!(
-                        "bgi carrier: bad host frame: {}",
+                        "induction carrier: bad host frame: {}",
                         msg["host"]
                     ));
                     self.send_reply(&reply.to_value())?;
@@ -375,7 +375,7 @@ impl BgiSession {
             if let Some(result) = ResultFrame::from_value(&msg) {
                 return Ok(result.result);
             }
-            return Err(anyhow!("bgi carrier: unexpected frame {msg}"));
+            return Err(anyhow!("induction carrier: unexpected frame {msg}"));
         }
     }
 
@@ -393,7 +393,7 @@ impl BgiSession {
         };
         match self.host.functions.get(name) {
             Some(f) => (f)(arg),
-            None => Err(anyhow!("bgi carrier: host fn '{name}' not bridged")),
+            None => Err(anyhow!("induction carrier: host fn '{name}' not bridged")),
         }
     }
 
@@ -408,15 +408,15 @@ impl BgiSession {
             BgiKind::Pipes { stdin, .. } => {
                 let stdin = stdin
                     .as_mut()
-                    .ok_or_else(|| anyhow!("bgi carrier: stdin closed"))?;
+                    .ok_or_else(|| anyhow!("induction carrier: stdin closed"))?;
                 match self.encoding {
                     Encoding::Json => {
                         writeln!(stdin, "{frame}")
-                            .map_err(|e| anyhow!("bgi carrier: write request: {e}"))?;
+                            .map_err(|e| anyhow!("induction carrier: write request: {e}"))?;
                     }
                     Encoding::Cbor => {
                         ciborium::ser::into_writer(frame, &mut *stdin)
-                            .map_err(|e| anyhow!("bgi carrier: write cbor request: {e}"))?;
+                            .map_err(|e| anyhow!("induction carrier: write cbor request: {e}"))?;
                     }
                 }
                 stdin.flush()?;
@@ -429,7 +429,7 @@ impl BgiSession {
                         .map(|c| c.try_wait().ok().flatten().is_none())
                         .unwrap_or(false);
                     anyhow!(
-                        "bgi/nu adapter: write request {} (child alive: {alive}): {e}",
+                        "induction/nu adapter: write request {} (child alive: {alive}): {e}",
                         req.display()
                     )
                 })
@@ -445,15 +445,15 @@ impl BgiSession {
             BgiKind::Pipes { stdin, .. } => {
                 let stdin = stdin
                     .as_mut()
-                    .ok_or_else(|| anyhow!("bgi carrier: stdin closed"))?;
+                    .ok_or_else(|| anyhow!("induction carrier: stdin closed"))?;
                 match self.encoding {
                     Encoding::Json => {
                         writeln!(stdin, "{frame}")
-                            .map_err(|e| anyhow!("bgi carrier: write host_reply: {e}"))?;
+                            .map_err(|e| anyhow!("induction carrier: write host_reply: {e}"))?;
                     }
                     Encoding::Cbor => {
                         ciborium::ser::into_writer(frame, &mut *stdin)
-                            .map_err(|e| anyhow!("bgi carrier: write cbor host_reply: {e}"))?;
+                            .map_err(|e| anyhow!("induction carrier: write cbor host_reply: {e}"))?;
                     }
                 }
                 stdin.flush()?;
@@ -461,7 +461,7 @@ impl BgiSession {
             }
             BgiKind::Fifo { rep, .. } => {
                 fifo_write(rep, &frame.to_string()).map_err(|e| {
-                    anyhow!("bgi/nu adapter: write host_reply {}: {e}", rep.display())
+                    anyhow!("induction/nu adapter: write host_reply {}: {e}", rep.display())
                 })
             }
         }
@@ -708,7 +708,7 @@ impl ResidentSession for OneShotSession {
             }
             StreamOp::Next { .. } | StreamOp::Dispose { .. } => Err(anyhow!(
                 "exec carrier: one-shot booths carry no stream state (ADR-0035 — \
-                 the cgi shape is stateless by definition; use bgi for residency) \
+                 the cgi shape is stateless by definition; use induction for residency) \
                  — no stream is started"
             )),
         }
@@ -739,7 +739,7 @@ fn spawn_child(
 )> {
     let (head, rest) = argv
         .split_first()
-        .ok_or_else(|| anyhow!("exec/bgi carrier: empty spawn spec"))?;
+        .ok_or_else(|| anyhow!("exec/induction carrier: empty spawn spec"))?;
     let mut cmd = match policy {
         crate::sandbox::SandboxPolicy::None => {
             let mut c = Command::new(head);
@@ -770,7 +770,7 @@ fn spawn_child(
                 0,
                 Some("/bin/bash"),
             )
-            .map_err(|e| anyhow!("exec/bgi carrier: bwrap command: {e}"))?;
+            .map_err(|e| anyhow!("exec/induction carrier: bwrap command: {e}"))?;
             let mut c = Command::new("bash");
             c.arg("-c").arg(wrapped);
             c
@@ -790,14 +790,14 @@ fn spawn_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| anyhow!("exec/bgi carrier: spawn {head}: {e}"))?;
+        .map_err(|e| anyhow!("exec/induction carrier: spawn {head}: {e}"))?;
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("exec/bgi carrier: no stdin"))?;
+        .ok_or_else(|| anyhow!("exec/induction carrier: no stdin"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("exec/bgi carrier: no stdout"))?;
+        .ok_or_else(|| anyhow!("exec/induction carrier: no stdout"))?;
     Ok((child, stdin, BufReader::new(stdout)))
 }

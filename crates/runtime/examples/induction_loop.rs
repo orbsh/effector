@@ -1,6 +1,6 @@
-//! BGI carrier fixture (ADR-0035): a native bin speaking the framed
+//! Induction carrier fixture (ADR-0035): a native bin speaking the framed
 //! protocol — the contract a compiled Rust booth implements against
-//! (or links a shim to; the loop lives on the child side in bgi).
+//! (or links a shim to; the loop lives on the child side).
 //! One request in, one result out.
 //! `ctx_round_trip` answers a plain call with a child→parent ctx
 //! round trip (typed host frame → host_reply → result), proving the ctx

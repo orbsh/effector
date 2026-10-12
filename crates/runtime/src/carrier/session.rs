@@ -340,16 +340,15 @@ fn spawn_session(
         "steel" => Box::new(super::steel::SteelSession::new(host)?),
         #[cfg(feature = "python")]
         "python" => Box::new(super::python::PythonSession::new(host)?),
-        // BGI (ADR-0035, Booth Gateway Interface — the framed resident
-        // shape): the source string IS the argv (whitespace-separated,
-        // quoted-free — the spawn spec); the child lives as long as the
-        // session and runs the BGI loop over the line protocol. A `nu`
-        // head selects the two-fifo adapter shape inside the carrier
-        // (the nushell PTY carrier retired — one execution shape per
-        // language, the nu form is `bgi` with spec `nu <author.nu>`).
-        // Under a sandbox policy the whole spawn is bwrap-wrapped (the
-        // mount policy runs before exec).
-        "bgi" => {
+        // Induction (ADR-0035; the pipe protocol, ADR-0001): the source string
+        // IS the argv (whitespace-separated, quoted-free — the spawn spec);
+        // the child lives as long as the session and runs the framed loop
+        // over the line protocol. A `nu` head selects the two-fifo adapter
+        // shape inside the carrier (the nushell PTY carrier retired — one
+        // execution shape per language, the nu form is `induction` with
+        // spec `nu <author.nu>`). Under a sandbox policy the whole spawn is
+        // bwrap-wrapped (the mount policy runs before exec).
+        "induction" => {
             let argv: Vec<String> = shellish_split(source);
             Box::new(super::exec::BgiSession::spawn_wrapped(&argv, host, sandbox, encoding)?)
         }

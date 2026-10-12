@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 fn bgi_bin() -> String {
-    bin("bgi_loop")
+    bin("induction_loop")
 }
 
 fn one_shot_bin() -> String {
@@ -46,7 +46,7 @@ fn bgi_call_round_trip() {
     let out = s
         .with_session(
             "box/k1",
-            "bgi",
+            "induction",
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -61,7 +61,7 @@ fn bgi_call_round_trip() {
     let out2 = s
         .with_session(
             "box/k1",
-            "bgi",
+            "induction",
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -95,7 +95,7 @@ fn bgi_host_call_crosses_the_seam() {
     let out = s
         .with_session(
             "box/k2",
-            "bgi",
+            "induction",
             &argv,
             Some(&bridge),
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -128,7 +128,7 @@ fn bgi_iterate_stream() {
     let pull = |op: StreamOp| -> Value {
         s.with_session(
             "box/k3",
-            "bgi",
+            "induction",
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -163,7 +163,7 @@ fn bgi_iterate_stream() {
     let late = s
         .with_session(
             "box/k3",
-            "bgi",
+            "induction",
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -248,7 +248,7 @@ fn exec_oneshot_iterate_is_a_named_error() {
     );
     let err = r.unwrap_err().to_string();
     assert!(
-        err.contains("stateless by definition") && err.contains("bgi"),
+        err.contains("stateless by definition") && err.contains("induction"),
         "one-shot iterate names the design: {err}"
     );
 }
@@ -261,7 +261,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     let s = sessions();
     let argv = bgi_bin();
     // Spawn + one call.
-    s.with_session("box/k4", "bgi", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
+    s.with_session("box/k4", "induction", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
         sess.call("echo", &json!(1))
     })
     .unwrap();
@@ -271,7 +271,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     let pid = s
         .with_session(
             "box/k4",
-            "bgi",
+            "induction",
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -299,7 +299,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     }
     assert!(swept.contains(&"box/k4".to_string()), "the dead slot is swept: {swept:?}");
     let out = s
-        .with_session("box/k4", "bgi", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
+        .with_session("box/k4", "induction", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
             sess.call("echo", &json!("after respawn"))
         })
         .unwrap();
@@ -314,7 +314,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
 /// stdin only because nu cannot block-read a pipe.
 fn nu_bgi_spec() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples/bgi_nu.nu");
+        .join("examples/induction_nu.nu");
     assert!(path.exists(), "nu bgi fixture missing: {}", path.display());
     format!("nu {}", path.display())
 }
@@ -329,7 +329,7 @@ fn nu_bgi_call_round_trip_and_residency() {
     let call = |event: &str, args: Value| {
         s.with_session(
             "box/nu1",
-            "bgi",
+            "induction",
             &spec,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -372,7 +372,7 @@ fn nu_bgi_host_call_crosses_the_seam() {
     let out = s
         .with_session(
             "box/nu2",
-            "bgi",
+            "induction",
             &spec,
             Some(&bridge),
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -397,7 +397,7 @@ fn nu_bgi_iterate_stream() {
     let pull = |op: StreamOp| -> Value {
         s.with_session(
             "box/nu3",
-            "bgi",
+            "induction",
             &spec,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -435,12 +435,12 @@ fn nu_bgi_iterate_stream() {
 fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
     let s = sessions();
     let spec = nu_bgi_spec();
-    s.with_session("box/nu4", "bgi", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
+    s.with_session("box/nu4", "induction", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
         sess.call("echo", &json!("x"))
     })
     .unwrap();
     let got = s
-        .with_session("box/nu4", "bgi", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
+        .with_session("box/nu4", "induction", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
             let b = sess
                 .as_any()
                 .downcast_mut::<effector_runtime::carrier::exec::BgiSession>()
@@ -494,7 +494,7 @@ fn bgi_cbor_round_trip() {
     let out = s
         .with_session_encoded(
             "box/cbor1",
-            "bgi",
+            "induction",
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -508,7 +508,7 @@ fn bgi_cbor_round_trip() {
     let out2 = s
         .with_session_encoded(
             "box/cbor1",
-            "bgi",
+            "induction",
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -547,7 +547,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
     let out = s
         .with_session_encoded(
             "box/cbor2",
-            "bgi",
+            "induction",
             &argv,
             Some(&bridge),
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -584,7 +584,7 @@ fn bgi_untyped_host_frame_fails_at_decode() {
     let out = s
         .with_session(
             "box/untyped",
-            "bgi",
+            "induction",
             &argv,
             Some(&bridge),
             &effector_runtime::sandbox::SandboxPolicy::None,
@@ -636,7 +636,7 @@ fn nu_cbor_declaration_is_an_error() {
     let err = s
         .with_session_encoded(
             "box/nu-cbor-bad",
-            "bgi",
+            "induction",
             &spec,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,

@@ -81,9 +81,10 @@ pub struct ToolCall {
     /// conventional `execute` entry when the code defines one, and is an
     /// error value otherwise.
     pub entry: String,
-    /// Carrier to execute in ("python", "steel", "wasmtime", "bgi",
-    /// "exec"; the retired "nushell" PTY carrier's booths declare
-    /// `bgi` with a `nu <author.nu>` spawn spec).
+    /// Carrier to execute in ("steel", "python", "induction", "exec"). The
+    /// framed resident process carrier is `induction` (the pipe protocol;
+    /// wasmtime retired with PLAN 4.21) — a nushell booth declares
+    /// `induction` with a `nu <author.nu>` spawn spec.
     pub language: String,
     /// Frame codec for the process carriers (bgi/exec, ADR-0037 §2 —
     /// dual-protocol by declaration; the type is the pipe protocol's own).
