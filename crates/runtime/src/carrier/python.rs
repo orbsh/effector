@@ -39,13 +39,40 @@ impl okm::pyo3_impl::Engine for ClosureEngine {
 /// registry while the module body runs. The collector is language-shape
 /// (a declaration registry); deriving schema semantics from it is the
 /// caller's (aura's) job.
-fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyModule>, Bound<'py, PyList>)> {
+/// Reserved lifecycle names (ADR-0043 §3) — the only `__` events `@on` /
+/// `ctx.on` accept; they land in the schema's `hooks` array, never in
+/// `receives`.
+pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake"];
+
+fn load_module<'py>(
+    py: Python<'py>,
+    source: &str,
+) -> PyResult<(Bound<'py, PyModule>, Bound<'py, PyList>, Py<PyList>)> {
     let module = PyModule::new(py, "operation")?;
     let registry = PyList::empty(py);
     let reg: Py<PyList> = registry.clone().unbind();
+    // Reserved lifecycle hooks (ADR-0043 §3): names collected via `@on` /
+    // `ctx.on` under `__`-prefixed events; the schema's `hooks` array
+    // carries them to engine.register (BoothType.hook_declared). NOT
+    // receives — lifecycle never enters the route registry.
+    let hooks = PyList::empty(py);
+    let hooks: Py<PyList> = hooks.unbind();
+    // The activation phase gate (ADR-0043 §3): a single-element list whose
+    // [0] flips to True at seal. After seal, `on`/`ctx.on` raise — dynamic
+    // subscription stays rejected, re-expressed as a phase gate.
+    let sealed = PyList::empty(py);
+    let sealed: Py<PyList> = sealed.unbind();
     let module_handle: Py<PyModule> = module.clone().unbind();
+    let sealed_handle = sealed.clone_ref(py);
+    let hooks_handle = hooks.clone_ref(py);
     let on = PyCFunction::new_closure(py, None, None, move |args, kw| {
         let py = unsafe { Python::assume_attached() };
+        // Phase gate FIRST (reads are never gated; registrations are).
+        if sealed_handle.bind(py).len() > 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op",
+            ));
+        }
         let reg = reg.bind(py);
         // Two call shapes: `on("event", key=...)` (declaration — returns an
         // identity decorator) and `decorator(fn)` (application — returns
@@ -59,6 +86,26 @@ fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyMod
                 }
             }
             let event = first.extract::<String>()?;
+            // Reserved hook names: the HOOK table, no key, never receives.
+            if event.starts_with("__") {
+                if !RESERVED_HOOKS.contains(&event.as_str()) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"
+                    )));
+                }
+                let h = hooks_handle.bind(py);
+                let name = event.clone();
+                let already = h
+                    .iter()
+                    .any(|v| v.extract::<String>().map(|s| s == name).unwrap_or(false));
+                if !already {
+                    h.append(event.clone())?;
+                }
+                // The binder below would also bind it as a module attribute —
+                // that is EXACTLY what the realm's Declared-hook dispatch
+                // calls (by the reserved name), so fall through to the same
+                // binder with an empty key.
+            }
             reg.append((event.clone(), key))?;
             // The returned decorator binds the function under the EVENT
             // NAME — event delivery addresses handlers by event name, so
@@ -76,7 +123,13 @@ fn load_module<'py>(py: Python<'py>, source: &str) -> PyResult<(Bound<'py, PyMod
             Ok::<_, pyo3::PyErr>(first.unbind())
         }
     })?;
+    // ctx.on (ADR-0043 §3): the resident alias of the @on collector — ONE
+    // registration channel, the decorator is the sugar lowering to it.
+    // Bound BEFORE the body runs so load-phase calls resolve; the phase
+    // gate + reserved-hook rules live in the shared closure above.
+    let on_alias = on.clone();
     module.add("on", on)?;
+    module.add("ctx_on_alias", on_alias)?;
 
     // ---- Schema-declaration decorators (ADR-0026 §4) ----
     // The DSL lives in okm (okm-python's OKM_SCHEMA_PY — one source, every
@@ -144,6 +197,19 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
     )
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("iterate prelude: {e}")))?;
 
+    // Early `ctx` namespace (ADR-0043 §3): carries ONLY `on` during the
+    // body run (the load phase). The full ctx object (host bridge)
+    // REPLACES this name after the body; its own `on` attribute is the
+    // GATE (a raising closure — handler-phase registration is the error
+    // value), so the surface reads uniformly at every phase.
+    let prelude = CString::new(
+        "import types as _aura_types\nctx = _aura_types.SimpleNamespace(on=ctx_on_alias)",
+    )?;
+    {
+        let globals = module.dict();
+        py.run(prelude.as_c_str(), Some(&globals), Some(&globals))?;
+    }
+
     // Execute the module body with the module dict as globals so the
     // decorators resolve `on` (bound above, before the body runs).
     let globals = module.dict();
@@ -176,6 +242,7 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
     };
     let reg_handle: Py<PyList> = registry.clone().unbind();
+    let hooks_handle: Py<PyList> = hooks.clone_ref(py);
     let explicit_fn: Option<Py<PyAny>> = module
         .getattr("interface_schema")
         .ok()
@@ -205,6 +272,23 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
             ("receives".to_string(), Value::Object(receives)),
             ("wildcard_receives".to_string(), Value::Array(wildcards)),
         ].into_iter().collect());
+        // Reserved hooks (ADR-0043 §3): the collected `__` names ride the
+        // schema as data — engine.register seeds BoothType.hook_declared.
+        {
+            let hs: Vec<String> = hooks_handle
+                .bind(py)
+                .iter()
+                .filter_map(|v| v.extract::<String>().ok())
+                .collect();
+            if !hs.is_empty() {
+                if let Value::Object(map) = &mut merged {
+                    map.insert(
+                        "hooks".into(),
+                        Value::Array(hs.into_iter().map(Value::String).collect()),
+                    );
+                }
+            }
+        }
         // Decorator-derived storage half: the load-time capture (see
         // above — assembled before injection could shadow the classes).
         // Empty block omitted so it cannot shadow an explicit-only
@@ -234,7 +318,7 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
         json_to_py(py, &merged).map(|v| v.unbind())
     })?;
     module.add("interface_schema", merge)?;
-    Ok((module, registry))
+    Ok((module, registry, hooks))
 }
 
 /// Resident python session: module loaded once, handlers called by name
@@ -266,7 +350,7 @@ impl PythonSession {
 impl super::session::ResidentSession for PythonSession {
     fn load(&mut self, source: &str) -> anyhow::Result<()> {
         Python::attach(|py| -> anyhow::Result<()> {
-            let (module, _registry) = load_module(py, source)
+            let (module, _registry, _hooks) = load_module(py, source)
                 .map_err(|e| anyhow::anyhow!("python load: {e}"))?;
             // Host functions bind once at load and stay for the session's
             // whole life — same marshal contract as the old one-shot path.
@@ -383,6 +467,17 @@ impl super::session::ResidentSession for PythonSession {
                         node.setattr(leaf[0], call)?;
                     }
                 }
+                // The phase gate lives HERE (ADR-0043 §3): the full ctx
+                // object's `on` raises — handler-phase registration is an
+                // error value, never a no-op, and never the load alias
+                // (structural: the assembled object carries the gate, the
+                // early namespace carried the alias).
+                let gate = PyCFunction::new_closure(py, None, None, move |_args, _kw| {
+                    Err::<pyo3::Py<pyo3::PyAny>, _>(pyo3::exceptions::PyRuntimeError::new_err(
+                        "ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op",
+                    ))
+                })?;
+                ctx_obj.setattr("on", gate)?;
                 module.add("ctx", ctx_obj)?;
             }
             // Storage injection (ADR-0037 4.16a): one Collection per
@@ -558,7 +653,7 @@ impl super::session::ResidentSession for PythonSession {
 /// add lifecycle etc.). Same call contract as steel/wasm/bgi.
 pub fn introspect(source: &str) -> ExecResult {
     Python::attach(|py| -> ExecResult {
-        let (module, _registry) = load_module(py, source)
+        let (module, _registry, _hooks) = load_module(py, source)
             .map_err(|e| anyhow::anyhow!("python load: {e}"))?;
         let schema_fn = module
             .getattr("interface_schema")

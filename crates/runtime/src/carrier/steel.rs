@@ -66,6 +66,29 @@ impl SteelSession {
             reg.register_into(&mut engine);
         }
         register_on_collector(&mut engine);
+        // ctx.on (ADR-0043 §3): the resident alias of the `on` primitive —
+        // one registration channel, the decorator sugar lowers to it. Bound
+        // BEFORE the source runs so the body's load-phase calls resolve;
+        // the phase gate lives in the shared collector (sealed after
+        // bind_event_handlers, error value after).
+        engine.register_fn("ctx.on", move |event: String, key: String, handler: SteelVal| -> Result<SteelVal, String> {
+            if SEALED.with(|s| *s.borrow()) {
+                return Err("ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op".to_string());
+            }
+            if event.starts_with("__") {
+                if !RESERVED_HOOKS.contains(&event.as_str()) {
+                    return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
+                }
+                HOOKS.with(|h| {
+                    if !h.borrow().contains(&event) {
+                        h.borrow_mut().push(event);
+                    }
+                });
+                return Ok(handler);
+            }
+            DECLARATIONS.with(|d| d.borrow_mut().push((event, key, handler.clone())));
+            Ok(handler)
+        });
         Ok(Self { engine })
     }
 }
@@ -203,17 +226,63 @@ thread_local! {
     /// (VM + builtins) stays on one thread, so thread-local is exact.
     static DECLARATIONS: std::cell::RefCell<Vec<(String, String, SteelVal)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Reserved-name lifecycle hooks collected via `ctx.on` / `on` at load
+    /// (names only — the handler binding rides DECLARATIONS' machinery is
+    /// WRONG for hooks: they are NOT receives; this is the separate hook
+    /// table the schema's `hooks` array carries, ADR-0043 §3).
+    static HOOKS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// The activation phase gate (ADR-0043 §3): set once the source has
+    /// run and handlers are bound. After it, `ctx.on` / `on` are error
+    /// values (dynamic subscription stays rejected — re-expressed as a
+    /// phase gate, not a no-op).
+    static SEALED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
 }
+
+/// Reserved lifecycle names (ADR-0043 §3) — the only names `ctx.on`
+/// accepts; they land in the schema's `hooks` array, never in `receives`.
+pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake"];
 
 /// Event-declaration collector, bound before the source runs: `(on "event"
 /// "key" handler)` records the declaration and returns the handler
-/// unchanged. Language-shape only; schema semantics are aura's.
+/// unchanged. This IS `ctx.on`'s resident-side body (decorators are sugar
+/// lowering to the same primitive, ADR-0043 §3): the load-phase registration
+/// channel. A call after SEALED is an error value — the phase gate, never a
+/// silent no-op. A `__`-prefixed event is a reserved lifecycle hook: it
+/// lands in the HOOKS table (not receives) and takes no key.
 fn register_on_collector(engine: &mut Engine) {
     DECLARATIONS.with(|d| d.borrow_mut().clear());
-    engine.register_fn("on", |event: String, key: String, handler: SteelVal| -> Result<SteelVal, String> {
+    HOOKS.with(|h| h.borrow_mut().clear());
+    SEALED.with(|s| *s.borrow_mut() = false);
+    engine.register_fn("on", move |event: String, key: String, handler: SteelVal| -> Result<SteelVal, String> {
+        if SEALED.with(|s| *s.borrow()) {
+            return Err("ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op".to_string());
+        }
+        if event.starts_with("__") {
+            if !RESERVED_HOOKS.contains(&event.as_str()) {
+                return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
+            }
+            HOOKS.with(|h| {
+                if !h.borrow().contains(&event) {
+                    h.borrow_mut().push(event);
+                }
+            });
+            return Ok(handler);
+        }
         DECLARATIONS.with(|d| d.borrow_mut().push((event, key, handler.clone())));
         Ok(handler)
     });
+}
+
+/// Seal the activation phase: after this, `on`/`ctx.on` are error values.
+/// Called once the source has run and handlers are bound.
+fn seal_activation() {
+    SEALED.with(|s| *s.borrow_mut() = true);
+}
+
+/// The collected reserved-hook names (schema `hooks` array).
+fn collected_hooks() -> Vec<String> {
+    HOOKS.with(|h| h.borrow().clone())
 }
 
 /// Bind collected handlers under their event names (register_value —
@@ -224,6 +293,16 @@ fn bind_event_handlers(engine: &mut Engine) {
             engine.register_value(event, handler.clone());
         }
     });
+    // Reserved hooks bind under their own names (the realm calls them by
+    // the reserved name through the session, ADR-0043 §3).
+    DECLARATIONS.with(|d| {
+        for (event, _key, handler) in d.borrow().iter() {
+            if event.starts_with("__") {
+                engine.register_value(event.as_str(), handler.clone());
+            }
+        }
+    });
+    seal_activation();
 }
 
 /// Ctx-fn stubs for the introspection throwaway engine ONLY (never the
@@ -249,6 +328,28 @@ fn register_ctx_stubs(engine: &mut Engine) {
             Err("ctx function called during introspection (no host bridge)".to_string())
         });
     }
+    // ctx.on is NOT a stub: at introspection the source runs for real (the
+    // collector must see its registrations), so the introspection engine
+    // binds the same primitive the resident session binds (register_on_collector
+    // owns the gate + the reserved-name rules, ADR-0043 §3).
+    engine.register_fn("ctx.on", move |event: String, key: String, handler: SteelVal| -> Result<SteelVal, String> {
+        if SEALED.with(|s| *s.borrow()) {
+            return Err("ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op".to_string());
+        }
+        if event.starts_with("__") {
+            if !RESERVED_HOOKS.contains(&event.as_str()) {
+                return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
+            }
+            HOOKS.with(|h| {
+                if !h.borrow().contains(&event) {
+                    h.borrow_mut().push(event);
+                }
+            });
+            return Ok(handler);
+        }
+        DECLARATIONS.with(|d| d.borrow_mut().push((event, key, handler.clone())));
+        Ok(handler)
+    });
     // The okm storage surface (collection fns + codec fns) follows the
     // SAME define-compile trap: a handler referencing `(collection-put!
     // ...)` or `(okm-encode-key! ...)` needs the names to exist at
@@ -280,6 +381,7 @@ pub fn introspect(source: &str) -> ExecResult {
     engine
         .run(source.to_owned())
         .map_err(|e| anyhow::anyhow!("steel load: {e:?}"))?;
+    seal_activation();
     let declarations = collected();
 
     // Derived half from the collected declarations.
@@ -296,17 +398,42 @@ pub fn introspect(source: &str) -> ExecResult {
         }
         receives.insert(event.clone(), Value::Object(entry));
     }
-    let derived = Value::Object([
+    let mut derived = Value::Object([
         ("receives".to_string(), Value::Object(receives)),
         ("wildcard_receives".to_string(), Value::Array(wildcards)),
     ].into_iter().collect());
+    // Reserved hooks (ADR-0043 §3): the collected `__` names ride the
+    // schema as data — engine.register seeds BoothType.hook_declared
+    // from this array.
+    let hooks = collected_hooks();
+    if !hooks.is_empty() {
+        if let Value::Object(map) = &mut derived {
+            map.insert(
+                "hooks".into(),
+                Value::Array(hooks.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
 
     // Explicit half: the script's own interface_schema, if it wrote one.
-    let explicit: Option<Value> = match engine
-        .call_function_by_name_with_args("interface_schema", vec![SteelVal::StringV("{}".into())])
-    {
-        Ok(v) => Some(steel_to_json(&v)?),
-        Err(_) => None,
+    // A missing fn = no explicit half; a fn that RAN and failed = the error
+    // surfaces (a gate violation inside the schema call is a declaration
+    // error, not a silent absence — the phase gate must stay observable).
+    // Value presence, not shape: a missing fn = no explicit half; a
+    // defined-but-not-function binding fails the call below and SURFACES
+    // (declaration error, not a silent absence). Same discipline as the
+    // phase gate: failures inside the schema call stay observable.
+    let has_explicit = engine.extract_value("interface_schema").is_ok();
+    let explicit: Option<Value> = if has_explicit {
+        Some(
+            steel_to_json(
+                &engine
+                    .call_function_by_name_with_args("interface_schema", vec![SteelVal::StringV("{}".into())])
+                    .map_err(|e| anyhow::anyhow!("interface_schema: {e:?}"))?,
+            )?,
+        )
+    } else {
+        None
     };
 
     Ok(match explicit {

@@ -61,3 +61,50 @@ fn steel_collector_and_explicit_receives_deep_merge() {
     assert_eq!(schema["receives"]["from.collector"]["key"], "uid", "collector wins the collision");
     assert_eq!(schema["receives"]["from.explicit"]["key"], "k", "explicit-only key contributes");
 }
+
+// ---- ADR-0043 §3: ctx.on / reserved hooks / the phase gate ----
+
+#[test]
+fn steel_ctx_on_collects_reserved_hooks_into_the_schema() {
+    // ctx.on IS the registration primitive (the decorator sugar lowers to
+    // it): a reserved `__` name lands in the schema's `hooks` array —
+    // never in receives — and the handler still binds under the reserved
+    // name for the realm's Declared-hook dispatch.
+    let src = r##"
+(ctx.on "__sleep" "" (lambda (args) #t))
+(ctx.on "__wake" "" (lambda (args) #t))
+(on "evt" "" (lambda (args) #t))
+"##;
+    let schema = introspect(src).unwrap();
+    let hooks = schema["hooks"].as_array().expect("hooks array present");
+    let names: Vec<&str> = hooks.iter().filter_map(|v| v.as_str()).collect();
+    assert!(names.contains(&"__sleep"), "hooks: {hooks:?}");
+    assert!(names.contains(&"__wake"), "hooks: {hooks:?}");
+    assert!(schema["receives"]["evt"].is_object(), "ordinary receive untouched");
+    assert!(schema["receives"].get("__sleep").is_none(), "hooks NEVER enter receives");
+}
+
+#[test]
+fn steel_unknown_reserved_name_is_a_declaration_error() {
+    let src = r##"
+(ctx.on "__nope" "" (lambda (args) #t))
+"##;
+    let err = introspect(src).unwrap_err();
+    assert!(format!("{err:#}").contains("not a reserved hook name"), "{err}");
+}
+
+#[test]
+fn steel_handler_phase_on_is_an_error_value() {
+    // The phase gate (ADR-0043 §3): a registration attempted from inside a
+    // HANDLER (here: the schema call runs after seal) is an error value —
+    // dynamic subscription stays rejected, never a silent no-op.
+    let src = r##"
+(define (sneaky args)
+  (on "late" "" (lambda (a) #t)))
+(define (interface_schema args)
+  (sneaky #f)
+  (hash "lifecycle" (hash "idle_ttl" "1m")))
+"##;
+    let err = introspect(src).unwrap_err();
+    assert!(format!("{err:#}").contains("phase gate"), "{err}");
+}
