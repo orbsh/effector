@@ -488,7 +488,7 @@ fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
 /// differs).
 #[test]
 fn bgi_cbor_round_trip() {
-    use effector_protocol::ChannelEncoding;
+    use induction_protocol::Encoding;
     let s = sessions();
     let argv = bgi_bin();
     let out = s
@@ -498,7 +498,7 @@ fn bgi_cbor_round_trip() {
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
-            ChannelEncoding::Cbor,
+            Encoding::Cbor,
             |sess| sess.call("echo", &json!({"x": 1})),
         )
         .unwrap();
@@ -512,7 +512,7 @@ fn bgi_cbor_round_trip() {
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
-            ChannelEncoding::Cbor,
+            Encoding::Cbor,
             |sess| sess.iterate(StreamOp::Start {
                 stream_id: "cs1".into(),
                 handler: "count".into(),
@@ -528,7 +528,7 @@ fn bgi_cbor_round_trip() {
 /// with a CBOR host_reply — the whole duplex on the binary codec.
 #[test]
 fn bgi_cbor_host_call_crosses_the_seam() {
-    use effector_protocol::ChannelEncoding;
+    use induction_protocol::Encoding;
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = {
         let seen = seen.clone();
@@ -551,7 +551,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
             &argv,
             Some(&bridge),
             &effector_runtime::sandbox::SandboxPolicy::None,
-            ChannelEncoding::Cbor,
+            Encoding::Cbor,
             |sess| sess.call("ctx_round_trip", &json!({"q": 1})),
         )
         .unwrap();
@@ -608,7 +608,7 @@ fn bgi_untyped_host_frame_fails_at_decode() {
 /// protocol-free shape, binary codec.
 #[test]
 fn exec_cbor_round_trip() {
-    use effector_protocol::ChannelEncoding;
+    use induction_protocol::Encoding;
     let s = sessions();
     let argv = one_shot_bin();
     let out = s
@@ -618,7 +618,7 @@ fn exec_cbor_round_trip() {
             &argv,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
-            ChannelEncoding::Cbor,
+            Encoding::Cbor,
             |sess| sess.call("echo", &json!({"n": 1})),
         )
         .unwrap();
@@ -630,7 +630,7 @@ fn exec_cbor_round_trip() {
 /// criterion routes it to JSON; the spec must say so).
 #[test]
 fn nu_cbor_declaration_is_an_error() {
-    use effector_protocol::ChannelEncoding;
+    use induction_protocol::Encoding;
     let s = sessions();
     let spec = nu_bgi_spec();
     let err = s
@@ -640,7 +640,7 @@ fn nu_cbor_declaration_is_an_error() {
             &spec,
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
-            ChannelEncoding::Cbor,
+            Encoding::Cbor,
             |sess| sess.call("echo", &json!({})),
         )
         .unwrap_err()

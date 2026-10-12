@@ -1,4 +1,5 @@
-use effector_protocol::{ChannelEncoding, CodeRef, ToolCall};
+use effector_protocol::{CodeRef, ToolCall};
+use induction_protocol::Encoding;
 
 #[test]
 fn roundtrip_call_carries_a_code_reference() {
@@ -9,7 +10,7 @@ fn roundtrip_call_carries_a_code_reference() {
         session: "notes/7".into(),
         entry: "read_file".into(),
         language: "bgi".into(),
-        encoding: ChannelEncoding::Json,
+        encoding: Encoding::Json,
         args: serde_json::json!({ "path": "~/notes.md" }),
         code: CodeRef {
             url: "http://code.local/ab12".into(),

@@ -104,7 +104,7 @@ pub fn execute(language: &str, _req: ExecRequest) -> anyhow::Result<Value> {
 /// assembles/merges `interface_schema` behind this one call — the host
 /// never knows how each language collects its declarations.
 pub fn introspect(language: &str, source: &str) -> anyhow::Result<Value> {
-    introspect_encoded(language, source, effector_protocol::ChannelEncoding::Json)
+    introspect_encoded(language, source, induction_protocol::Encoding::Json)
 }
 
 /// The declared-encoding form (ADR-0037 §2): the process carriers spawn
@@ -114,7 +114,7 @@ pub fn introspect(language: &str, source: &str) -> anyhow::Result<Value> {
 pub fn introspect_encoded(
     language: &str,
     source: &str,
-    encoding: effector_protocol::ChannelEncoding,
+    encoding: induction_protocol::Encoding,
 ) -> anyhow::Result<Value> {
     match language {
         #[cfg(feature = "steel")]

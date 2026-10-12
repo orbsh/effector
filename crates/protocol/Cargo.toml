@@ -8,5 +8,9 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 effector-config = { path = "../config" }
+# The pipe protocol owns its frame vocabulary and its codec declaration
+# (ADR-0001 §Consequences: effector takes induction-protocol for frames and
+# the codec enum) — `ToolCall.encoding` is that type, not a second copy.
+induction-protocol = { path = "../../../induction/crates/induction-protocol" }
 
 [dev-dependencies]

@@ -18,7 +18,7 @@
 //! (one self-delimited document per frame; Rust guests via ciborium).
 //! The carrier speaks the declared codec on both directions and the
 //! host frame vocabulary is typed under BOTH (orthogonal axes). The
-//! child learns the encoding through the `BGI_ENCODING` env var
+//! child learns the encoding through the `INDUCTION_ENCODING` env var
 //! ("json" | "cbor"; absent = json) — an env, not an appended argv:
 //! the fifo shape passes exactly [req rep] and a runtime-generated
 //! argument would break the author's `def main` arity.
@@ -49,8 +49,7 @@
 use super::session::{ResidentSession, StreamOp};
 use super::HostBridge;
 use anyhow::{anyhow, Result};
-use effector_protocol::ChannelEncoding;
-use serde::Deserialize;
+use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, HostFrame, Reply, ResultFrame};
 use serde_json::Value;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -59,60 +58,15 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 // ----------------------------------------------------------- frames --
 
-/// The typed host frame the child sends (ADR-0037 §2 — one stream, typed
-/// frames; the free-function-name lookup is retired). Deserializing the
-/// discriminator at the frame-structure layer turns a typo'd shape into a
-/// decode error (an error value back into the child), never a silent
-/// unknown-op miss in the bridge table. The store payload stays DATA —
-/// the effector never parses the okm instruction (schema-blind rule; §3's
-/// retirement is the ENTRY's retirement, not the instruction document's).
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum TypedHostFrame {
-    /// `ctx.invoke` (bridge key `invoke`): the target selection object rides as args.
-    Invoke { args: Value },
-    /// The ADR-0034 consumer legs — one frame type, the verb inside
-    /// (start carries the target selection, next/dispose the stream id).
-    #[serde(rename = "iterate.start")]
-    IterateStart { args: Value },
-    #[serde(rename = "iterate.next")]
-    IterateNext { args: Value },
-    #[serde(rename = "iterate.dispose")]
-    IterateDispose { args: Value },
-    /// `ctx.store` (bridge key `store`): one okm Collection instruction as data.
-    #[serde(rename = "store")]
-    Store { op: Value },
-    /// `ctx.schema` (bridge key `schema`): the declared schema, no arguments.
-    #[serde(rename = "schema")]
-    Schema {},
-    /// `ctx.emit` (bridge key `emit`): fire-and-forget by contract
-    /// (ADR-0043 §5) — the parent resolves routes and sends, the guest
-    /// does NOT wait for a reply; no host_reply frame goes back, and a
-    /// publish failure lands on the parent's stderr, never as an error
-    /// value into the child. Reliability rides the event log / pull
-    /// planes, not this frame.
-    #[serde(rename = "emit")]
-    Emit { args: Value },
-}
-
-impl TypedHostFrame {
-    /// Map onto the bridge's named-function table (ADR-0043: the names
-    /// are the dotted ctx method paths — the in-process carriers inject
-    /// these same keys as one `ctx` object; the typed frame is the
-    /// process seam's shape, not a new vocabulary). Returns
-    /// (fn name, arg, expects_reply).
-    fn dispatch(self) -> (&'static str, Value, bool) {
-        match self {
-            TypedHostFrame::Invoke { args } => ("invoke", args, true),
-            TypedHostFrame::IterateStart { args } => ("iterate.start", args, true),
-            TypedHostFrame::IterateNext { args } => ("iterate.next", args, true),
-            TypedHostFrame::IterateDispose { args } => ("iterate.dispose", args, true),
-            TypedHostFrame::Store { op } => ("store", op, true),
-            TypedHostFrame::Schema {} => ("schema", Value::Null, true),
-            TypedHostFrame::Emit { args } => ("emit", args, false),
-        }
-    }
-}
+// The frame vocabulary is NOT defined here (ADR-0001 §Consequences): a
+// request is `induction_protocol::CallFrame`, the child's ctx calls are
+// `HostFrame`/`Arm`, this side's answers are `Reply`, and the child's answer
+// is `ResultFrame`. One vocabulary home for every host of the protocol —
+// which is the whole point of the extraction (three spellings produced drift
+// no single side could see). The carrier's own job is the CHANNEL: spawn,
+// codec, the correlation counter, and routing an arm onto the bridge's
+// named-function table (the arm names ARE the bridge keys — the dotted ctx
+// method paths, ADR-0043).
 
 // --------------------------------------------------------------- bgi --
 
@@ -126,7 +80,7 @@ pub struct BgiSession {
     next_id: u64,
     /// Declared frame codec (ADR-0037 §2, dual-protocol): the channel's
     /// encoding for the session's whole life, both directions.
-    encoding: ChannelEncoding,
+    encoding: Encoding,
 }
 
 /// The request channel differs per language's blocking-read capability:
@@ -170,7 +124,7 @@ static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 impl BgiSession {
     /// Spawn and keep (no sandbox, JSON-lines).
     pub fn spawn(argv: &[String], host: Option<&HostBridge>) -> Result<Self> {
-        Self::spawn_wrapped(argv, host, &crate::sandbox::SandboxPolicy::None, ChannelEncoding::Json)
+        Self::spawn_wrapped(argv, host, &crate::sandbox::SandboxPolicy::None, Encoding::Json)
     }
 
     /// Spawn under the sandbox policy (bwrap wraps argv, §header) with
@@ -183,7 +137,7 @@ impl BgiSession {
         argv: &[String],
         host: Option<&HostBridge>,
         policy: &crate::sandbox::SandboxPolicy,
-        encoding: ChannelEncoding,
+        encoding: Encoding,
     ) -> Result<Self> {
         // The nushell adapter shape: `["nu", "<author.nu>"]` — the spawn
         // spec's argv head selects the channel, the protocol stays ONE.
@@ -193,7 +147,7 @@ impl BgiSession {
                 .filter(|_| argv.len() == 2)
                 .ok_or_else(|| anyhow!("bgi/nu adapter: spawn spec must be exactly [nu <author.nu>]"))?;
             anyhow::ensure!(
-                encoding == ChannelEncoding::Json,
+                encoding == Encoding::Json,
                 "bgi/nu adapter: nushell speaks JSON-lines only (no CBOR codec in its stdlib) — declare encoding json"
             );
             return Self::spawn_fifo(Path::new(author), host, policy);
@@ -260,7 +214,7 @@ impl BgiSession {
                 rep.display().to_string(),
             ],
             policy,
-            ChannelEncoding::Json,
+            Encoding::Json,
         )?;
         // The fifos replaced stdin as the channels; drop the pipe writer
         // (nu never reads it — leaving it open only delays child exit).
@@ -277,7 +231,7 @@ impl BgiSession {
             next_id: 0,
             // The fifo shape is the nu adapter — JSON by construction
             // (asserted at the spawn entry).
-            encoding: ChannelEncoding::Json,
+            encoding: Encoding::Json,
         })
     }
 
@@ -329,14 +283,25 @@ impl BgiSession {
     /// text lines, CBOR frames are self-delimited documents on the byte
     /// stream — the same serde_json Value shape under both codecs (only
     /// the codec changes; a CBOR frame carries no line terminator).
-    fn exchange(&mut self, mut frame: Value) -> Result<Value> {
-        let id = self.next_id;
+    fn exchange(
+        &mut self,
+        kind: FrameKind,
+        event: &str,
+        args: Value,
+        stream_id: Option<String>,
+    ) -> Result<Value> {
+        // The carrier owns the frame's identity (its own counter); the typed
+        // SHAPE comes from the protocol crate — including the `op` tag the
+        // iterate kinds write beside `kind`, which is that type's business.
+        let frame = match stream_id {
+            Some(id) => CallFrame::iterate(self.next_id, kind, event, args, id),
+            None => CallFrame::call(self.next_id, event, args),
+        };
         self.next_id += 1;
-        frame["id"] = Value::from(id);
-        self.send(&frame)?;
+        self.send(&frame.to_value())?;
         loop {
             let msg: Value = match self.encoding {
-                ChannelEncoding::Json => {
+                Encoding::Json => {
                     let mut line = String::new();
                     let reader = match &mut self.kind {
                         BgiKind::Pipes { reader, .. } | BgiKind::Fifo { reader, .. } => reader
@@ -357,7 +322,7 @@ impl BgiSession {
                     serde_json::from_str(trimmed)
                         .map_err(|e| anyhow!("bgi carrier: malformed frame {trimmed}: {e}"))?
                 }
-                ChannelEncoding::Cbor => {
+                Encoding::Cbor => {
                     // Self-delimited CBOR reading: decode_one_value from a
                     // byte reader that blocks per byte. ciborium reports
                     // an incomplete value as EOF on the reader, so the
@@ -371,47 +336,64 @@ impl BgiSession {
                         .map_err(|e| anyhow!("bgi carrier: malformed cbor frame: {e}"))?
                 }
             };
-            if let Some(host) = msg.get("host") {
-                // ONE ctx round trip: the typed frame discriminates at the
-                // frame-structure layer (ADR-0037 §2) — an unknown type /
-                // verb / shape is a decode failure, an error value back
-                // into the child (no silent unknown-op table miss). The
+            if msg.get("host").is_some() {
+                // ONE ctx round trip. The typed frame discriminates at the
+                // frame-structure layer (ADR-0037 §2): an unknown arm or a
+                // malformed shape is a decode failure — an error value back
+                // into the child, never a silent unknown-op table miss. The
                 // store payload is never parsed here (schema-blind).
-                // Exception: `emit` is fire-and-forget by contract
-                // (ADR-0043 §5) — it rides the same dispatch but answers
-                // NOTHING; a publish failure lands on stderr, never as an
-                // error value into a guest that stopped listening.
-                let typed = serde_json::from_value::<TypedHostFrame>(host.clone());
-                let (name, arg, expects_reply) = match typed {
-                    Ok(typed) => typed.dispatch(),
-                    Err(e) => {
-                        let reply =
-                            serde_json::json!({"host_reply": {"error": format!("bgi carrier: bad host frame: {e}")}});
-                        self.send_reply(&reply)?;
-                        continue;
-                    }
+                let Some(host) = HostFrame::from_value(&msg) else {
+                    let reply = Reply::error(format!(
+                        "bgi carrier: bad host frame: {}",
+                        msg["host"]
+                    ));
+                    self.send_reply(&reply.to_value())?;
+                    continue;
                 };
-                let outcome = match self.host.functions.get(name) {
-                    Some(f) => (f)(arg),
-                    None => Err(anyhow!("bgi carrier: host fn '{name}' not bridged")),
-                };
-                if !expects_reply {
+                let outcome = self.call_host(&host);
+                if !host.arm.has_reply() {
+                    // `emit` is fire-and-forget by CONTRACT (ADR-0043 §5):
+                    // the frame carries no reply, and a publish failure lands
+                    // on stderr — never as an error value into a guest that
+                    // stopped listening. The no-reply set is the protocol's
+                    // (Arm::has_reply), not a flag each host re-decides.
                     if let Err(e) = outcome {
-                        eprintln!("[bgi] ctx.{name} (fire-and-forget) failed: {e}");
+                        eprintln!(
+                            "[bgi] ctx.{} (fire-and-forget) failed: {e}",
+                            host.arm.as_str()
+                        );
                     }
                     continue;
                 }
                 let reply = match outcome {
-                    Ok(v) => serde_json::json!({"host_reply": {"ok": v}}),
-                    Err(e) => serde_json::json!({"host_reply": {"error": e.to_string()}}),
+                    Ok(v) => Reply::ok(v),
+                    Err(e) => Reply::error(e.to_string()),
                 };
-                self.send_reply(&reply)?;
+                self.send_reply(&reply.to_value())?;
                 continue;
             }
-            if let Some(result) = msg.get("result") {
-                return Ok(result.clone());
+            if let Some(result) = ResultFrame::from_value(&msg) {
+                return Ok(result.result);
             }
             return Err(anyhow!("bgi carrier: unexpected frame {msg}"));
+        }
+    }
+
+    /// Route one typed host frame onto the bridge's named-function table. The
+    /// arm's dotted name IS the bridge key (ADR-0043: the in-process carriers
+    /// inject the same keys as one `ctx` object — the process seam carries the
+    /// same vocabulary, typed).
+    fn call_host(&self, frame: &HostFrame) -> Result<Value> {
+        let name = frame.arm.as_str();
+        // `store` carries its instruction beside `type`, not under `args`
+        // (the schema-blind rule) — and it crosses as DATA either way.
+        let arg = match frame.arm {
+            Arm::Store => frame.op.clone().unwrap_or(Value::Null),
+            _ => frame.args.clone(),
+        };
+        match self.host.functions.get(name) {
+            Some(f) => (f)(arg),
+            None => Err(anyhow!("bgi carrier: host fn '{name}' not bridged")),
         }
     }
 
@@ -428,11 +410,11 @@ impl BgiSession {
                     .as_mut()
                     .ok_or_else(|| anyhow!("bgi carrier: stdin closed"))?;
                 match self.encoding {
-                    ChannelEncoding::Json => {
+                    Encoding::Json => {
                         writeln!(stdin, "{frame}")
                             .map_err(|e| anyhow!("bgi carrier: write request: {e}"))?;
                     }
-                    ChannelEncoding::Cbor => {
+                    Encoding::Cbor => {
                         ciborium::ser::into_writer(frame, &mut *stdin)
                             .map_err(|e| anyhow!("bgi carrier: write cbor request: {e}"))?;
                     }
@@ -465,11 +447,11 @@ impl BgiSession {
                     .as_mut()
                     .ok_or_else(|| anyhow!("bgi carrier: stdin closed"))?;
                 match self.encoding {
-                    ChannelEncoding::Json => {
+                    Encoding::Json => {
                         writeln!(stdin, "{frame}")
                             .map_err(|e| anyhow!("bgi carrier: write host_reply: {e}"))?;
                     }
-                    ChannelEncoding::Cbor => {
+                    Encoding::Cbor => {
                         ciborium::ser::into_writer(frame, &mut *stdin)
                             .map_err(|e| anyhow!("bgi carrier: write cbor host_reply: {e}"))?;
                     }
@@ -556,9 +538,7 @@ impl ResidentSession for BgiSession {
     }
 
     fn call(&mut self, handler: &str, args: &Value) -> Result<Value> {
-        self.exchange(serde_json::json!({
-            "kind": "call", "event": handler, "args": args,
-        }))
+        self.exchange(FrameKind::Call, handler, args.clone(), None)
     }
 
     /// ADR-0034 over the bgi seam, unified envelope (ADR-0036): the
@@ -569,22 +549,19 @@ impl ResidentSession for BgiSession {
     /// must write the envelope. The seam op set is FROZEN (ADR-0037 —
     /// this transitional JSON document retires with CBOR).
     fn iterate(&mut self, op: StreamOp) -> Result<Value> {
-        let (kind, event, op_tag, args, stream_id) = match &op {
+        let (kind, event, args, stream_id) = match &op {
             StreamOp::Start { stream_id, handler, args } => {
-                ("iterate_start", handler, "start", args, stream_id)
+                (FrameKind::IterateStart, handler, args, stream_id)
             }
             StreamOp::Next { stream_id, handler, args } => {
-                ("iterate_next", handler, "next", args, stream_id)
+                (FrameKind::IterateNext, handler, args, stream_id)
             }
             StreamOp::Dispose { stream_id, handler, args } => {
-                ("iterate_dispose", handler, "dispose", args, stream_id)
+                (FrameKind::IterateDispose, handler, args, stream_id)
             }
         };
         let fresh = matches!(op, StreamOp::Start { .. });
-        let reply = self.exchange(serde_json::json!({
-            "kind": kind, "event": event, "op": op_tag,
-            "args": args, "stream_id": stream_id,
-        }))?;
+        let reply = self.exchange(kind, event, args.clone(), Some(stream_id.clone()))?;
         match &op {
             // Dispose has no envelope reply (the routing entry already
             // left; the answer is success).
@@ -616,14 +593,14 @@ impl Drop for BgiSession {
 pub struct ExecOneShot {
     argv: Vec<String>,
     policy: crate::sandbox::SandboxPolicy,
-    encoding: ChannelEncoding,
+    encoding: Encoding,
 }
 
 impl ExecOneShot {
     pub fn new(
         argv: &[String],
         policy: &crate::sandbox::SandboxPolicy,
-        encoding: ChannelEncoding,
+        encoding: Encoding,
     ) -> Self {
         Self { argv: argv.to_vec(), policy: policy.clone(), encoding }
     }
@@ -638,12 +615,12 @@ impl ExecOneShot {
         // to run (and nushell's `open /dev/stdin` shape needs exactly
         // this: it delivers at writer-EOF).
         match self.encoding {
-            ChannelEncoding::Json => {
+            Encoding::Json => {
                 stdin
                     .write_all(request.to_string().as_bytes())
                     .map_err(|e| anyhow!("exec carrier: write request: {e}"))?;
             }
-            ChannelEncoding::Cbor => ciborium::ser::into_writer(&request, &mut stdin)
+            Encoding::Cbor => ciborium::ser::into_writer(&request, &mut stdin)
                 .map_err(|e| anyhow!("exec carrier: write cbor request: {e}"))?,
         }
         stdin.flush()?;
@@ -658,7 +635,7 @@ impl ExecOneShot {
             .wait()
             .map_err(|e| anyhow!("exec carrier: wait: {e}"))?;
         match self.encoding {
-            ChannelEncoding::Json => {
+            Encoding::Json => {
                 let out = String::from_utf8_lossy(&out);
                 let trimmed = out.trim();
                 if trimmed.is_empty() {
@@ -670,7 +647,7 @@ impl ExecOneShot {
                 serde_json::from_str(trimmed)
                     .map_err(|e| anyhow!("exec carrier: stdout is not one JSON document: {e}"))
             }
-            ChannelEncoding::Cbor => {
+            Encoding::Cbor => {
                 if out.is_empty() {
                     anyhow::bail!(
                         "exec carrier: empty stdout (exit {:?}) — a one-shot script must write its result document",
@@ -700,7 +677,7 @@ impl OneShotSession {
     pub fn new(
         argv: &[String],
         policy: &crate::sandbox::SandboxPolicy,
-        encoding: ChannelEncoding,
+        encoding: Encoding,
     ) -> Self {
         Self { inner: ExecOneShot::new(argv, policy, encoding) }
     }
@@ -754,7 +731,7 @@ impl ResidentSession for OneShotSession {
 fn spawn_child(
     argv: &[String],
     policy: &crate::sandbox::SandboxPolicy,
-    encoding: ChannelEncoding,
+    encoding: Encoding,
 ) -> Result<(
     Child,
     ChildStdin,
@@ -804,8 +781,8 @@ fn spawn_child(
     cmd.env(
         induction_protocol::ENCODING_ENV,
         match encoding {
-            ChannelEncoding::Json => "json",
-            ChannelEncoding::Cbor => "cbor",
+            Encoding::Json => "json",
+            Encoding::Cbor => "cbor",
         },
     );
     let mut child = cmd

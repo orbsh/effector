@@ -235,7 +235,7 @@ impl Sessions {
             source,
             host,
             sandbox,
-            effector_protocol::ChannelEncoding::Json,
+            induction_protocol::Encoding::Json,
             f,
         )
     }
@@ -255,7 +255,7 @@ impl Sessions {
         source: &str,
         host: Option<&HostBridge>,
         sandbox: &crate::sandbox::SandboxPolicy,
-        encoding: effector_protocol::ChannelEncoding,
+        encoding: induction_protocol::Encoding,
         f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
     ) -> Result<Value> {
         let slot = {
@@ -328,7 +328,7 @@ fn spawn_session(
     source: &str,
     host: Option<&HostBridge>,
     sandbox: &crate::sandbox::SandboxPolicy,
-    encoding: effector_protocol::ChannelEncoding,
+    encoding: induction_protocol::Encoding,
 ) -> Result<Box<dyn ResidentSession>> {
     // `source` is consumed by the wasmtime arm (compile at spawn); the
     // other arms ignore it (the spawn spec is argv) or one or both.

@@ -753,6 +753,7 @@ name = "effector-protocol"
 version = "0.1.0"
 dependencies = [
  "effector-config",
+ "induction-protocol",
  "serde",
  "serde_json",
 ]

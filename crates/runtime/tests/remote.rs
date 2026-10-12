@@ -40,7 +40,7 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
         session: "counter/k1".into(),
         entry: "counter".into(),
         language: "steel".into(),
-        encoding: effector_protocol::ChannelEncoding::Json,
+        encoding: induction_protocol::Encoding::Json,
         args: serde_json::json!({"n": 3}),
         code: code.clone(),
     };
@@ -170,7 +170,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             session: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: effector_protocol::ChannelEncoding::Json,
+        encoding: induction_protocol::Encoding::Json,
             args: serde_json::json!({"n": 5}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
@@ -199,7 +199,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             session: "triple/k2".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: effector_protocol::ChannelEncoding::Json,
+        encoding: induction_protocol::Encoding::Json,
             args: serde_json::json!({"n": 2}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
@@ -231,7 +231,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             session: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: effector_protocol::ChannelEncoding::Json,
+        encoding: induction_protocol::Encoding::Json,
             args: serde_json::json!({"n": 5}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
