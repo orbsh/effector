@@ -16,6 +16,10 @@
 //! frame is TYPED under both (`{"host":{"type":…}}`) — the free op-name
 //! string is retired; a bad discriminator fails at the parent's decode.
 //!
+//! The introspection reply (the child's `interface_schema` answer) IS the
+//! assembled registry — receives + the reserved `hooks` array (ADR-0043
+//! §3): no runtime on/receives arms exist; registration is load-time.
+//!
 //! No aura dependencies: serde_json + ciborium. The protocol is the ABI.
 
 use serde_json::Value;
@@ -164,6 +168,11 @@ fn dispatch(
         ("call", "interface_schema") | ("iterate_start", "interface_schema") => serde_json::json!({
             "receives": { "echo": {}, "slow": {}, "ctx_round_trip": {}, "store_round_trip": {}, "bad_host_frame": {}, "count": {} },
             "wildcard_receives": [],
+            // Reserved lifecycle hooks (ADR-0043 §3): names only — the
+            // handlers live in THIS process (a Declared hook dispatches
+            // back into the loop by the reserved name); the schema reply
+            // IS the registry, no runtime on/receives arms exist.
+            "hooks": ["__sleep", "__wake"],
             "storage": { "collections": { "counters": { "schema": {
                 "key_len": 8,
                 "key_fields": [{"name": "id", "ty": "U64", "width": 8, "offset": 0, "tag": 0}],
@@ -175,6 +184,11 @@ fn dispatch(
                           "junction_base": 12288}
             }}}}
         }),
+        // Reserved lifecycle hooks (ADR-0043 §3): the realm's Declared
+        // dispatch calls the session by the reserved name. __sleep runs
+        // before eviction (return ignored), __wake on reactivation.
+        ("call" | "iterate_start", "__sleep") => serde_json::json!({"slept": true}),
+        ("call" | "iterate_start", "__wake") => serde_json::json!({"woke": true}),
         // Plain handlers: reply a bare value; the carrier wraps to a
         // terminal envelope. echo echoes the args.
         ("call" | "iterate_start", "echo") => serde_json::json!({"echoed": args}),
