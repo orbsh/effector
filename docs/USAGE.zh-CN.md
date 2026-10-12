@@ -6,11 +6,21 @@
 
 ## 1. 角色
 
-Effector 是**客户端**：它主动拨出、注册，然后服务到达的帧。它不开端口，也不自发发起任何动作——它唯一会去取的 URL 是 `link` 载荷里声明的那个。
+Effector 是**客户端**：它主动拨出、注册，然后服务到达的帧。它不开端口，也不自发发起任何动作——它唯一会去取的 URL 是某个调用声明的 `code.url`。
 
 Effector 同时是**技能盲**的：它看不到 skill、看不到操作名、看不到 LLM 提示词。到达的是 `session`（驻留身份）、`entry`（代码里的入口点）、`language`（用哪个运行时）、`args`、`code`（可执行部分）。把 skill 解析成这一组是控制端的工作——而且其中没有任何字段携带能力语义：`session` 与 `entry` 在 Effector 眼里只是一个身份与一个入口名，别无其他。
 
 Effector 拥有运行时、常驻会话与 sandbox。控制端拥有身份、调度、deadline、ctx 作用域与策略（某个操作是 AI 现场生成还是预先审计过的）。
+
+### 1.1 每一跳各跑什么协议
+
+本文只描述**一跳**。Effector 夹在两跳之间，而两跳各有自己的 ABI：
+
+- **外跳——控制端 ↔ Effector**：`crates/protocol` 里的帧，走 WS，一条消息一帧 JSON 文本（下文 §2–§8）。控制端自己面向客户端的协议在**控制端就终止了**——aura 的 realm 事件，以及 prism 的客户端事件协议（`signup` / `login` / `logout`、echo 事件、`turn.*`）。它们不跨这一跳：到达这里的是一个 `call`，从来不是一个 event。尤其：Effector 永远看不到账户、设备或登录——身份是控制端的载荷，只作为 `args` 的一部分到达脚本。
+- **内跳——Effector ↔ 常驻扩展子进程**：**Induction**（`~/world/induction`，`crates/induction-{protocol,host,guest}`）——宿主指名一个可执行文件、spawn 它、握手、在 stdio 上投递类型化帧，并服务子进程回调上来的 `ctx.*` 各臂；子进程随宿主一起死。它在 effector 侧代码里只落在一处：进程载体 `crates/runtime/src/carrier/exec.rs`（加上持有子进程的会话注册表）。裸的 `exec` 一次性载体**不是** Induction——它按设计没有任何协议。
+- 一个摊位骑哪一跳由控制端决定：`language` 指名载体，而对进程载体来说 spawn spec **就是**那个可执行文件。控制端若把载体嵌进自己的进程（aura 的 realm 就是这么做的），该摊位的外跳**消失**，内跳不变——这正是内跳挂在自己那套 ABI 上、而不挂在本文这套词汇上的原因。
+
+所以是**两跳上的两个协议，不是同一个协议的两层**。它们由控制端首尾相连，任一侧都不需要知道另一侧的形状。
 
 ## 2. 连接与启动
 
@@ -27,7 +37,7 @@ Effector 启动顺序：
   "credential_env": "PROBE_CREDENTIAL",
   "capabilities": {
     "node_alias": "home-pc",
-    "carriers": ["steel", "python", "bgi"],
+    "carriers": ["steel", "python", "induction"],
     "fs_scope": ["/home/user/work"],
     "command_exec": false,
     "network": "none"
@@ -49,7 +59,7 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
 
 ```json
 { "type": "register", "node_alias": "home-pc", "credential": "tok-abc",
-  "carriers": ["steel", "python", "bgi"] }
+  "carriers": ["steel", "python", "induction"] }
 ```
 
 ```json
@@ -90,7 +100,7 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
   "entry": "read_file",
   "language": "python",
   "args": { "path": "/tmp/x" },
-  "code": { "type": "inline", "bytes": [100, 101, 102, 32, 114, 101, 97, 100, 95, 102, 105, 108, 101, 40, 97, 114, 103, 115, 41, 58, 10, 32, 32, 32, 32, 114, 101, 116, 117, 114, 110, 32, 97, 114, 103, 115] }
+  "code": { "url": "https://cdn.example/ab12…", "sha256": "ab12…" }
 }
 ```
 
@@ -102,20 +112,28 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
   "stream": "stream-13",
   "session": "heavy/1",
   "entry": "main",
-  "language": "bgi",
+  "language": "induction",
   "args": {},
-  "code": { "type": "link", "url": "https://cdn.example/op",
-            "version": "sha256:abc123", "expected_sha256": "abc123" }
+  "code": { "url": "https://cdn.example/3f9c…", "sha256": "3f9c…" }
 }
 ```
 
-（`wasmtime` 载体随 PLAN 4.21 退役——编译型语言骑 `bgi` 原生子进程；`code.link` 以同样
-的内容寻址方式投递二进制。）
+（`wasmtime` 载体随 PLAN 4.21 退役——编译型语言骑 `induction` 原生子进程；同一种引用形态
+用来投递内容寻址的二进制。）
 
-`code` 只有两种形态：
+`code` 只有一种形态：内容寻址的**引用**，字节从不进控制帧（ADR-0027——帧带引用，数据面
+带字节）：
 
-- `inline` —— `bytes` 直接进帧（KB 量级脚本）。
-- `link` —— Effector GET `url`（30 秒超时），在**执行之前**用 `expected_sha256` 校验 sha256，不匹配即错误值（绝不静默接受）。这个 URL 是 CDN 缓存键，不是 Effector 侧缓存：Effector 在调用之间不持有任何东西。
+- `url` —— 由控制端用「部署声明的前缀 + 哈希」拼出来。服务端点只在它自己的 `/{hash}` 路径下
+  暴露内容，所以这个 URL 在构造上就是自校验的。
+- `sha256` —— **由本帧断言**，绝不从 URL 里解析：CDN 可能重写路径，而由传输细节推导出来的
+  校验站在错的一侧。
+
+收到调用后 Effector 解析该引用：按哈希命中缓存即直接用，否则 GET `url`（30 秒超时），在**执行
+之前**用 `sha256` 校验字节，不匹配——或字节不是合法 UTF-8——一律是错误值，绝不静默接受。解析
+出的源码按哈希缓存，活到进程结束（跨重连保留；进程重启从空开始）：内容寻址让驱逐变得平凡——
+新代码就是新哈希、新键——所以缓存随互不相同的代码增长，而不随调用次数增长，里面也没有任何
+需要恢复的东西。
 
 ```json
 { "type": "result", "call_id": "rp-7", "outcome": { "Ok": { "done": true, "value": { "ok": true } } } }
@@ -188,20 +206,22 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
 ```
 effector → CP   {"type":"register","node_alias":"home-pc","credential":"tok-abc","carriers":["steel","python"]}
 CP → effector   {"type":"registered"}
-CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","session":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"type":"inline","bytes":[40,100,101,102,105,110,101,32,40,99,111,117,110,116,101,114,32,97,114,103,115,41,32,40,104,97,115,104,32,34,110,34,32,52,41,41]}}
+CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","session":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"url":"http://cp.local/code/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
 effector → CP   {"type":"host","kind":"call","host_call_id":"h-1","call_id":"rp-7","op":{"op":"store_emit","instruction":{"collection":"counters","doc":{"visits":1},"key":{"id":1},"op":"put_document"}}}
 CP → effector   {"type":"host","kind":"result","host_call_id":"h-1","outcome":{"Ok":{"ok":true}}}
 effector → CP   {"type":"result","call_id":"rp-7","outcome":{"Ok":{"done":true,"value":{"n":4}}}}
 ```
 
-（`bytes` 是字节数组：这里 effector 的代码载荷是 steel 源码 `(define (counter args) (hash "n" 4))`。这段拼接是示意性的——"先写 ctx 状态再返回"只是调用可以长的众多形状之一。）
+（`code` 是引用形态——这里的哈希是占位值：effector 去取那个 URL、把断言里的 sha256 与字节
+核对，然后运行解析出来的 steel 源码 `(define (counter args) (hash "n" 4))`。这段拼接是示意
+性的——"先写一条存储指令再返回"只是调用可以长的众多形状之一。）
 
 ## 8. 失败语义
 
 | 输入 | Effector 的行为 |
 |---|---|
 | 未知 `language` / carrier 未编译进来 | 以 `Err` 结果的 `result` 应答 |
-| `link` hash 不匹配、取件超时（30s）、代码非 UTF-8 | 以 `Err` 结果的 `result` 应答 |
+| `code.url` hash 不匹配、取件超时（30s）、代码非 UTF-8 | 以 `Err` 结果的 `result` 应答 |
 | 控制端发来不认识的帧类型，或解析不过去的帧 | 拆掉连接，随后重连 |
 | 非文本 WS 消息 | 忽略 |
 | 启动时 `credential_env` 变量缺失 | 进程在拨号前退出 |

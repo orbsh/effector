@@ -13,7 +13,7 @@ under `crates/runtime/tests/` are fake control planes driving the frames one by 
 
 The Effector is a **client**: it dials out, registers, then serves what arrives. It
 opens no port and initiates nothing of its own — the only URL it ever fetches is a
-`link` payload's declared URL.
+call's declared `code.url`.
 
 The Effector is also **skill-blind**: it never sees a skill, an operation name, or an
 LLM prompt. What arrives is `session` (residency identity), `entry` (the entry
@@ -24,6 +24,37 @@ or `entry` beyond an identity and an entry-point name.
 
 The Effector owns runtimes, resident sessions, and the sandbox. The control plane owns identity, scheduling, deadlines, ctx scope, and
 policy (whether an operation is AI-generated live or pre-audited).
+
+### 1.1 The hops: which protocol runs where
+
+This document describes ONE hop. The effector sits between two, and each hop
+has its own ABI:
+
+- **Outer hop — control plane ↔ effector**: the frames in `crates/protocol`,
+  over a WS, one JSON-text message per frame (§2–§8 below). The control plane's
+  own client-facing protocols terminate AT the control plane — aura's realm
+  events, and prism's client event protocol (`signup` / `login` / `logout`,
+  echo events, `turn.*`). They never cross this hop: what arrives here is a
+  `call`, never an event. In particular the effector never sees an account, a
+  device, or a login: identity is control-plane payload and reaches a script
+  only as part of `args`.
+- **Inner hop — effector ↔ resident extension process**: **Induction**
+  (`~/world/induction`, `crates/induction-{protocol,host,guest}`) — the host
+  names an executable, spawns it, handshakes, delivers typed frames over stdio,
+  and serves the `ctx.*` arms the child invokes back; the child dies with the
+  host. Its only site in this workspace's effector-side code is the process
+  carriers: `crates/runtime/src/carrier/exec.rs` (plus the session registry that
+  owns the children). The bare `exec` one-shot carrier is deliberately NOT
+  Induction — it has no protocol at all.
+- Which hop a booth rides is the control plane's decision: `language` names the
+  carrier, and for a process carrier the spawn spec IS the executable. A control
+  plane that embeds the carriers in its own process (aura's realm does) drops the
+  outer hop for that booth; the inner one is unchanged — which is exactly why it
+  hangs on an ABI of its own rather than on this connection's vocabulary.
+
+Two protocols at two hops, then — not one protocol in two layers. They are
+joined end to end by the control plane, and neither side of one has to know the
+other's shapes.
 
 ## 2. Connection and startup
 
@@ -41,7 +72,7 @@ Order of operations at effector startup:
   "credential_env": "PROBE_CREDENTIAL",
   "capabilities": {
     "node_alias": "home-pc",
-    "carriers": ["steel", "python", "bgi"],
+    "carriers": ["steel", "python", "induction"],
     "fs_scope": ["/home/user/work"],
     "command_exec": false,
     "network": "none"
@@ -72,7 +103,7 @@ The first frame the effector sends is `register`; the control plane must answer
 
 ```json
 { "type": "register", "node_alias": "home-pc", "credential": "tok-abc",
-  "carriers": ["steel", "python", "bgi"] }
+  "carriers": ["steel", "python", "induction"] }
 ```
 
 ```json
@@ -131,7 +162,7 @@ language is an error value in `result`, not a dropped call.
   "entry": "read_file",
   "language": "python",
   "args": { "path": "/tmp/x" },
-  "code": { "type": "inline", "bytes": [100, 101, 102, 32, 101, 120, 101, 99, 117, 116, 101, 40, 97, 114, 103, 115, 41, 58, 10, 32, 32, 32, 32, 114, 101, 116, 117, 114, 110, 32, 97, 114, 103, 115] }
+  "code": { "url": "https://cdn.example/ab12…", "sha256": "ab12…" }
 }
 ```
 
@@ -143,23 +174,34 @@ language is an error value in `result`, not a dropped call.
   "stream": "stream-13",
   "session": "heavy/1",
   "entry": "main",
-  "language": "bgi",
+  "language": "induction",
   "args": {},
-  "code": { "type": "link", "url": "https://cdn.example/op",
-            "version": "sha256:abc123", "expected_sha256": "abc123" }
+  "code": { "url": "https://cdn.example/3f9c…", "sha256": "3f9c…" }
 }
 ```
 
-(The `wasmtime` carrier retired with PLAN 4.21 — compiled languages ride `bgi`
-native children; `code.link` serves the content-addressed binary the same way.)
+(The `wasmtime` carrier retired with PLAN 4.21 — compiled languages ride `induction`
+native children; the same reference shape delivers the content-addressed binary.)
 
-`code` has exactly two forms:
+`code` is one shape: a content-addressed **reference**; bytes never ride the
+control frame (ADR-0027 — the frame carries the reference, the data path carries
+the bytes):
 
-- `inline` — `bytes` in the frame (KB-scale scripts).
-- `link` — the Effector GETs `url` (30s timeout), verifies sha256 against
-  `expected_sha256` **before** execution, and treats a mismatch as an error value
-  (never a silent accept). The URL is a CDN cache key, not a Effector-side cache: the
-  Effector holds nothing between calls.
+- `url` — assembled by the control plane from a deployment-declared prefix plus
+  the hash. The serving endpoint exposes content ONLY under its own `/{hash}`
+  path, so the URL is self-verifying by construction.
+- `sha256` — **asserted by this frame**, never parsed from the URL: a CDN may
+  rewrite the path, and verification derived from a transport detail stands on
+  the wrong side.
+
+On receipt the Effector resolves the reference: a per-hash cache hit, else it
+GETs `url` (30s timeout), verifies the bytes against `sha256` **before**
+execution, and treats a mismatch — or non-UTF-8 bytes — as an error value, never
+a silent accept. Resolved source is cached by hash for the process's life
+(survives reconnects; a process start begins empty): content addressing makes
+eviction trivial — new code is a new hash, a new key — so the cache grows with
+distinct code, never with call count, and holds nothing that would need
+recovering.
 
 ```json
 { "type": "result", "call_id": "rp-7", "outcome": { "Ok": { "done": true, "value": { "ok": true } } } }
@@ -266,23 +308,24 @@ above; single-line here for the flow):
 ```
 effector → CP   {"type":"register","node_alias":"home-pc","credential":"tok-abc","carriers":["steel","python"]}
 CP → effector   {"type":"registered"}
-CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","session":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"type":"inline","bytes":[40,100,101,102,105,110,101,32,40,99,111,117,110,116,101,114,32,97,114,103,115,41,32,40,104,97,115,104,32,34,110,34,32,52,41,41]}}
+CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","session":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"url":"http://cp.local/code/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
 effector → CP   {"type":"host","kind":"call","host_call_id":"h-1","call_id":"rp-7","op":{"op":"store_emit","instruction":{"collection":"counters","doc":{"visits":1},"key":{"id":1},"op":"put_document"}}}
 CP → effector   {"type":"host","kind":"result","host_call_id":"h-1","outcome":{"Ok":{"ok":true}}}
 effector → CP   {"type":"result","call_id":"rp-7","outcome":{"Ok":{"done":true,"value":{"n":4}}}}
 ```
 
-(`bytes` is a byte array: the effector's code payload here is the steel source
-`(define (counter args) (hash "n" 4))`. The assembly is illustrative — a script
-that emits one storage instruction and then returns is just one of the shapes a
-call can take.)
+(`code` is the reference form — here with a placeholder hash: the effector fetches
+that URL, verifies the asserted sha256 against the bytes, and runs the steel
+source `(define (counter args) (hash "n" 4))` it resolves. The assembly is
+illustrative — a script that emits one storage instruction and then returns is
+just one of the shapes a call can take.)
 
 ## 8. Failure semantics
 
 | Input | Effector behaviour |
 |---|---|
 | unknown `language` / carrier not built | `result` with an `Err` outcome |
-| `link` hash mismatch, fetch timeout (30s), non-UTF-8 code | `result` with an `Err` outcome |
+| `code.url` hash mismatch, fetch timeout (30s), non-UTF-8 code | `result` with an `Err` outcome |
 | unrecognized frame type, or a frame that does not parse | connection torn down, then reconnect |
 | non-text WS message | ignored |
 | `credential_env` variable missing at startup | process exits before dialing |
