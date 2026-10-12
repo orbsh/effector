@@ -7,6 +7,10 @@ license.workspace = true
 [dependencies]
 effector-protocol = { path = "../protocol" }
 effector-config = { path = "../config" }
+# The pipe protocol's vocabulary has its own home (Induction): the env name the
+# codec is declared through comes from there, not from a literal kept here —
+# the carrier's frame types move onto this crate too, as their own step.
+induction-protocol = { path = "../../../induction/crates/induction-protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = "1"

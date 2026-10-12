@@ -9,11 +9,12 @@
 //! residency IS the booth state — idle_ttl eviction kills it, matching
 //! generator-mode semantics without a generator language).
 //!
-//! Frame ENCODING is declared by the parent through `BGI_ENCODING`
+//! Frame ENCODING is declared by the parent through `INDUCTION_ENCODING`
 //! ("json" | "cbor"; absent = json) — the ADR-0037 §2 dual-protocol
-//! ruling. Both codecs carry the same Value-shaped frames; JSON frames
-//! are text lines, CBOR frames are self-delimited documents. The host
-//! frame is TYPED under both (`{"host":{"type":…}}`) — the free op-name
+//! ruling, read through the protocol crate's own enum so the name and the
+//! spellings have one home. Both codecs carry the same Value-shaped frames;
+//! JSON frames are text lines, CBOR frames are self-delimited documents. The
+//! host frame is TYPED under both (`{"host":{"type":…}}`) — the free op-name
 //! string is retired; a bad discriminator fails at the parent's decode.
 //!
 //! The introspection reply (the child's `interface_schema` answer) IS the
@@ -32,12 +33,9 @@ struct Guard {
 }
 
 fn main() {
-    match std::env::var("BGI_ENCODING")
-        .as_deref()
-        .unwrap_or("json")
-    {
-        "cbor" => run_cbor(),
-        _ => run_json(),
+    match induction_protocol::Encoding::from_env() {
+        induction_protocol::Encoding::Cbor => run_cbor(),
+        induction_protocol::Encoding::Json => run_json(),
     }
 }
 

@@ -747,9 +747,10 @@ impl ResidentSession for OneShotSession {
 /// Fork/exec argv[0] (or the bwrap wrapper) with piped stdio; stderr is
 /// inherited (the child's diagnostics reach the effector's log, never the
 /// result channel). The declared frame codec crosses as the
-/// `BGI_ENCODING` env ("json" | "cbor") — the child-side protocol library
-/// branches on it (an env, not an appended argv: the fifo shape passes
-/// exactly [req rep] and a generated argument would break `def main`).
+/// `INDUCTION_ENCODING` env ("json" | "cbor") — the child-side protocol
+/// library branches on it (an env, not an appended argv: the fifo shape passes
+/// exactly [req rep] and a generated argument would break `def main`). The
+/// name is the protocol's own constant, not a literal kept here.
 fn spawn_child(
     argv: &[String],
     policy: &crate::sandbox::SandboxPolicy,
@@ -801,7 +802,7 @@ fn spawn_child(
     // bwrap inherits the parent environment (--clearenv is not part of
     // the generated command), so the codec crosses the jail edge either way.
     cmd.env(
-        "BGI_ENCODING",
+        induction_protocol::ENCODING_ENV,
         match encoding {
             ChannelEncoding::Json => "json",
             ChannelEncoding::Cbor => "cbor",

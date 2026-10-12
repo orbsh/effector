@@ -224,16 +224,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "bgi-guest"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ciborium",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "bigdecimal"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -779,6 +769,7 @@ dependencies = [
  "futures-util",
  "hex",
  "im-rc",
+ "induction-protocol",
  "libc",
  "okm-core",
  "okm-python",
@@ -1613,6 +1604,15 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "induction-protocol"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

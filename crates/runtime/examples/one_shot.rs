@@ -3,7 +3,7 @@
 //! dispatch, print one JSON result, exit. Nothing survives the call —
 //! that is the definition, not a limitation (the php-fpm lineage; the
 //! SKILL shape; the bare cgi form any language runs without a loop).
-//! The codec follows `BGI_ENCODING` (ADR-0037 §2 dual-protocol): json
+//! The codec follows `INDUCTION_ENCODING` (ADR-0037 §2 dual-protocol): json
 //! (default) or cbor — one document in, one document out either way;
 //! the request SHAPE is protocol-free under both.
 
@@ -31,12 +31,17 @@ fn main() {
     if std::io::Read::read_to_end(&mut std::io::stdin(), &mut input).is_err() {
         return;
     }
-    let result = match std::env::var("BGI_ENCODING").as_deref() {
-        Ok("cbor") => match ciborium::de::from_reader::<Value, _>(input.as_slice()) {
-            Ok(req) => dispatch(&req),
-            Err(_) => serde_json::json!({ "error": "one-shot: stdin is not one CBOR document" }),
-        },
-        _ => {
+    let encoding = induction_protocol::Encoding::from_env();
+    let result = match encoding {
+        induction_protocol::Encoding::Cbor => {
+            match ciborium::de::from_reader::<Value, _>(input.as_slice()) {
+                Ok(req) => dispatch(&req),
+                Err(_) => {
+                    serde_json::json!({ "error": "one-shot: stdin is not one CBOR document" })
+                }
+            }
+        }
+        induction_protocol::Encoding::Json => {
             let text = String::from_utf8_lossy(&input);
             match serde_json::from_str::<Value>(text.trim()) {
                 Ok(req) => dispatch(&req),
@@ -47,11 +52,11 @@ fn main() {
             }
         }
     };
-    match std::env::var("BGI_ENCODING").as_deref() {
-        Ok("cbor") => {
+    match encoding {
+        induction_protocol::Encoding::Cbor => {
             let mut out = std::io::stdout();
             ciborium::ser::into_writer(&result, &mut out).expect("cbor encode");
         }
-        _ => println!("{result}"),
+        induction_protocol::Encoding::Json => println!("{result}"),
     }
 }
