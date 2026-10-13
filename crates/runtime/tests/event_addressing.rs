@@ -1,6 +1,12 @@
 use effector_runtime::carrier::session::Sessions;
 use effector_runtime::carrier::HostBridge;
 
+// The python cases below need the python carrier: gated per-test (not
+// file-level [[test]]) so the steel coverage still runs in default builds —
+// steel is a default feature, python is not, and a default-feature
+// `cargo test --workspace` must not fail on a carrier that was never
+// compiled in (with_session returns an error value → unwrap).
+#[cfg(feature = "python")]
 #[test]
 fn python_event_name_addressing() {
     // @on handlers are bound under the EVENT name — delivery addresses
@@ -41,6 +47,9 @@ fn steel_event_name_addressing() {
     assert_eq!(out["added"], "book");
 }
 
+// mixed-language uniformity test: the python half is load-bearing, so the
+// whole test needs both carriers present
+#[cfg(feature = "python")]
 #[test]
 fn sessions_keep_state_across_calls_and_evict_drops_it() {
     // Resident semantics, language-uniform: same session key = same VM.
