@@ -5,7 +5,7 @@
 //! and speaks the line protocol — request
 //! frames in, result frames out, ctx round trips inline (host frames the
 //! parent answers). The author's code runs a loop: its own, or the
-//! nushell fifo adapter (the "fcgi-adapts-cgi" move — see `BgiKind`).
+//! nushell fifo adapter (the "fcgi-adapts-cgi" move — see `SessionKind`).
 //! Frame line:
 //!   parent → child: {"id":N,"kind":"call|iterate_start|iterate_next|iterate_dispose","event":"...","op":"start|next|dispose","args":...,"stream_id":"..."}
 //!   child → parent: {"host":{"type":"invoke|iterate.start|iterate.next|iterate.dispose|store|schema",…}} — TYPED frames (ADR-0037 §2): the discriminator fails at decode, never as a silent unknown-op string lookup. Arms are the ctx method paths (ADR-0043): a wrong type is a decode error, never a table miss.
@@ -71,12 +71,12 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 // ---------------------------------------------------------- induction --
 
 /// One resident induction session: the framed child, in one of two shapes.
-pub struct BgiSession {
+pub struct InductionSession {
     /// Host functions for the child's ctx round trips — the child sends
     /// them inside a TYPED host frame (ADR-0037 §2), mapped to these
     /// dotted keys at dispatch ("invoke", "store", …, ADR-0043).
     host: HostBridge,
-    kind: BgiKind,
+    kind: SessionKind,
     next_id: u64,
     /// Declared frame codec (ADR-0037 §2, dual-protocol): the channel's
     /// encoding for the session's whole life, both directions.
@@ -100,7 +100,7 @@ pub struct BgiSession {
 /// replies ride `rep` — a SECOND fifo, because two readers on one fifo
 /// race (the author's outer loop and its inline reply read would fight
 /// over frames; measured deadlock). Result frames ride stdout.
-enum BgiKind {
+enum SessionKind {
     Pipes {
         child: Option<Child>,
         stdin: Option<ChildStdin>,
@@ -121,7 +121,7 @@ enum BgiKind {
 /// never collide (same rule as the PTY carrier).
 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-impl BgiSession {
+impl InductionSession {
     /// Spawn and keep (no sandbox, JSON-lines).
     pub fn spawn(argv: &[String], host: Option<&HostBridge>) -> Result<Self> {
         Self::spawn_wrapped(argv, host, &crate::sandbox::SandboxPolicy::None, Encoding::Json)
@@ -155,7 +155,7 @@ impl BgiSession {
         let (child, stdin, reader) = spawn_child(argv, policy, encoding)?;
         Ok(Self {
             host: host.cloned().unwrap_or_default(),
-            kind: BgiKind::Pipes {
+            kind: SessionKind::Pipes {
                 child: Some(child),
                 stdin: Some(stdin),
                 reader: Some(reader),
@@ -221,7 +221,7 @@ impl BgiSession {
         drop(stdin);
         Ok(Self {
             host: host.cloned().unwrap_or_default(),
-            kind: BgiKind::Fifo {
+            kind: SessionKind::Fifo {
                 child: Some(child),
                 reader: Some(reader),
                 req,
@@ -245,7 +245,7 @@ impl BgiSession {
     /// 0 still-alive, negative ESRCH (already reaped), other = exited.
     pub fn is_alive(&mut self) -> bool {
         let child = match &mut self.kind {
-            BgiKind::Pipes { child, .. } | BgiKind::Fifo { child, .. } => child.as_mut(),
+            SessionKind::Pipes { child, .. } | SessionKind::Fifo { child, .. } => child.as_mut(),
         };
         match child {
             None => false,
@@ -261,8 +261,8 @@ impl BgiSession {
     /// leave no fifo litter). Pipes sessions have none.
     pub fn session_dir(&self) -> Option<&Path> {
         match &self.kind {
-            BgiKind::Pipes { .. } => None,
-            BgiKind::Fifo { dir, .. } => Some(dir),
+            SessionKind::Pipes { .. } => None,
+            SessionKind::Fifo { dir, .. } => Some(dir),
         }
     }
 
@@ -270,7 +270,7 @@ impl BgiSession {
     /// scenarios need to signal it externally).
     pub fn child_pid(&self) -> Option<u32> {
         match &self.kind {
-            BgiKind::Pipes { child, .. } | BgiKind::Fifo { child, .. } => {
+            SessionKind::Pipes { child, .. } | SessionKind::Fifo { child, .. } => {
                 child.as_ref().map(|c| c.id())
             }
         }
@@ -304,7 +304,7 @@ impl BgiSession {
                 Encoding::Json => {
                     let mut line = String::new();
                     let reader = match &mut self.kind {
-                        BgiKind::Pipes { reader, .. } | BgiKind::Fifo { reader, .. } => reader
+                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => reader
                             .as_mut()
                             .ok_or_else(|| anyhow!("induction carrier: no stdout"))?,
                     };
@@ -328,7 +328,7 @@ impl BgiSession {
                     // an incomplete value as EOF on the reader, so the
                     // natural read blocks until the document completes.
                     let rd: &mut dyn Read = match &mut self.kind {
-                        BgiKind::Pipes { reader, .. } | BgiKind::Fifo { reader, .. } => reader
+                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => reader
                             .as_mut()
                             .ok_or_else(|| anyhow!("induction carrier: no stdout"))?,
                     };
@@ -390,7 +390,7 @@ impl BgiSession {
     /// and flush; no newline, no length prefix.
     fn send(&mut self, frame: &Value) -> Result<()> {
         match &mut self.kind {
-            BgiKind::Pipes { stdin, .. } => {
+            SessionKind::Pipes { stdin, .. } => {
                 let stdin = stdin
                     .as_mut()
                     .ok_or_else(|| anyhow!("induction carrier: stdin closed"))?;
@@ -407,7 +407,7 @@ impl BgiSession {
                 stdin.flush()?;
                 Ok(())
             }
-            BgiKind::Fifo { req, child, .. } => {
+            SessionKind::Fifo { req, child, .. } => {
                 fifo_write(req, &frame.to_string()).map_err(|e| {
                     let alive = child
                         .as_mut()
@@ -427,7 +427,7 @@ impl BgiSession {
     /// second channel — JSON only there by construction).
     fn send_reply(&mut self, frame: &Value) -> Result<()> {
         match &mut self.kind {
-            BgiKind::Pipes { stdin, .. } => {
+            SessionKind::Pipes { stdin, .. } => {
                 let stdin = stdin
                     .as_mut()
                     .ok_or_else(|| anyhow!("induction carrier: stdin closed"))?;
@@ -444,7 +444,7 @@ impl BgiSession {
                 stdin.flush()?;
                 Ok(())
             }
-            BgiKind::Fifo { rep, .. } => {
+            SessionKind::Fifo { rep, .. } => {
                 fifo_write(rep, &frame.to_string()).map_err(|e| {
                     anyhow!("induction/nu adapter: write host_reply {}: {e}", rep.display())
                 })
@@ -457,7 +457,7 @@ impl BgiSession {
     /// guard either way, then remove the session dir.
     fn teardown(&mut self) {
         match &mut self.kind {
-            BgiKind::Pipes { child, stdin, reader } => {
+            SessionKind::Pipes { child, stdin, reader } => {
                 *stdin = None;
                 if let Some(mut child) = child.take() {
                     let _ = child.kill();
@@ -465,7 +465,7 @@ impl BgiSession {
                 }
                 *reader = None;
             }
-            BgiKind::Fifo { child, reader, dir, .. } => {
+            SessionKind::Fifo { child, reader, dir, .. } => {
                 // Killing first is the reliable exit: the child blocks in
                 // `open --raw` and an unlink race (open before unlink)
                 // can leave it waiting on a dead inode.
@@ -515,7 +515,7 @@ fn fifo_write(path: &Path, line: &str) -> std::io::Result<()> {
     res
 }
 
-impl ResidentSession for BgiSession {
+impl ResidentSession for InductionSession {
     /// The source was consumed by spawn (the argv); the child's module
     /// state is its own.
     fn load(&mut self, _source: &str) -> Result<()> {
@@ -562,7 +562,7 @@ impl ResidentSession for BgiSession {
     }
 }
 
-impl Drop for BgiSession {
+impl Drop for InductionSession {
     fn drop(&mut self) {
         self.teardown();
     }
@@ -574,7 +574,7 @@ impl Drop for BgiSession {
 /// shape. Spawn, feed the whole request as one JSON document on stdin,
 /// close, read stdout to EOF as the result. Nothing survives the call
 /// (php-fpm semantics, on purpose: the SKILL downgrade; nushell takes
-/// this shape bare — no loop needed — or bgi via `BgiKind::Fifo`).
+/// this shape bare — no loop needed — or the induction fifo via `SessionKind::Fifo`).
 pub struct ExecOneShot {
     argv: Vec<String>,
     policy: crate::sandbox::SandboxPolicy,
@@ -652,7 +652,7 @@ impl ExecOneShot {
 /// reaps. `iterate` is an error value on principle: a one-shot booth has
 /// no residency to hold a stream (same ruling as Rust closure bodies,
 /// ADR-0034 — the cgi lineage is stateless by definition, not by
-/// omission). Sweep ignores these slots (not a BgiSession: nothing can
+/// omission). Sweep ignores these slots (not a InductionSession: nothing can
 /// die that was never promised to live).
 pub struct OneShotSession {
     inner: ExecOneShot,

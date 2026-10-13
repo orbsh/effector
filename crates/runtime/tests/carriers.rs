@@ -53,7 +53,7 @@ fn py_missing_entry_is_error_value() {
 // --------------------------------------------------------------- nushell --
 // nu has no embedded carrier (the PTY shape retired per ADR-0035 §6):
 // its booth shapes live on the induction/exec carriers — the reference tests
-// are the `nu_bgi_*` set in exec_carrier.rs (the author script with a
+// are the `nu_induction_\*` set in exec_carrier.rs (the author script with a
 // `def main` loop over the two-fifo adapter) and the `exec` one-shot.
 
 // ----------------------------------------------------------------- steel --

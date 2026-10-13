@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-fn bgi_bin() -> String {
+fn induction_bin() -> String {
     bin("induction_loop")
 }
 
@@ -40,9 +40,9 @@ fn sessions() -> effector_runtime::carrier::session::Sessions {
 /// Plain call through the resident session: request frame out, result
 /// frame back — the invoke shape across the process boundary.
 #[test]
-fn bgi_call_round_trip() {
+fn induction_call_round_trip() {
     let s = sessions();
-    let argv = bgi_bin();
+    let argv = induction_bin();
     let out = s
         .with_session(
             "box/k1",
@@ -76,7 +76,7 @@ fn bgi_call_round_trip() {
 /// child forwards the reply into its result. This is ADR-0035's §3
 /// `host` / `host_reply` pair over real pipes.
 #[test]
-fn bgi_host_call_crosses_the_seam() {
+fn induction_host_call_crosses_the_seam() {
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = {
         let seen = seen.clone();
@@ -91,7 +91,7 @@ fn bgi_host_call_crosses_the_seam() {
         b
     };
     let s = sessions();
-    let argv = bgi_bin();
+    let argv = induction_bin();
     let out = s
         .with_session(
             "box/k2",
@@ -119,9 +119,9 @@ fn bgi_host_call_crosses_the_seam() {
 /// residency is the stream state — the envelope producer has no
 /// generator, and it does not need one), done is written.
 #[test]
-fn bgi_iterate_stream() {
+fn induction_iterate_stream() {
     let s = sessions();
-    let argv = bgi_bin();
+    let argv = induction_bin();
     // One with_session per pull — each call re-enters the SAME child
     // (the registry keys residency; the guard state lives in the
     // child's memory across the calls, exactly like a session VM).
@@ -259,7 +259,7 @@ fn exec_oneshot_iterate_is_a_named_error() {
 #[test]
 fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     let s = sessions();
-    let argv = bgi_bin();
+    let argv = induction_bin();
     // Spawn + one call.
     s.with_session("box/k4", "induction", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
         sess.call("echo", &json!(1))
@@ -277,9 +277,9 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
             &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| {
                 sess.as_any()
-                    .downcast_mut::<effector_runtime::carrier::exec::BgiSession>()
+                    .downcast_mut::<effector_runtime::carrier::exec::InductionSession>()
                     .and_then(|e| e.child_pid().map(|p| json!({ "pid": p })))
-                    .ok_or_else(|| anyhow::anyhow!("not a BgiSession"))
+                    .ok_or_else(|| anyhow::anyhow!("not a InductionSession"))
             },
         )
         .unwrap()["pid"]
@@ -312,7 +312,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
 /// loop; the session shape is chosen by the spawn spec's head (`nu`) and
 /// the protocol is IDENTICAL to the pipes shape — the fifos replace
 /// stdin only because nu cannot block-read a pipe.
-fn nu_bgi_spec() -> String {
+fn nu_induction_spec() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples/induction_nu.nu");
     assert!(path.exists(), "nu induction fixture missing: {}", path.display());
@@ -323,9 +323,9 @@ fn nu_bgi_spec() -> String {
 /// rides `$env` across calls on the SAME child (the for-loop scope rule
 /// the fixture documents — `each` would eat the writes).
 #[test]
-fn nu_bgi_call_round_trip_and_residency() {
+fn nu_induction_call_round_trip_and_residency() {
     let s = sessions();
-    let spec = nu_bgi_spec();
+    let spec = nu_induction_spec();
     let call = |event: &str, args: Value| {
         s.with_session(
             "box/nu1",
@@ -353,7 +353,7 @@ fn nu_bgi_call_round_trip_and_residency() {
 /// stdout, blocks reading `rep`, the parent answers there (never on
 /// `req` — two readers on one fifo race; measured deadlock).
 #[test]
-fn nu_bgi_host_call_crosses_the_seam() {
+fn nu_induction_host_call_crosses_the_seam() {
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = {
         let seen = seen.clone();
@@ -368,7 +368,7 @@ fn nu_bgi_host_call_crosses_the_seam() {
         b
     };
     let s = sessions();
-    let spec = nu_bgi_spec();
+    let spec = nu_induction_spec();
     let out = s
         .with_session(
             "box/nu2",
@@ -396,9 +396,9 @@ fn nu_bgi_host_call_crosses_the_seam() {
 /// ADR-0034 shape the Rust induction fixture locks; nu lands it with no
 /// generator language, only `$env`).
 #[test]
-fn nu_bgi_iterate_stream() {
+fn nu_induction_iterate_stream() {
     let s = sessions();
-    let spec = nu_bgi_spec();
+    let spec = nu_induction_spec();
     let pull = |op: StreamOp| -> Value {
         s.with_session(
             "box/nu3",
@@ -437,9 +437,9 @@ fn nu_bgi_iterate_stream() {
 /// removes the session dir (the blocked `open` cannot be EOF-released
 /// like a pipe — unlink alone races with the open).
 #[test]
-fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
+fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
     let s = sessions();
-    let spec = nu_bgi_spec();
+    let spec = nu_induction_spec();
     s.with_session("box/nu4", "induction", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
         sess.call("echo", &json!("x"))
     })
@@ -448,8 +448,8 @@ fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
         .with_session("box/nu4", "induction", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
             let b = sess
                 .as_any()
-                .downcast_mut::<effector_runtime::carrier::exec::BgiSession>()
-                .ok_or_else(|| anyhow::anyhow!("not a BgiSession"))?;
+                .downcast_mut::<effector_runtime::carrier::exec::InductionSession>()
+                .ok_or_else(|| anyhow::anyhow!("not a InductionSession"))?;
             let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
             let dir = b
                 .session_dir()
@@ -492,10 +492,10 @@ fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
 /// protocol in between (the frame shape is unchanged; only the codec
 /// differs).
 #[test]
-fn bgi_cbor_round_trip() {
+fn induction_cbor_round_trip() {
     use induction_protocol::Encoding;
     let s = sessions();
-    let argv = bgi_bin();
+    let argv = induction_bin();
     let out = s
         .with_session_encoded(
             "box/cbor1",
@@ -532,7 +532,7 @@ fn bgi_cbor_round_trip() {
 /// parent decodes it into the typed enum, runs the bridge fn, answers
 /// with a CBOR host_reply — the whole duplex on the binary codec.
 #[test]
-fn bgi_cbor_host_call_crosses_the_seam() {
+fn induction_cbor_host_call_crosses_the_seam() {
     use induction_protocol::Encoding;
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = {
@@ -548,7 +548,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
         b
     };
     let s = sessions();
-    let argv = bgi_bin();
+    let argv = induction_bin();
     let out = s
         .with_session_encoded(
             "box/cbor2",
@@ -572,7 +572,7 @@ fn bgi_cbor_host_call_crosses_the_seam() {
 /// fn never runs, and the child sees an error reply (no `ok`). The free
 /// op-name lookup that silently missed the table is gone.
 #[test]
-fn bgi_untyped_host_frame_fails_at_decode() {
+fn induction_untyped_host_frame_fails_at_decode() {
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = {
         let seen = seen.clone();
@@ -587,7 +587,7 @@ fn bgi_untyped_host_frame_fails_at_decode() {
         b
     };
     let s = sessions();
-    let argv = bgi_bin();
+    let argv = induction_bin();
     let out = s
         .with_session(
             "box/untyped",
@@ -639,7 +639,7 @@ fn exec_cbor_round_trip() {
 fn nu_cbor_declaration_is_an_error() {
     use induction_protocol::Encoding;
     let s = sessions();
-    let spec = nu_bgi_spec();
+    let spec = nu_induction_spec();
     let err = s
         .with_session_encoded(
             "box/nu-cbor-bad",

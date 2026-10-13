@@ -302,7 +302,7 @@ impl Sessions {
                     .and_then(|mut s| {
                         let dead = s
                             .as_any()
-                            .downcast_mut::<crate::carrier::exec::BgiSession>()
+                            .downcast_mut::<crate::carrier::exec::InductionSession>()
                             .map(|e| !e.is_alive())
                             .unwrap_or(false);
                         dead.then(|| k.clone())
@@ -350,7 +350,7 @@ fn spawn_session(
         // bwrap-wrapped (the mount policy runs before exec).
         "induction" => {
             let argv: Vec<String> = shellish_split(source);
-            Box::new(super::exec::BgiSession::spawn_wrapped(&argv, host, sandbox, encoding)?)
+            Box::new(super::exec::InductionSession::spawn_wrapped(&argv, host, sandbox, encoding)?)
         }
         // exec (ADR-0035 — the bare cgi shape, NO protocol): one process
         // per call — the request JSON is written, stdin closed (EOF is
