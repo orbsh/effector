@@ -21,11 +21,12 @@ Two deployment forms, both supported:
 
 Skill resolution happens on the Gravity side (Krystallizer → Gravity, live on every tool call, zero cache — emergent skills must have zero staleness window). The Effector never sees a skill: it receives an operation and its arguments, executes, and returns a tool result.
 
-Runtimes: steel / python (PyO3) / wasmtime (in-process, Aura polyglot
-ruling) + `bgi` (resident framed line protocol — compiled guests or the
+Runtimes: steel / python (PyO3) — the in-process carriers (feature-gated) —
+plus `induction` (resident framed line protocol — compiled guests or the
 two-fifo nushell adapter) / `exec` (bare one-shot CGI, one JSON in / one
-JSON out per call), feature-gated. The nushell PTY carrier retired
-(ADR-0035 §6): nu's shapes are `exec` and `bgi`.
+JSON out per call). The nushell PTY carrier retired (ADR-0035 §6): nu's shapes
+are `exec` and `induction`; the wasmtime carrier retired with PLAN 4.21
+(ADR-0044), so compiled guests ride `induction` children.
 
 Run tests with the carrier combo:
-`cargo test -p effector-runtime --features steel,python,wasmtime`.
+`cargo test -p effector-runtime --features steel,python`.

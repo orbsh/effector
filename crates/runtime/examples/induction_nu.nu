@@ -1,4 +1,4 @@
-# bgi nushell fixture (ADR-0035 §8, two-fifo adapter): the author script
+# induction nushell fixture (ADR-0035 §8, two-fifo adapter): the author script
 # — `def main [req rep]` IS the loop, the parent spawns `nu <this> <req>
 # <rep>` and speaks the SAME line protocol as the pipes shape (frames on
 # req, ctx replies on rep, results on stdout). The dispatch is a match on
@@ -18,13 +18,13 @@
 
 def ctx.invoke [args] {
     print ({host: {type: "invoke", args: $args}} | to json --raw)
-    let rep = (open --raw $env.BGI_REP | lines | first | from json)
+    let rep = (open --raw $env.INDUCTION_REP | lines | first | from json)
     $rep.host_reply.ok? | default {__error: ($rep.host_reply.error? | default "")}
 }
 
 def ctx.store [instruction] {
     print ({host: {type: "store", op: $instruction}} | to json --raw)
-    let rep = (open --raw $env.BGI_REP | lines | first | from json)
+    let rep = (open --raw $env.INDUCTION_REP | lines | first | from json)
     $rep.host_reply.ok? | default {__error: ($rep.host_reply.error? | default "")}
 }
 
@@ -64,7 +64,7 @@ def --env dispatch [m] {
         match $event {
             "interface_schema" => { interface_schema }
             "echo" => { {echoed: $args} }
-            # nu pipelines survive the bgi shape untouched (the retired
+            # nu pipelines survive the induction shape untouched (the retired
             # PTY carrier's structured-data demos).
             "sum" => { {sum: ($args.items | math sum)} }
             "ctx_round_trip" => { {invoked: (ctx.invoke $args)} }
@@ -90,7 +90,7 @@ def --env dispatch [m] {
 }
 
 def main [req: string, rep: string] {
-    $env.BGI_REP = $rep
+    $env.INDUCTION_REP = $rep
     loop {
         for line in (open --raw $req | lines) {
             let m = ($line | from json)

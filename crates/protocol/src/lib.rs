@@ -86,7 +86,7 @@ pub struct ToolCall {
     /// wasmtime retired with PLAN 4.21) — a nushell booth declares
     /// `induction` with a `nu <author.nu>` spawn spec.
     pub language: String,
-    /// Frame codec for the process carriers (bgi/exec, ADR-0037 §2 —
+    /// Frame codec for the process carriers (induction/exec, ADR-0037 §2 —
     /// dual-protocol by declaration; the type is the pipe protocol's own).
     /// `#[serde(default)]` = Json: an older control plane's frame decodes as
     /// today's behavior, the embedded carriers ignore this field entirely (no

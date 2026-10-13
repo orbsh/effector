@@ -137,7 +137,7 @@ pub(crate) fn validate_envelope(reply: Value, fresh: bool, handler: &str) -> Res
                 Ok(serde_json::json!({ "done": true, "value": value }))
             } else if reply.get("error").is_some() {
                 // The out-of-process children's failure convention
-                // (`{"error": "..."}` with no envelope — the bgi
+                // (`{"error": "..."}` with no envelope — the induction
                 // fixtures' shape): a mid-stream failure surfaces as the
                 // outer error value (ADR-0012), never a fake envelope.
                 let msg = reply.get("error").and_then(|v| v.as_str()).unwrap_or("stream error");
@@ -241,7 +241,7 @@ impl Sessions {
     }
 
     /// The declared-encoding form (ADR-0037 §2 — dual-protocol): the
-    /// frame codec for the PROCESS carriers (bgi/exec). Embedded carriers
+    /// frame codec for the PROCESS carriers (induction/exec). Embedded carriers
     /// carry no channel — the encoding is inert there; `Json` is the
     /// stdlib-reachable default every older call site rides.
     // The session-spawn parameter set (+codec) is the shape `with_session`
@@ -332,7 +332,7 @@ fn spawn_session(
 ) -> Result<Box<dyn ResidentSession>> {
     // `source` is consumed by the wasmtime arm (compile at spawn); the
     // other arms ignore it (the spawn spec is argv) or one or both.
-    // `encoding` is consumed by the process carriers only (bgi/exec —
+    // `encoding` is consumed by the process carriers only (induction/exec —
     // ADR-0037 §2); the embedded carriers have no channel.
     let _ = (language, source, host, sandbox, encoding);
     Ok(match language {

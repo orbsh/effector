@@ -108,7 +108,7 @@ pub fn introspect(language: &str, source: &str) -> anyhow::Result<Value> {
 }
 
 /// The declared-encoding form (ADR-0037 §2): the process carriers spawn
-/// their throwaway session in the DECLARED codec — a CBOR-declared bgi
+/// their throwaway session in the DECLARED codec — a CBOR-declared induction
 /// booth's `interface_schema` frame round trip must ride CBOR too, or
 /// the child would not parse the request.
 pub fn introspect_encoded(

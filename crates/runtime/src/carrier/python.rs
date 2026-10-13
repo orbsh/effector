@@ -650,7 +650,7 @@ impl super::session::ResidentSession for PythonSession {
 /// call the module's `interface_schema` — one function, one call path for
 /// aura. The module assembles it at import: the implicit (decorator-derived)
 /// half merges with the script's explicit partial declaration (which may
-/// add lifecycle etc.). Same call contract as steel/wasm/bgi.
+/// add lifecycle etc.). Same call contract as steel/python/induction.
 pub fn introspect(source: &str) -> ExecResult {
     Python::attach(|py| -> ExecResult {
         let (module, _registry, _hooks) = load_module(py, source)
