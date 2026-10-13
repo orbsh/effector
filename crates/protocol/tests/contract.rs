@@ -20,7 +20,10 @@ fn roundtrip_call_carries_a_code_reference() {
     let s = serde_json::to_string(&call).unwrap();
     let back: ToolCall = serde_json::from_str(&s).unwrap();
     assert_eq!(back.call_id, "c1");
-    assert_eq!(back.session, "notes/7", "residency identity survives the wire");
+    assert_eq!(
+        back.session, "notes/7",
+        "residency identity survives the wire"
+    );
     assert_eq!(back.entry, "read_file", "entry name survives the wire");
     assert_eq!(back.language, "induction");
     assert_eq!(back.code.sha256, "ab12", "the frame asserts the hash");
@@ -53,12 +56,18 @@ fn store_emit_carries_the_instruction_as_data() {
         }),
     };
     let s = serde_json::to_string(&op).unwrap();
-    assert!(s.starts_with(r#"{"op":"store_emit","instruction":"#), "wire shape: {s}");
+    assert!(
+        s.starts_with(r#"{"op":"store_emit","instruction":"#),
+        "wire shape: {s}"
+    );
     let back: effector_protocol::HostOp = serde_json::from_str(&s).unwrap();
     match back {
         effector_protocol::HostOp::StoreEmit { instruction } => {
             assert_eq!(instruction["collection"], "counters");
-            assert_eq!(instruction["op"], "get_document", "the instruction's own op token survives");
+            assert_eq!(
+                instruction["op"], "get_document",
+                "the instruction's own op token survives"
+            );
         }
         other => panic!("wrong variant: {other:?}"),
     }

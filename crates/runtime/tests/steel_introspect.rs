@@ -41,7 +41,10 @@ fn steel_explicit_receives_survive_merge() {
 (define (a args) #t)
 "##;
     let schema = introspect(src).unwrap();
-    assert_eq!(schema["receives"]["evt.a"]["key"], "k", "explicit receives survive merge: {schema}");
+    assert_eq!(
+        schema["receives"]["evt.a"]["key"], "k",
+        "explicit receives survive merge: {schema}"
+    );
     assert_eq!(schema["wildcard_receives"][0], "evt.w.*");
     assert_eq!(schema["lifecycle"]["idle_ttl"], "3m");
 }
@@ -58,8 +61,14 @@ fn steel_collector_and_explicit_receives_deep_merge() {
 "##;
     let schema = introspect(src).unwrap();
     assert!(schema["receives"]["from.collector"].is_object());
-    assert_eq!(schema["receives"]["from.collector"]["key"], "uid", "collector wins the collision");
-    assert_eq!(schema["receives"]["from.explicit"]["key"], "k", "explicit-only key contributes");
+    assert_eq!(
+        schema["receives"]["from.collector"]["key"], "uid",
+        "collector wins the collision"
+    );
+    assert_eq!(
+        schema["receives"]["from.explicit"]["key"], "k",
+        "explicit-only key contributes"
+    );
 }
 
 // ---- ADR-0043 §3: ctx.on / reserved hooks / the phase gate ----
@@ -80,8 +89,14 @@ fn steel_ctx_on_collects_reserved_hooks_into_the_schema() {
     let names: Vec<&str> = hooks.iter().filter_map(|v| v.as_str()).collect();
     assert!(names.contains(&"__sleep"), "hooks: {hooks:?}");
     assert!(names.contains(&"__wake"), "hooks: {hooks:?}");
-    assert!(schema["receives"]["evt"].is_object(), "ordinary receive untouched");
-    assert!(schema["receives"].get("__sleep").is_none(), "hooks NEVER enter receives");
+    assert!(
+        schema["receives"]["evt"].is_object(),
+        "ordinary receive untouched"
+    );
+    assert!(
+        schema["receives"].get("__sleep").is_none(),
+        "hooks NEVER enter receives"
+    );
 }
 
 #[test]
@@ -90,7 +105,10 @@ fn steel_unknown_reserved_name_is_a_declaration_error() {
 (ctx.on "__nope" "" (lambda (args) #t))
 "##;
     let err = introspect(src).unwrap_err();
-    assert!(format!("{err:#}").contains("not a reserved hook name"), "{err}");
+    assert!(
+        format!("{err:#}").contains("not a reserved hook name"),
+        "{err}"
+    );
 }
 
 #[test]

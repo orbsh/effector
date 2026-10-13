@@ -124,7 +124,12 @@ static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 impl InductionSession {
     /// Spawn and keep (no sandbox, JSON-lines).
     pub fn spawn(argv: &[String], host: Option<&HostBridge>) -> Result<Self> {
-        Self::spawn_wrapped(argv, host, &crate::sandbox::SandboxPolicy::None, Encoding::Json)
+        Self::spawn_wrapped(
+            argv,
+            host,
+            &crate::sandbox::SandboxPolicy::None,
+            Encoding::Json,
+        )
     }
 
     /// Spawn under the sandbox policy (bwrap wraps argv, §header) with
@@ -142,10 +147,9 @@ impl InductionSession {
         // The nushell adapter shape: `["nu", "<author.nu>"]` — the spawn
         // spec's argv head selects the channel, the protocol stays ONE.
         if argv.first().map(|s| s.as_str()) == Some("nu") {
-            let author = argv
-                .get(1)
-                .filter(|_| argv.len() == 2)
-                .ok_or_else(|| anyhow!("induction/nu adapter: spawn spec must be exactly [nu <author.nu>]"))?;
+            let author = argv.get(1).filter(|_| argv.len() == 2).ok_or_else(|| {
+                anyhow!("induction/nu adapter: spawn spec must be exactly [nu <author.nu>]")
+            })?;
             anyhow::ensure!(
                 encoding == Encoding::Json,
                 "induction/nu adapter: nushell speaks JSON-lines only (no CBOR codec in its stdlib) — declare encoding json"
@@ -174,7 +178,10 @@ impl InductionSession {
         policy: &crate::sandbox::SandboxPolicy,
     ) -> Result<Self> {
         if !author.exists() {
-            anyhow::bail!("induction/nu adapter: author script {} not found", author.display());
+            anyhow::bail!(
+                "induction/nu adapter: author script {} not found",
+                author.display()
+            );
         }
         // Sandbox dirs follow the PTY carrier's precedent: under a
         // Bubblewrap policy /tmp is tmpfs-mounted (files written outside
@@ -182,9 +189,8 @@ impl InductionSession {
         // (bind-mounted, visible to the child).
         let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = match policy {
-            crate::sandbox::SandboxPolicy::None => {
-                std::env::temp_dir().join(format!("effector-induction-nu-{}-{id}", std::process::id()))
-            }
+            crate::sandbox::SandboxPolicy::None => std::env::temp_dir()
+                .join(format!("effector-induction-nu-{}-{id}", std::process::id())),
             crate::sandbox::SandboxPolicy::Bubblewrap { cwd, .. } => {
                 Path::new(cwd).join(format!("effector-induction-nu-{}-{id}", std::process::id()))
             }
@@ -304,16 +310,20 @@ impl InductionSession {
                 Encoding::Json => {
                     let mut line = String::new();
                     let reader = match &mut self.kind {
-                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => reader
-                            .as_mut()
-                            .ok_or_else(|| anyhow!("induction carrier: no stdout"))?,
+                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => {
+                            reader
+                                .as_mut()
+                                .ok_or_else(|| anyhow!("induction carrier: no stdout"))?
+                        }
                     };
                     let n = reader
                         .read_line(&mut line)
                         .map_err(|e| anyhow!("induction carrier: read: {e}"))?;
                     if n == 0 {
                         self.teardown();
-                        return Err(anyhow!("induction carrier: child closed stdout (exited or crashed)"));
+                        return Err(anyhow!(
+                            "induction carrier: child closed stdout (exited or crashed)"
+                        ));
                     }
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
@@ -328,9 +338,11 @@ impl InductionSession {
                     // an incomplete value as EOF on the reader, so the
                     // natural read blocks until the document completes.
                     let rd: &mut dyn Read = match &mut self.kind {
-                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => reader
-                            .as_mut()
-                            .ok_or_else(|| anyhow!("induction carrier: no stdout"))?,
+                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => {
+                            reader
+                                .as_mut()
+                                .ok_or_else(|| anyhow!("induction carrier: no stdout"))?
+                        }
                     };
                     ciborium::de::from_reader(rd)
                         .map_err(|e| anyhow!("induction carrier: malformed cbor frame: {e}"))?
@@ -361,7 +373,10 @@ impl InductionSession {
                         continue;
                     }
                 };
-                match block_serve(induction_host::route_frame(&BridgeOps { bridge: &self.host }, frame)) {
+                match block_serve(induction_host::route_frame(
+                    &BridgeOps { bridge: &self.host },
+                    frame,
+                )) {
                     induction_host::Routed::Reply(reply) => {
                         self.send_reply(&reply.to_value())?;
                     }
@@ -437,18 +452,20 @@ impl InductionSession {
                             .map_err(|e| anyhow!("induction carrier: write host_reply: {e}"))?;
                     }
                     Encoding::Cbor => {
-                        ciborium::ser::into_writer(frame, &mut *stdin)
-                            .map_err(|e| anyhow!("induction carrier: write cbor host_reply: {e}"))?;
+                        ciborium::ser::into_writer(frame, &mut *stdin).map_err(|e| {
+                            anyhow!("induction carrier: write cbor host_reply: {e}")
+                        })?;
                     }
                 }
                 stdin.flush()?;
                 Ok(())
             }
-            SessionKind::Fifo { rep, .. } => {
-                fifo_write(rep, &frame.to_string()).map_err(|e| {
-                    anyhow!("induction/nu adapter: write host_reply {}: {e}", rep.display())
-                })
-            }
+            SessionKind::Fifo { rep, .. } => fifo_write(rep, &frame.to_string()).map_err(|e| {
+                anyhow!(
+                    "induction/nu adapter: write host_reply {}: {e}",
+                    rep.display()
+                )
+            }),
         }
     }
 
@@ -457,7 +474,11 @@ impl InductionSession {
     /// guard either way, then remove the session dir.
     fn teardown(&mut self) {
         match &mut self.kind {
-            SessionKind::Pipes { child, stdin, reader } => {
+            SessionKind::Pipes {
+                child,
+                stdin,
+                reader,
+            } => {
                 *stdin = None;
                 if let Some(mut child) = child.take() {
                     let _ = child.kill();
@@ -465,7 +486,9 @@ impl InductionSession {
                 }
                 *reader = None;
             }
-            SessionKind::Fifo { child, reader, dir, .. } => {
+            SessionKind::Fifo {
+                child, reader, dir, ..
+            } => {
                 // Killing first is the reliable exit: the child blocks in
                 // `open --raw` and an unlink race (open before unlink)
                 // can leave it waiting on a dead inode.
@@ -535,15 +558,21 @@ impl ResidentSession for InductionSession {
     /// this transitional JSON document retires with CBOR).
     fn iterate(&mut self, op: StreamOp) -> Result<Value> {
         let (kind, event, args, stream_id) = match &op {
-            StreamOp::Start { stream_id, handler, args } => {
-                (FrameKind::IterateStart, handler, args, stream_id)
-            }
-            StreamOp::Next { stream_id, handler, args } => {
-                (FrameKind::IterateNext, handler, args, stream_id)
-            }
-            StreamOp::Dispose { stream_id, handler, args } => {
-                (FrameKind::IterateDispose, handler, args, stream_id)
-            }
+            StreamOp::Start {
+                stream_id,
+                handler,
+                args,
+            } => (FrameKind::IterateStart, handler, args, stream_id),
+            StreamOp::Next {
+                stream_id,
+                handler,
+                args,
+            } => (FrameKind::IterateNext, handler, args, stream_id),
+            StreamOp::Dispose {
+                stream_id,
+                handler,
+                args,
+            } => (FrameKind::IterateDispose, handler, args, stream_id),
         };
         let fresh = matches!(op, StreamOp::Start { .. });
         let reply = self.exchange(kind, event, args.clone(), Some(stream_id.clone()))?;
@@ -587,7 +616,11 @@ impl ExecOneShot {
         policy: &crate::sandbox::SandboxPolicy,
         encoding: Encoding,
     ) -> Self {
-        Self { argv: argv.to_vec(), policy: policy.clone(), encoding }
+        Self {
+            argv: argv.to_vec(),
+            policy: policy.clone(),
+            encoding,
+        }
     }
     /// One invocation = one process = one document in, one document out
     /// (the codec is the declaration; the request SHAPE is protocol-free
@@ -664,7 +697,9 @@ impl OneShotSession {
         policy: &crate::sandbox::SandboxPolicy,
         encoding: Encoding,
     ) -> Self {
-        Self { inner: ExecOneShot::new(argv, policy, encoding) }
+        Self {
+            inner: ExecOneShot::new(argv, policy, encoding),
+        }
     }
 }
 
@@ -741,7 +776,12 @@ impl induction_host::HostOps for BridgeOps<'_> {
         // surface); the canonical nested booth shape maps onto the
         // `invoke` table entry the ctx handles were registered under.
         let args = match call {
-            induction_protocol::InvokeCall::Booth { target_type, target_key, handler, args } => {
+            induction_protocol::InvokeCall::Booth {
+                target_type,
+                target_key,
+                handler,
+                args,
+            } => {
                 serde_json::json!({
                     "type": target_type, "key": target_key, "handler": handler, "args": args,
                 })
@@ -754,8 +794,8 @@ impl induction_host::HostOps for BridgeOps<'_> {
         };
         let f = self.bridge.functions.get("invoke").cloned();
         Box::pin(async move {
-            let f = f
-                .ok_or_else(|| "induction carrier: host fn 'invoke' not bridged".to_string())?;
+            let f =
+                f.ok_or_else(|| "induction carrier: host fn 'invoke' not bridged".to_string())?;
             (f)(args).map_err(|e| e.to_string())
         })
     }
@@ -776,8 +816,8 @@ impl induction_host::HostOps for BridgeOps<'_> {
         // (the schema-blind rule) — route_frame hands it over verbatim.
         let f = self.bridge.functions.get("store").cloned();
         Box::pin(async move {
-            let f = f
-                .ok_or_else(|| "induction carrier: host fn 'store' not bridged".to_string())?;
+            let f =
+                f.ok_or_else(|| "induction carrier: host fn 'store' not bridged".to_string())?;
             (f)(op.clone()).map_err(|e| e.to_string())
         })
     }
@@ -810,8 +850,8 @@ impl induction_host::HostOps for BridgeOps<'_> {
     fn schema<'a>(&'a self) -> induction_host::OpsFuture<'a> {
         let f = self.bridge.functions.get("schema").cloned();
         Box::pin(async move {
-            let f = f
-                .ok_or_else(|| "induction carrier: host fn 'schema' not bridged".to_string())?;
+            let f =
+                f.ok_or_else(|| "induction carrier: host fn 'schema' not bridged".to_string())?;
             (f)(Value::Null).map_err(|e| e.to_string())
         })
     }
@@ -843,11 +883,7 @@ fn spawn_child(
     argv: &[String],
     policy: &crate::sandbox::SandboxPolicy,
     encoding: Encoding,
-) -> Result<(
-    Child,
-    ChildStdin,
-    BufReader<std::process::ChildStdout>,
-)> {
+) -> Result<(Child, ChildStdin, BufReader<std::process::ChildStdout>)> {
     let (head, rest) = argv
         .split_first()
         .ok_or_else(|| anyhow!("exec/induction carrier: empty spawn spec"))?;
@@ -857,7 +893,12 @@ fn spawn_child(
             c.args(rest);
             c
         }
-        crate::sandbox::SandboxPolicy::Bubblewrap { allow_write, deny_read, cwd, .. } => {
+        crate::sandbox::SandboxPolicy::Bubblewrap {
+            allow_write,
+            deny_read,
+            cwd,
+            ..
+        } => {
             let quoted = argv
                 .iter()
                 .map(|a| format!("'{}'", a.replace('\'', "'\\''")))

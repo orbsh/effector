@@ -3,9 +3,9 @@
 
 use super::{ExecResult, HostBridge};
 use serde_json::Value;
-use steel::SteelVal;
 use steel::steel_vm::engine::Engine;
 use steel::steel_vm::register_fn::RegisterFn;
+use steel::SteelVal;
 
 /// Adapter: the bridge's four byte-level closures (host-owned engine,
 /// ADR-0037 4.16a) behind okm-steel's `Engine` trait (re-exported from
@@ -106,8 +106,8 @@ impl super::session::ResidentSession for SteelSession {
         // Handlers are addressed by their EVENT name (the @on collector
         // binds functions under it). No fallback: a name that does not
         // resolve is an error, never a magic-entry redirect.
-        let args_val = json_to_steel(args)
-            .map_err(|e| anyhow::anyhow!("steel args marshal: {e}"))?;
+        let args_val =
+            json_to_steel(args).map_err(|e| anyhow::anyhow!("steel args marshal: {e}"))?;
         let val = self
             .engine
             .call_function_by_name_with_args(handler, vec![args_val])
@@ -151,8 +151,7 @@ fn register_host(engine: &mut Engine, host: Option<&HostBridge>) {
             let decoded: Value = match &arg {
                 SteelVal::StringV(s) => {
                     let raw = s.to_string();
-                    serde_json::from_str(&raw)
-                        .unwrap_or(Value::String(raw))
+                    serde_json::from_str(&raw).unwrap_or(Value::String(raw))
                 }
                 other => steel_to_json(other).map_err(|e| e.to_string())?,
             };
@@ -176,7 +175,11 @@ fn json_to_steel(v: &Value) -> Result<SteelVal, String> {
         }
         Value::String(s) => SteelVal::StringV(s.clone().into()),
         Value::Array(items) => SteelVal::ListV(
-            items.iter().map(json_to_steel).collect::<Result<Vec<_>, String>>()?.into(),
+            items
+                .iter()
+                .map(json_to_steel)
+                .collect::<Result<Vec<_>, String>>()?
+                .into(),
         ),
         Value::Object(map) => {
             let mut hm = im_rc::HashMap::new();
@@ -198,10 +201,14 @@ fn steel_to_json(v: &SteelVal) -> ExecResult {
         SteelVal::IntV(i) => Value::Number(((*i) as i64).into()),
         SteelVal::StringV(s) => Value::String(s.to_string()),
         SteelVal::ListV(l) => Value::Array(
-            l.iter().map(steel_to_json).collect::<anyhow::Result<Vec<_>>>()?,
+            l.iter()
+                .map(steel_to_json)
+                .collect::<anyhow::Result<Vec<_>>>()?,
         ),
         SteelVal::VectorV(v) => Value::Array(
-            v.iter().map(steel_to_json).collect::<anyhow::Result<Vec<_>>>()?,
+            v.iter()
+                .map(steel_to_json)
+                .collect::<anyhow::Result<Vec<_>>>()?,
         ),
         SteelVal::HashMapV(m) => {
             let mut map = serde_json::Map::new();
@@ -317,10 +324,17 @@ fn bind_event_handlers(engine: &mut Engine) {
 /// they error if ever invoked (introspection never calls a handler).
 fn register_ctx_stubs(engine: &mut Engine) {
     const CTX_STUBS: &[&str] = &[
-        "ctx.invoke", "ctx.store", "ctx.schema", "ctx.emit",
-        "ctx.queue.depth", "ctx.queue.skip_to_head",
-        "ctx.timer.register", "ctx.timer.cancel",
-        "ctx.iterate.start", "ctx.iterate.next", "ctx.iterate.dispose",
+        "ctx.invoke",
+        "ctx.store",
+        "ctx.schema",
+        "ctx.emit",
+        "ctx.queue.depth",
+        "ctx.queue.skip_to_head",
+        "ctx.timer.register",
+        "ctx.timer.cancel",
+        "ctx.iterate.start",
+        "ctx.iterate.next",
+        "ctx.iterate.dispose",
     ];
     for name in CTX_STUBS {
         let name: &'static str = Box::leak((*name).to_string().into_boxed_str());
@@ -398,10 +412,14 @@ pub fn introspect(source: &str) -> ExecResult {
         }
         receives.insert(event.clone(), Value::Object(entry));
     }
-    let mut derived = Value::Object([
-        ("receives".to_string(), Value::Object(receives)),
-        ("wildcard_receives".to_string(), Value::Array(wildcards)),
-    ].into_iter().collect());
+    let mut derived = Value::Object(
+        [
+            ("receives".to_string(), Value::Object(receives)),
+            ("wildcard_receives".to_string(), Value::Array(wildcards)),
+        ]
+        .into_iter()
+        .collect(),
+    );
     // Reserved hooks (ADR-0043 §3): the collected `__` names ride the
     // schema as data — engine.register seeds BoothType.hook_declared
     // from this array.
@@ -425,13 +443,14 @@ pub fn introspect(source: &str) -> ExecResult {
     // phase gate: failures inside the schema call stay observable.
     let has_explicit = engine.extract_value("interface_schema").is_ok();
     let explicit: Option<Value> = if has_explicit {
-        Some(
-            steel_to_json(
-                &engine
-                    .call_function_by_name_with_args("interface_schema", vec![SteelVal::StringV("{}".into())])
-                    .map_err(|e| anyhow::anyhow!("interface_schema: {e:?}"))?,
-            )?,
-        )
+        Some(steel_to_json(
+            &engine
+                .call_function_by_name_with_args(
+                    "interface_schema",
+                    vec![SteelVal::StringV("{}".into())],
+                )
+                .map_err(|e| anyhow::anyhow!("interface_schema: {e:?}"))?,
+        )?)
     } else {
         None
     };
@@ -449,7 +468,10 @@ pub fn introspect(source: &str) -> ExecResult {
 /// receives block, silently dropping it (python's module-side merge
 /// composes both sources into one map; steel merges here).
 fn merge_schema(derived: Value, explicit: Value) -> Value {
-    fn deep_merge_receives(d: &mut serde_json::Map<String, Value>, e: &serde_json::Map<String, Value>) {
+    fn deep_merge_receives(
+        d: &mut serde_json::Map<String, Value>,
+        e: &serde_json::Map<String, Value>,
+    ) {
         for k in ["receives", "wildcard_receives"] {
             match (d.get_mut(k), e.get(k)) {
                 // receives: a map — explicit entries contribute keys the

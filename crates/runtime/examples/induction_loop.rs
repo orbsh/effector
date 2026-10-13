@@ -51,10 +51,22 @@ struct Job {
 fn job_from(req: &Value) -> Job {
     Job {
         id: req.get("id").cloned().unwrap_or(Value::Null),
-        kind: req.get("kind").and_then(|v| v.as_str()).unwrap_or("call").to_string(),
-        event: req.get("event").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        kind: req
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("call")
+            .to_string(),
+        event: req
+            .get("event")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         args: req.get("args").cloned().unwrap_or(Value::Null),
-        stream_id: req.get("stream_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        stream_id: req
+            .get("stream_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -88,10 +100,9 @@ fn run_json() {
                                 // (a swallowed Null made the parent's
                                 // failure invisible in assertions).
                                 break match hr.get("ok") {
-                                    Some(Value::Null) | None => hr
-                                        .get("error")
-                                        .cloned()
-                                        .unwrap_or(Value::Null),
+                                    Some(Value::Null) | None => {
+                                        hr.get("error").cloned().unwrap_or(Value::Null)
+                                    }
                                     Some(ok) => ok.clone(),
                                 };
                             }
@@ -153,7 +164,13 @@ fn dispatch(
     streams: &mut HashMap<String, Guard>,
     host: &mut impl FnMut(Value) -> Value,
 ) -> Value {
-    let Job { kind, event, args, stream_id, .. } = job;
+    let Job {
+        kind,
+        event,
+        args,
+        stream_id,
+        ..
+    } = job;
     // Unified seam (ADR-0036): dispatch jobs arrive as
     // `iterate_start` — invoke is the stream whose first round is
     // terminal. A plain handler replies with a bare value (no `done`

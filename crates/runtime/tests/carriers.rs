@@ -9,11 +9,21 @@
 use effector_runtime::carrier::session::Sessions;
 use effector_runtime::carrier::{execute, HostBridge};
 
-fn run(language: &str, src: &str, handler: &str, args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+fn run(
+    language: &str,
+    src: &str,
+    handler: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
     let sessions = Sessions::new();
-    sessions.with_session("t1", language, src, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-        s.call(handler, args)
-    })
+    sessions.with_session(
+        "t1",
+        language,
+        src,
+        None::<&HostBridge>,
+        &effector_runtime::sandbox::SandboxPolicy::None,
+        |s: &mut dyn effector_runtime::carrier::session::ResidentSession| s.call(handler, args),
+    )
 }
 
 // ---------------------------------------------------------------- python --
@@ -37,8 +47,26 @@ fn py_state_persists() {
     let call = |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
         s.call("push", &serde_json::json!({"item": "book"}))
     };
-    sessions.with_session("i", "python", src, host, &effector_runtime::sandbox::SandboxPolicy::None, call).unwrap();
-    let out = sessions.with_session("i", "python", src, host, &effector_runtime::sandbox::SandboxPolicy::None, call).unwrap();
+    sessions
+        .with_session(
+            "i",
+            "python",
+            src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            call,
+        )
+        .unwrap();
+    let out = sessions
+        .with_session(
+            "i",
+            "python",
+            src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            call,
+        )
+        .unwrap();
     assert_eq!(out, serde_json::json!(["book", "book"]));
 }
 
@@ -77,9 +105,16 @@ fn steel_entry_with_args() {
 fn unknown_language_is_error_value() {
     let sessions = Sessions::new();
     let err = sessions
-        .with_session("t1", "koto", "(+ 1 2)", None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-            s.call("f", &serde_json::json!(null))
-        })
+        .with_session(
+            "t1",
+            "koto",
+            "(+ 1 2)",
+            None::<&HostBridge>,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("f", &serde_json::json!(null))
+            },
+        )
         .unwrap_err();
     assert!(err.to_string().contains("koto"));
 }

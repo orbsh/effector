@@ -153,10 +153,18 @@ fn induction_iterate_stream() {
             break;
         }
     }
-    assert_eq!(envs[0], json!({"item": "i0", "done": false}), "start carries the first item");
+    assert_eq!(
+        envs[0],
+        json!({"item": "i0", "done": false}),
+        "start carries the first item"
+    );
     assert_eq!(envs[1], json!({"item": "i1", "done": false}));
     assert_eq!(envs[2], json!({"item": "i2", "done": false}));
-    assert_eq!(envs.last().unwrap(), &json!({"done": true}), "exhaustion writes done");
+    assert_eq!(
+        envs.last().unwrap(),
+        &json!({"done": true}),
+        "exhaustion writes done"
+    );
 
     // Pull-after-done: the child's guard is gone — a failed pull (an
     // error value through the stream), never a resurrection.
@@ -261,9 +269,14 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     let s = sessions();
     let argv = induction_bin();
     // Spawn + one call.
-    s.with_session("box/k4", "induction", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
-        sess.call("echo", &json!(1))
-    })
+    s.with_session(
+        "box/k4",
+        "induction",
+        &argv,
+        None,
+        &effector_runtime::sandbox::SandboxPolicy::None,
+        |sess| sess.call("echo", &json!(1)),
+    )
     .unwrap();
 
     // Kill the child behind the registry's back (simulates a crash):
@@ -283,8 +296,8 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
             },
         )
         .unwrap()["pid"]
-            .as_u64()
-            .unwrap() as i32;
+        .as_u64()
+        .unwrap() as i32;
     // SIGKILL from the outside; delivery is asynchronous — poll until
     // the kernel finishes (WNOHANG reads "alive" inside the delivery
     // window, so a single shot races the signal).
@@ -297,11 +310,19 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(swept.contains(&"box/k4".to_string()), "the dead slot is swept: {swept:?}");
+    assert!(
+        swept.contains(&"box/k4".to_string()),
+        "the dead slot is swept: {swept:?}"
+    );
     let out = s
-        .with_session("box/k4", "induction", &argv, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
-            sess.call("echo", &json!("after respawn"))
-        })
+        .with_session(
+            "box/k4",
+            "induction",
+            &argv,
+            None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |sess| sess.call("echo", &json!("after respawn")),
+        )
         .unwrap();
     assert_eq!(out, json!({"echoed": "after respawn"}));
 }
@@ -313,9 +334,12 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
 /// the protocol is IDENTICAL to the pipes shape — the fifos replace
 /// stdin only because nu cannot block-read a pipe.
 fn nu_induction_spec() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples/induction_nu.nu");
-    assert!(path.exists(), "nu induction fixture missing: {}", path.display());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/induction_nu.nu");
+    assert!(
+        path.exists(),
+        "nu induction fixture missing: {}",
+        path.display()
+    );
     format!("nu {}", path.display())
 }
 
@@ -338,7 +362,11 @@ fn nu_induction_call_round_trip_and_residency() {
         .unwrap()
     };
     assert_eq!(call("echo", json!({"a": 1})), json!({"echoed": {"a": 1}}));
-    assert_eq!(call("count", json!({})), json!({"count": 1}), "$env rides the resident child");
+    assert_eq!(
+        call("count", json!({})),
+        json!({"count": 1}),
+        "$env rides the resident child"
+    );
     assert_eq!(call("count", json!({})), json!({"count": 2}));
     // The schema frame carries the storage block (the plan the control
     // plane resolves at upload — ADR-0037's typed shape over the nu seam).
@@ -381,7 +409,12 @@ fn nu_induction_host_call_crosses_the_seam() {
             // dispatcher decodes the nested booth shape — an opaque
             // payload was decode-failure bait the old unvalidated carrier
             // let through
-            |sess| sess.call("ctx_round_trip", &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}})),
+            |sess| {
+                sess.call(
+                    "ctx_round_trip",
+                    &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}}),
+                )
+            },
         )
         .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1, "the host fn ran once");
@@ -430,7 +463,11 @@ fn nu_induction_iterate_stream() {
     assert_eq!(envs[0], json!({"item": "i0", "done": false}));
     assert_eq!(envs[1], json!({"item": "i1", "done": false}));
     assert_eq!(envs[2], json!({"item": "i2", "done": false}));
-    assert_eq!(envs.last().unwrap(), &json!({"done": true}), "exhaustion writes done");
+    assert_eq!(
+        envs.last().unwrap(),
+        &json!({"done": true}),
+        "exhaustion writes done"
+    );
 }
 
 /// Teardown discipline of the fifo shape: eviction kills the child and
@@ -440,23 +477,35 @@ fn nu_induction_iterate_stream() {
 fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
     let s = sessions();
     let spec = nu_induction_spec();
-    s.with_session("box/nu4", "induction", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
-        sess.call("echo", &json!("x"))
-    })
+    s.with_session(
+        "box/nu4",
+        "induction",
+        &spec,
+        None,
+        &effector_runtime::sandbox::SandboxPolicy::None,
+        |sess| sess.call("echo", &json!("x")),
+    )
     .unwrap();
     let got = s
-        .with_session("box/nu4", "induction", &spec, None, &effector_runtime::sandbox::SandboxPolicy::None, |sess| {
-            let b = sess
-                .as_any()
-                .downcast_mut::<effector_runtime::carrier::exec::InductionSession>()
-                .ok_or_else(|| anyhow::anyhow!("not a InductionSession"))?;
-            let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
-            let dir = b
-                .session_dir()
-                .ok_or_else(|| anyhow::anyhow!("no session dir"))?
-                .to_path_buf();
-            Ok(json!({"pid": pid, "dir": dir.display().to_string()}))
-        })
+        .with_session(
+            "box/nu4",
+            "induction",
+            &spec,
+            None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |sess| {
+                let b = sess
+                    .as_any()
+                    .downcast_mut::<effector_runtime::carrier::exec::InductionSession>()
+                    .ok_or_else(|| anyhow::anyhow!("not a InductionSession"))?;
+                let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
+                let dir = b
+                    .session_dir()
+                    .ok_or_else(|| anyhow::anyhow!("no session dir"))?
+                    .to_path_buf();
+                Ok(json!({"pid": pid, "dir": dir.display().to_string()}))
+            },
+        )
         .unwrap();
     let pid = got["pid"].as_u64().unwrap() as i32;
     let dir = PathBuf::from(got["dir"].as_str().unwrap());
@@ -472,7 +521,10 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(dead, "the evicted nu child is reaped (pid {pid} still alive)");
+    assert!(
+        dead,
+        "the evicted nu child is reaped (pid {pid} still alive)"
+    );
     // The session dir is removed on teardown (no fifo litter) — THIS
     // session's dir, never a glob (parallel tests own their dirs).
     for _ in 0..50 {
@@ -481,7 +533,11 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(!dir.exists(), "the session dir is cleaned on teardown: {}", dir.display());
+    assert!(
+        !dir.exists(),
+        "the session dir is cleaned on teardown: {}",
+        dir.display()
+    );
 }
 
 // ------------------------------------------------- ADR-0037 §2 locks --
@@ -518,11 +574,13 @@ fn induction_cbor_round_trip() {
             None,
             &effector_runtime::sandbox::SandboxPolicy::None,
             Encoding::Cbor,
-            |sess| sess.iterate(StreamOp::Start {
-                stream_id: "cs1".into(),
-                handler: "count".into(),
-                args: json!({"total": 2}),
-            }),
+            |sess| {
+                sess.iterate(StreamOp::Start {
+                    stream_id: "cs1".into(),
+                    handler: "count".into(),
+                    args: json!({"total": 2}),
+                })
+            },
         )
         .unwrap();
     assert_eq!(out2["item"], "i0", "the second call rides the same child");
@@ -559,11 +617,19 @@ fn induction_cbor_host_call_crosses_the_seam() {
             Encoding::Cbor,
             // canonical booth payload (see the nu seam test's note): the
             // shared dispatcher decodes the nested shape on the CBOR leg too
-            |sess| sess.call("ctx_round_trip", &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}})),
+            |sess| {
+                sess.call(
+                    "ctx_round_trip",
+                    &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}}),
+                )
+            },
         )
         .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1, "the host fn ran once");
-    assert_eq!(out["from"], "host", "the CBOR answer reached the child: {out}");
+    assert_eq!(
+        out["from"], "host",
+        "the CBOR answer reached the child: {out}"
+    );
 }
 
 /// The typing kills the document-layer mistake (ADR-0037 §2): a child
@@ -598,7 +664,10 @@ fn induction_untyped_host_frame_fails_at_decode() {
             |sess| sess.call("bad_host_frame", &json!({"q": 1})),
         )
         .unwrap();
-    assert!(seen.lock().unwrap().is_empty(), "the bridge fn must NOT run on an untyped frame");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the bridge fn must NOT run on an untyped frame"
+    );
     // The parent's error reply carries no `ok` — the fixture's host
     // helper forwards the error string itself (surfaced, not swallowed
     // to Null): the error value crossed the seam.
@@ -652,5 +721,8 @@ fn nu_cbor_declaration_is_an_error() {
         )
         .unwrap_err()
         .to_string();
-    assert!(err.contains("JSON-lines only"), "named the codec conflict: {err}");
+    assert!(
+        err.contains("JSON-lines only"),
+        "named the codec conflict: {err}"
+    );
 }

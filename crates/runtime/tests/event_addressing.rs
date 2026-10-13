@@ -23,9 +23,19 @@ def remove(args):
 "##;
     let sessions = Sessions::new();
     let out = sessions
-        .with_session("inst-1", "python", src, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-            s.call("add_to_cart", &serde_json::json!({"item": "book", "user_id": "u1"}))
-        })
+        .with_session(
+            "inst-1",
+            "python",
+            src,
+            None::<&HostBridge>,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call(
+                    "add_to_cart",
+                    &serde_json::json!({"item": "book", "user_id": "u1"}),
+                )
+            },
+        )
         .unwrap();
     println!("PY: {out}");
     assert_eq!(out["added"], "book");
@@ -39,9 +49,16 @@ fn steel_event_name_addressing() {
 "##;
     let sessions = Sessions::new();
     let out = sessions
-        .with_session("inst-1", "steel", src, None::<&HostBridge>, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-            s.call("add_to_cart", &serde_json::json!({"item": "book"}))
-        })
+        .with_session(
+            "inst-1",
+            "steel",
+            src,
+            None::<&HostBridge>,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("add_to_cart", &serde_json::json!({"item": "book"}))
+            },
+        )
         .unwrap();
     println!("STEEL: {out}");
     assert_eq!(out["added"], "book");
@@ -72,34 +89,88 @@ def bump(args):
     let sessions = Sessions::new();
     let host: Option<&HostBridge> = None;
 
-    let out = sessions.with_session("a1", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-        s.call("bump", &serde_json::json!({"by": 1}))
-    }).unwrap();
+    let out = sessions
+        .with_session(
+            "a1",
+            "python",
+            py_src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("bump", &serde_json::json!({"by": 1}))
+            },
+        )
+        .unwrap();
     assert_eq!(out["count"], 1);
-    let out = sessions.with_session("a1", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-        s.call("bump", &serde_json::json!({"by": 1}))
-    }).unwrap();
+    let out = sessions
+        .with_session(
+            "a1",
+            "python",
+            py_src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("bump", &serde_json::json!({"by": 1}))
+            },
+        )
+        .unwrap();
     assert_eq!(out["count"], 2, "python: same instance accumulates");
 
-    let out = sessions.with_session("s1", "steel", steel_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-        s.call("bump", &serde_json::json!({"by": 5}))
-    }).unwrap();
+    let out = sessions
+        .with_session(
+            "s1",
+            "steel",
+            steel_src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("bump", &serde_json::json!({"by": 5}))
+            },
+        )
+        .unwrap();
     assert_eq!(out["count"], 5);
-    let out = sessions.with_session("s1", "steel", steel_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-        s.call("bump", &serde_json::json!({"by": 5}))
-    }).unwrap();
+    let out = sessions
+        .with_session(
+            "s1",
+            "steel",
+            steel_src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("bump", &serde_json::json!({"by": 5}))
+            },
+        )
+        .unwrap();
     assert_eq!(out["count"], 10, "steel: same instance accumulates");
 
     // A DIFFERENT instance key = a fresh session (no cross-talk).
-    let out = sessions.with_session("a2", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-        s.call("bump", &serde_json::json!({"by": 100}))
-    }).unwrap();
+    let out = sessions
+        .with_session(
+            "a2",
+            "python",
+            py_src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("bump", &serde_json::json!({"by": 100}))
+            },
+        )
+        .unwrap();
     assert_eq!(out["count"], 100, "fresh instance starts at zero");
 
     // Evict wipes the instance; the next call rebuilds from zero.
     sessions.evict("a1");
-    let out = sessions.with_session("a1", "python", py_src, host, &effector_runtime::sandbox::SandboxPolicy::None, |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
-        s.call("bump", &serde_json::json!({"by": 1}))
-    }).unwrap();
+    let out = sessions
+        .with_session(
+            "a1",
+            "python",
+            py_src,
+            host,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+                s.call("bump", &serde_json::json!({"by": 1}))
+            },
+        )
+        .unwrap();
     assert_eq!(out["count"], 1, "evicted instance restarted fresh");
 }

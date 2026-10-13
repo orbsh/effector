@@ -81,12 +81,12 @@ pub struct ExecRequest<'a> {
 
 pub type ExecResult = anyhow::Result<Value>;
 
-#[cfg(feature = "steel")]
-pub mod steel;
+pub mod exec;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod exec;
 pub mod session;
+#[cfg(feature = "steel")]
+pub mod steel;
 
 /// Dispatch by declared language. Unknown language = error value, never a
 /// panic: the control plane declared it, the Effector only validates.
@@ -141,4 +141,3 @@ pub fn introspect_encoded(
         }
     }
 }
-

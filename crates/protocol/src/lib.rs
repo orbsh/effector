@@ -135,7 +135,6 @@ pub struct ToolResult {
     pub outcome: Result<serde_json::Value, String>,
 }
 
-
 /// Transport envelope over the outbound connection (Phase 3). The control
 /// plane sends exactly one frame per WS message; the effector replies likewise.
 #[derive(Debug, Clone, Serialize, Deserialize)]

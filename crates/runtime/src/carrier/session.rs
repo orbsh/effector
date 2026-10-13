@@ -44,9 +44,21 @@ pub trait ResidentSession: Send {
 /// in the control plane either way.
 #[derive(Debug, Clone)]
 pub enum StreamOp {
-    Start { stream_id: String, handler: String, args: Value },
-    Next { stream_id: String, handler: String, args: Value },
-    Dispose { stream_id: String, handler: String, args: Value },
+    Start {
+        stream_id: String,
+        handler: String,
+        args: Value,
+    },
+    Next {
+        stream_id: String,
+        handler: String,
+        args: Value,
+    },
+    Dispose {
+        stream_id: String,
+        handler: String,
+        args: Value,
+    },
 }
 
 impl StreamOp {
@@ -140,7 +152,10 @@ pub(crate) fn validate_envelope(reply: Value, fresh: bool, handler: &str) -> Res
                 // (`{"error": "..."}` with no envelope — the induction
                 // fixtures' shape): a mid-stream failure surfaces as the
                 // outer error value (ADR-0012), never a fake envelope.
-                let msg = reply.get("error").and_then(|v| v.as_str()).unwrap_or("stream error");
+                let msg = reply
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("stream error");
                 anyhow::bail!("iterate: producer error: {msg}")
             } else {
                 anyhow::bail!(
@@ -297,16 +312,14 @@ impl Sessions {
             .filter_map(|(k, slot)| {
                 // try_lock: a slot mid-call is alive by definition (a
                 // request is running) — never block the sweep behind one.
-                slot.try_lock()
-                    .ok()
-                    .and_then(|mut s| {
-                        let dead = s
-                            .as_any()
-                            .downcast_mut::<crate::carrier::exec::InductionSession>()
-                            .map(|e| !e.is_alive())
-                            .unwrap_or(false);
-                        dead.then(|| k.clone())
-                    })
+                slot.try_lock().ok().and_then(|mut s| {
+                    let dead = s
+                        .as_any()
+                        .downcast_mut::<crate::carrier::exec::InductionSession>()
+                        .map(|e| !e.is_alive())
+                        .unwrap_or(false);
+                    dead.then(|| k.clone())
+                })
             })
             .collect();
         for k in &dead {
@@ -350,7 +363,9 @@ fn spawn_session(
         // bwrap-wrapped (the mount policy runs before exec).
         "induction" => {
             let argv: Vec<String> = shellish_split(source);
-            Box::new(super::exec::InductionSession::spawn_wrapped(&argv, host, sandbox, encoding)?)
+            Box::new(super::exec::InductionSession::spawn_wrapped(
+                &argv, host, sandbox, encoding,
+            )?)
         }
         // exec (ADR-0035 — the bare cgi shape, NO protocol): one process
         // per call — the request JSON is written, stdin closed (EOF is

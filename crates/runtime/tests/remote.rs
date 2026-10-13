@@ -1,13 +1,13 @@
 //! Phase 3 acceptance: a fake control plane over a real WS endpoint.
 //! Register -> Registered -> push one ToolCall -> assert the ToolResult.
 
-use effector_config::{CapabilitySurface, NetworkPolicy, EffectorConfig};
+use effector_config::{CapabilitySurface, EffectorConfig, NetworkPolicy};
 use effector_protocol::{CodeRef, Frame, ToolCall, ToolResult};
 use effector_runtime::remote;
+use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-use futures_util::{SinkExt, StreamExt};
 
 async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     let (stream, _) = listener.accept().await.unwrap();
@@ -19,7 +19,11 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
         panic!("expected text frame");
     };
     match serde_json::from_str::<Frame>(&text).unwrap() {
-        Frame::Register { node_alias, carriers, .. } => {
+        Frame::Register {
+            node_alias,
+            carriers,
+            ..
+        } => {
             assert_eq!(node_alias, "test-node");
             assert!(carriers.contains(&"steel".to_string()));
         }
@@ -57,7 +61,10 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     match serde_json::from_str::<Frame>(&text).unwrap() {
         Frame::Result(ToolResult { call_id, outcome }) => {
             assert_eq!(call_id, "c-1");
-            assert_eq!(outcome.unwrap(), serde_json::json!({"done": true, "value": {"doubled": 6}}));
+            assert_eq!(
+                outcome.unwrap(),
+                serde_json::json!({"done": true, "value": {"doubled": 6}})
+            );
         }
         other => panic!("expected Result, got {other:?}"),
     }
@@ -144,7 +151,8 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
     let code = br#"
 (define (triple args)
   (hash "tripled" (* 3 (hash-ref args "n"))))
-"#.to_vec();
+"#
+    .to_vec();
     let (http_port, sha, hits) = serve_code(code);
     let hits_check = hits.clone();
 
@@ -158,9 +166,11 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         let msg = stream.next().await.unwrap().unwrap();
         let f: Frame = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert!(matches!(f, Frame::Register { .. }));
-        sink.send(Message::Text(serde_json::to_string(&Frame::Registered).unwrap()))
-            .await
-            .unwrap();
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Registered).unwrap(),
+        ))
+        .await
+        .unwrap();
 
         // Link call with the CORRECT hash: fetch, verify, execute.
         let call = ToolCall {
@@ -170,21 +180,26 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             session: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: induction_protocol::Encoding::Json,
+            encoding: induction_protocol::Encoding::Json,
             args: serde_json::json!({"n": 5}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
                 sha256: sha.clone(),
             },
         };
-        sink.send(Message::Text(serde_json::to_string(&Frame::Call(call)).unwrap()))
-            .await
-            .unwrap();
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Call(call)).unwrap(),
+        ))
+        .await
+        .unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         match serde_json::from_str::<Frame>(msg.to_text().unwrap()).unwrap() {
             Frame::Result(r) => {
                 assert_eq!(r.call_id, "c-link");
-                assert_eq!(r.outcome.unwrap(), serde_json::json!({"done": true, "value": {"tripled": 15}}));
+                assert_eq!(
+                    r.outcome.unwrap(),
+                    serde_json::json!({"done": true, "value": {"tripled": 15}})
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -199,21 +214,26 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             session: "triple/k2".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: induction_protocol::Encoding::Json,
+            encoding: induction_protocol::Encoding::Json,
             args: serde_json::json!({"n": 2}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
                 sha256: sha.clone(),
             },
         };
-        sink.send(Message::Text(serde_json::to_string(&Frame::Call(call)).unwrap()))
-            .await
-            .unwrap();
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Call(call)).unwrap(),
+        ))
+        .await
+        .unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         match serde_json::from_str::<Frame>(msg.to_text().unwrap()).unwrap() {
             Frame::Result(r) => {
                 assert_eq!(r.call_id, "c-cached");
-                assert_eq!(r.outcome.unwrap(), serde_json::json!({"done": true, "value": {"tripled": 6}}));
+                assert_eq!(
+                    r.outcome.unwrap(),
+                    serde_json::json!({"done": true, "value": {"tripled": 6}})
+                );
             }
             other => panic!("expected Result, got {other:?}"),
         }
@@ -231,16 +251,18 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             session: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
-        encoding: induction_protocol::Encoding::Json,
+            encoding: induction_protocol::Encoding::Json,
             args: serde_json::json!({"n": 5}),
             code: CodeRef {
                 url: format!("http://127.0.0.1:{http_port}/code"),
                 sha256: "deadbeef".into(),
             },
         };
-        sink.send(Message::Text(serde_json::to_string(&Frame::Call(call)).unwrap()))
-            .await
-            .unwrap();
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Call(call)).unwrap(),
+        ))
+        .await
+        .unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         match serde_json::from_str::<Frame>(msg.to_text().unwrap()).unwrap() {
             Frame::Result(r) => {

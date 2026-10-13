@@ -6,15 +6,15 @@
 //! the control determines compromise, not the industry's conservative
 //! defaults).
 
-use anyhow::{Context, Result};
-use std::io::Read as _;
-use futures_util::{SinkExt, StreamExt};
-use effector_config::EffectorConfig;
-use effector_protocol::{CodeRef, Frame, HostCall, HostFrame, HostOp, ToolCall, ToolResult};
-use std::sync::Mutex as StdMutex;
 use crate::carrier::session::Sessions;
 use crate::carrier::HostBridge;
+use anyhow::{Context, Result};
+use effector_config::EffectorConfig;
+use effector_protocol::{CodeRef, Frame, HostCall, HostFrame, HostOp, ToolCall, ToolResult};
+use futures_util::{SinkExt, StreamExt};
+use std::io::Read as _;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Serve one connection until it drops. Reconnect loop lives in `run`.
@@ -25,7 +25,8 @@ async fn serve_connection(
     sessions: &Sessions,
     code_cache: &Arc<CodeCache>,
 ) -> Result<()> {
-    let pending_host: Arc<PendingHost> = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let pending_host: Arc<PendingHost> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let (ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
         .with_context(|| format!("dial control plane {ws_url}"))?;
@@ -58,7 +59,11 @@ async fn serve_connection(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
     let writer = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
-            if sink.send(Message::Text(serde_json::to_string(&frame)?)).await.is_err() {
+            if sink
+                .send(Message::Text(serde_json::to_string(&frame)?))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -103,7 +108,10 @@ async fn serve_connection(
 
 /// Pending host calls: host_call_id -> reply path.
 type PendingHost = std::sync::Mutex<
-    std::collections::HashMap<String, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>>,
+    std::collections::HashMap<
+        String,
+        tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+    >,
 >;
 
 /// Execute one ToolCall against the resident sessions. Phase 4 adds the
@@ -148,7 +156,10 @@ async fn execute_call_inner(
     // calls sharing a `session` share VM/module state, different ones never
     // do. The node alias in the key is only for readability (the registry is
     // process-local). `entry` names the point the delivered code exposes.
-    let key = format!("effector/{}/{}", config.capabilities.node_alias, call.session);
+    let key = format!(
+        "effector/{}/{}",
+        config.capabilities.node_alias, call.session
+    );
     let sessions = sessions.clone();
     let language = call.language.clone();
     let entry = call.entry.clone();
@@ -178,15 +189,27 @@ async fn execute_call_inner(
             // stream_id is minted by the control plane — the effector
             // derives nothing from it.
             move |s: &mut dyn crate::carrier::session::ResidentSession| match kind {
-                effector_protocol::CallKind::IterateStart => s.iterate(
-                    crate::carrier::session::StreamOp::Start { stream_id, handler: entry, args },
-                ),
-                effector_protocol::CallKind::IterateNext => s.iterate(
-                    crate::carrier::session::StreamOp::Next { stream_id, handler: entry, args },
-                ),
-                effector_protocol::CallKind::IterateDispose => s.iterate(
-                    crate::carrier::session::StreamOp::Dispose { stream_id, handler: entry, args },
-                ),
+                effector_protocol::CallKind::IterateStart => {
+                    s.iterate(crate::carrier::session::StreamOp::Start {
+                        stream_id,
+                        handler: entry,
+                        args,
+                    })
+                }
+                effector_protocol::CallKind::IterateNext => {
+                    s.iterate(crate::carrier::session::StreamOp::Next {
+                        stream_id,
+                        handler: entry,
+                        args,
+                    })
+                }
+                effector_protocol::CallKind::IterateDispose => {
+                    s.iterate(crate::carrier::session::StreamOp::Dispose {
+                        stream_id,
+                        handler: entry,
+                        args,
+                    })
+                }
             },
         )
     })
@@ -212,13 +235,19 @@ fn build_host_bridge(
         let call_id = call_id.clone();
         let f: crate::carrier::HostFn = Arc::new(move |arg: serde_json::Value| {
             let (op_tx, op_rx) = tokio::sync::oneshot::channel();
-            let host_call_id = format!("host-{}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?.as_nanos());
+            let host_call_id = format!(
+                "host-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos()
+            );
             let op = match name {
                 "invoke" => {
                     let m = match &arg {
-                        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
-                            .unwrap_or(serde_json::Value::Null),
+                        serde_json::Value::String(s) => {
+                            serde_json::from_str::<serde_json::Value>(s)
+                                .unwrap_or(serde_json::Value::Null)
+                        }
                         other => other.clone(),
                     };
                     let gs = |k: &str| m.get(k).cloned().unwrap_or(serde_json::Value::Null);
@@ -232,10 +261,7 @@ fn build_host_bridge(
                 }
                 _ => unreachable!(),
             };
-            pending
-                .lock()
-                .unwrap()
-                .insert(host_call_id.clone(), op_tx);
+            pending.lock().unwrap().insert(host_call_id.clone(), op_tx);
             tx.send(Frame::Host(HostFrame::Call(HostCall {
                 host_call_id: host_call_id.clone(),
                 call_id: call_id.clone(),
@@ -277,8 +303,13 @@ fn build_host_bridge(
             let call_id = call_id.clone();
             let f: crate::carrier::HostFn = Arc::new(move |arg: serde_json::Value| {
                 let (op_tx, op_rx) = tokio::sync::oneshot::channel();
-                let host_call_id = format!("host-{}-{}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?.as_nanos(), std::process::id());
+                let host_call_id = format!(
+                    "host-{}-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_nanos(),
+                    std::process::id()
+                );
                 let m = match &arg {
                     serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
                         .unwrap_or(serde_json::Value::Null),
@@ -293,8 +324,12 @@ fn build_host_bridge(
                         handler: gs_s("handler"),
                         args: gs("args"),
                     },
-                    HostOpArm::Next => HostOp::IterateNext { stream_id: gs_s("stream_id") },
-                    HostOpArm::Dispose => HostOp::IterateDispose { stream_id: gs_s("stream_id") },
+                    HostOpArm::Next => HostOp::IterateNext {
+                        stream_id: gs_s("stream_id"),
+                    },
+                    HostOpArm::Dispose => HostOp::IterateDispose {
+                        stream_id: gs_s("stream_id"),
+                    },
                     HostOpArm::StoreEmit => HostOp::StoreEmit {
                         // The decoded argument IS the instruction —
                         // carried as data, schema-blind (see above).
@@ -336,8 +371,6 @@ enum HostOpArm {
     Emit,
 }
 
-
-
 /// Per-hash code cache (ADR-0027): resolved bytes keyed by the asserted
 /// hash. Content addressing makes eviction semantics trivial — a stale
 /// entry is unreachable waste (new code is a new hash, a new key), so the
@@ -349,7 +382,9 @@ pub struct CodeCache {
 
 impl CodeCache {
     pub fn new() -> Self {
-        Self { entries: StdMutex::new(std::collections::HashMap::new()) }
+        Self {
+            entries: StdMutex::new(std::collections::HashMap::new()),
+        }
     }
 
     /// Resolve a reference to source text: cache hit, or fetch + verify +
@@ -392,9 +427,7 @@ fn fetch_verified(url: &str, expected_sha256: &str) -> anyhow::Result<Vec<u8>> {
     hasher.update(&bytes);
     let got = hex::encode(hasher.finalize());
     if got != expected_sha256.to_lowercase() {
-        anyhow::bail!(
-            "link hash mismatch for {url}: expected {expected_sha256}, got {got}"
-        );
+        anyhow::bail!("link hash mismatch for {url}: expected {expected_sha256}, got {got}");
     }
     Ok(bytes)
 }
@@ -422,7 +455,8 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
     }
-}fn sandbox_policy_for(config: &EffectorConfig) -> crate::sandbox::SandboxPolicy {
+}
+fn sandbox_policy_for(config: &EffectorConfig) -> crate::sandbox::SandboxPolicy {
     use crate::sandbox::SandboxPolicy;
     SandboxPolicy::Bubblewrap {
         allow_write: config.capabilities.fs_scope.clone(),

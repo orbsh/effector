@@ -2,11 +2,11 @@
 
 use super::session::StreamOp;
 use super::{ExecResult, HostBridge, HostFn, StorageEngineFns};
-use std::collections::HashMap;
-use std::ffi::CString;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyCFunction, PyDict, PyFloat, PyInt, PyList, PyModule, PyString};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::ffi::CString;
 
 /// Adapter: the bridge's four byte-level closures (host-owned engine,
 /// ADR-0037 4.16a) behind okm-python's `Engine` trait. The trait's
@@ -112,12 +112,18 @@ fn load_module<'py>(
             // the module must expose them there. The module handle is
             // captured (no sys.modules lookup: our module is synthetic).
             let module_handle = module_handle.clone_ref(py);
-            let binder = PyCFunction::new_closure(py, None, None, move |a: &Bound<'_, pyo3::types::PyTuple>, _kw: Option<&Bound<'_, pyo3::types::PyDict>>| {
-                let py = unsafe { Python::assume_attached() };
-                let f = a.get_item(0)?;
-                module_handle.bind(py).setattr(event.clone(), &f)?;
-                Ok::<_, pyo3::PyErr>(f.unbind())
-            })?;
+            let binder = PyCFunction::new_closure(
+                py,
+                None,
+                None,
+                move |a: &Bound<'_, pyo3::types::PyTuple>,
+                      _kw: Option<&Bound<'_, pyo3::types::PyDict>>| {
+                    let py = unsafe { Python::assume_attached() };
+                    let f = a.get_item(0)?;
+                    module_handle.bind(py).setattr(event.clone(), &f)?;
+                    Ok::<_, pyo3::PyErr>(f.unbind())
+                },
+            )?;
             Ok::<_, pyo3::PyErr>(binder.into_any().unbind())
         } else {
             Ok::<_, pyo3::PyErr>(first.unbind())
@@ -243,10 +249,8 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
     };
     let reg_handle: Py<PyList> = registry.clone().unbind();
     let hooks_handle: Py<PyList> = hooks.clone_ref(py);
-    let explicit_fn: Option<Py<PyAny>> = module
-        .getattr("interface_schema")
-        .ok()
-        .map(|f| f.unbind());
+    let explicit_fn: Option<Py<PyAny>> =
+        module.getattr("interface_schema").ok().map(|f| f.unbind());
     let merge = PyCFunction::new_closure(py, None, None, move |_args, _kw| {
         let py = unsafe { Python::assume_attached() };
         let reg = reg_handle.bind(py);
@@ -256,7 +260,11 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
         for item in reg.iter() {
             let pair: (String, String) = match item.extract() {
                 Ok(p) => p,
-                Err(e) => return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("@on registry entry: {e}"))),
+                Err(e) => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "@on registry entry: {e}"
+                    )))
+                }
             };
             if pair.0.ends_with(".*") {
                 wildcards.push(Value::String(pair.0));
@@ -268,10 +276,14 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
             }
             receives.insert(pair.0, Value::Object(entry));
         }
-        let mut merged = Value::Object([
-            ("receives".to_string(), Value::Object(receives)),
-            ("wildcard_receives".to_string(), Value::Array(wildcards)),
-        ].into_iter().collect());
+        let mut merged = Value::Object(
+            [
+                ("receives".to_string(), Value::Object(receives)),
+                ("wildcard_receives".to_string(), Value::Array(wildcards)),
+            ]
+            .into_iter()
+            .collect(),
+        );
         // Reserved hooks (ADR-0043 §3): the collected `__` names ride the
         // schema as data — engine.register seeds BoothType.hook_declared.
         {
@@ -309,8 +321,9 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
         // class definitions are the authoritative DDL — the explicit half
         // contributes lifecycle and the like).
         if let Some(f) = &explicit_fn {
-            let r = f.bind(py).call1((py.None(),))
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("interface_schema: {e}")))?;
+            let r = f.bind(py).call1((py.None(),)).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("interface_schema: {e}"))
+            })?;
             let explicit_v = json_from_py(py, &r)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             merged = merge_schema(merged, explicit_v);
@@ -343,15 +356,19 @@ unsafe impl Send for PythonSession {}
 
 impl PythonSession {
     pub fn new(host: Option<&HostBridge>) -> anyhow::Result<Self> {
-        Ok(Self { module: None, host: host.cloned(), streams: HashMap::new() })
+        Ok(Self {
+            module: None,
+            host: host.cloned(),
+            streams: HashMap::new(),
+        })
     }
 }
 
 impl super::session::ResidentSession for PythonSession {
     fn load(&mut self, source: &str) -> anyhow::Result<()> {
         Python::attach(|py| -> anyhow::Result<()> {
-            let (module, _registry, _hooks) = load_module(py, source)
-                .map_err(|e| anyhow::anyhow!("python load: {e}"))?;
+            let (module, _registry, _hooks) =
+                load_module(py, source).map_err(|e| anyhow::anyhow!("python load: {e}"))?;
             // Host functions bind once at load and stay for the session's
             // whole life — same marshal contract as the old one-shot path.
             // ADR-0043: the host bridge is ONE module-level object `ctx`,
@@ -413,7 +430,9 @@ impl super::session::ResidentSession for PythonSession {
                     } else {
                         new_ns()?.unbind()
                     };
-                    parent.bind_borrowed(py).setattr(parts[parts.len() - 1], &node)?;
+                    parent
+                        .bind_borrowed(py)
+                        .setattr(parts[parts.len() - 1], &node)?;
                     group_nodes.insert(g.clone(), node);
                 }
                 // Pass 2: bind leaves — a double-role key stores its
@@ -431,8 +450,11 @@ impl super::session::ResidentSession for PythonSession {
                     let call = PyCFunction::new_closure(py, None, None, move |args, _kw| {
                         let py = unsafe { Python::assume_attached() };
                         let raw: String = args.get_item(0)?.extract()?;
-                        let decoded: Value = serde_json::from_str(&raw)
-                            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("host arg not JSON: {e}")))?;
+                        let decoded: Value = serde_json::from_str(&raw).map_err(|e| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "host arg not JSON: {e}"
+                            ))
+                        })?;
                         // Release the GIL around the host call: ctx fns
                         // block_on an async round trip that may run ANOTHER
                         // python booth's session (iterate, invoke) — that
@@ -445,7 +467,7 @@ impl super::session::ResidentSession for PythonSession {
                             let f = f.clone();
                             py.detach(move || (f)(decoded))
                         }
-                            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                         Ok::<_, pyo3::PyErr>(json_to_py(py, &out)?.unbind())
                     })?;
                     // Split the dotted path: descend the group tree built
@@ -495,9 +517,7 @@ impl super::session::ResidentSession for PythonSession {
                         &coll.entry,
                         slot.ns,
                     )
-                    .map_err(|e| anyhow::anyhow!(
-                        "inject collection {}: {e}", coll.name
-                    ))?;
+                    .map_err(|e| anyhow::anyhow!("inject collection {}: {e}", coll.name))?;
                     module.add(coll.name.as_str(), table)?;
                 }
             }
@@ -508,7 +528,9 @@ impl super::session::ResidentSession for PythonSession {
 
     fn call(&mut self, handler: &str, args: &Value) -> anyhow::Result<Value> {
         Python::attach(|py| -> anyhow::Result<Value> {
-            let module = self.module.as_ref()
+            let module = self
+                .module
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("python session: call before load"))?
                 .bind(py);
             // Handlers are addressed by their EVENT name (the @on
@@ -543,7 +565,11 @@ impl super::session::ResidentSession for PythonSession {
                 .ok_or_else(|| anyhow::anyhow!("python session: iterate before load"))?
                 .bind(py);
             match op {
-                StreamOp::Start { stream_id, handler, args } => {
+                StreamOp::Start {
+                    stream_id,
+                    handler,
+                    args,
+                } => {
                     if self.streams.contains_key(&stream_id) {
                         anyhow::bail!("python iterate: stream id '{stream_id}' already live");
                     }
@@ -653,11 +679,11 @@ impl super::session::ResidentSession for PythonSession {
 /// add lifecycle etc.). Same call contract as steel/python/induction.
 pub fn introspect(source: &str) -> ExecResult {
     Python::attach(|py| -> ExecResult {
-        let (module, _registry, _hooks) = load_module(py, source)
-            .map_err(|e| anyhow::anyhow!("python load: {e}"))?;
-        let schema_fn = module
-            .getattr("interface_schema")
-            .map_err(|e| anyhow::anyhow!("python: no interface_schema (carrier assembles it) — {e}"))?;
+        let (module, _registry, _hooks) =
+            load_module(py, source).map_err(|e| anyhow::anyhow!("python load: {e}"))?;
+        let schema_fn = module.getattr("interface_schema").map_err(|e| {
+            anyhow::anyhow!("python: no interface_schema (carrier assembles it) — {e}")
+        })?;
         let result = schema_fn
             .call1((py.None(),))
             .map_err(|e| anyhow::anyhow!("python interface_schema: {e}"))?;
@@ -679,7 +705,13 @@ fn merge_schema(derived: Value, explicit: Value) -> Value {
             Value::Object(d)
         }
         (d, Value::Object(e)) if e.is_empty() => d,
-        (d, e) => if e.is_null() { d } else { e },
+        (d, e) => {
+            if e.is_null() {
+                d
+            } else {
+                e
+            }
+        }
     };
     // Deep-merge the receives maps: explicit receives entries that the
     // decorators did not declare still contribute (the script may know a
@@ -739,7 +771,9 @@ fn json_from_py(py: Python<'_>, v: &Bound<'_, PyAny>) -> ExecResult {
         return Ok(Value::Number(i.into()));
     }
     if let Ok(f) = v.extract::<f64>() {
-        return Ok(serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null));
+        return Ok(serde_json::Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null));
     }
     if let Ok(s) = v.extract::<String>() {
         return Ok(Value::String(s));
