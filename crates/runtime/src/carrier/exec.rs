@@ -29,7 +29,7 @@
 //! the child's capability surface = the channels + jail).
 //!
 //! The dispatch contract (user ruling 2026-09-29): the event frame
-//! enters the child's SINGLE entry point (bgi: the loop reads frames and
+//! enters the child's SINGLE entry point (induction: the loop reads frames and
 //! calls the author's dispatch — `main` for nushell, a match in the loop
 //! body for Rust fixtures; embedded carriers hand the name to a native
 //! registry: python/steel collect `on` declarations, wasm address
@@ -49,7 +49,7 @@
 use super::session::{ResidentSession, StreamOp};
 use super::HostBridge;
 use anyhow::{anyhow, Result};
-use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, HostFrame, Reply, ResultFrame};
+use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, Reply, ResultFrame};
 use serde_json::Value;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -68,9 +68,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 // named-function table (the arm names ARE the bridge keys — the dotted ctx
 // method paths, ADR-0043).
 
-// --------------------------------------------------------------- bgi --
+// ---------------------------------------------------------- induction --
 
-/// One resident bgi session: the framed child, in one of two shapes.
+/// One resident induction session: the framed child, in one of two shapes.
 pub struct BgiSession {
     /// Host functions for the child's ctx round trips — the child sends
     /// them inside a TYPED host frame (ADR-0037 §2), mapped to these
@@ -183,10 +183,10 @@ impl BgiSession {
         let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = match policy {
             crate::sandbox::SandboxPolicy::None => {
-                std::env::temp_dir().join(format!("effector-bgi-nu-{}-{id}", std::process::id()))
+                std::env::temp_dir().join(format!("effector-induction-nu-{}-{id}", std::process::id()))
             }
             crate::sandbox::SandboxPolicy::Bubblewrap { cwd, .. } => {
-                Path::new(cwd).join(format!("effector-bgi-nu-{}-{id}", std::process::id()))
+                Path::new(cwd).join(format!("effector-induction-nu-{}-{id}", std::process::id()))
             }
         };
         std::fs::create_dir_all(&dir)?;
@@ -336,64 +336,49 @@ impl BgiSession {
                         .map_err(|e| anyhow!("induction carrier: malformed cbor frame: {e}"))?
                 }
             };
-            if msg.get("host").is_some() {
-                // ONE ctx round trip. The typed frame discriminates at the
-                // frame-structure layer (ADR-0037 §2): an unknown arm or a
-                // malformed shape is a decode failure — an error value back
-                // into the child, never a silent unknown-op table miss. The
-                // store payload is never parsed here (schema-blind).
-                let Some(host) = HostFrame::from_value(&msg) else {
-                    let reply = Reply::error(format!(
-                        "induction carrier: bad host frame: {}",
-                        msg["host"]
-                    ));
-                    self.send_reply(&reply.to_value())?;
-                    continue;
-                };
-                let outcome = self.call_host(&host);
-                if !host.arm.has_reply() {
-                    // `emit` is fire-and-forget by CONTRACT (ADR-0043 §5):
-                    // the frame carries no reply, and a publish failure lands
-                    // on stderr — never as an error value into a guest that
-                    // stopped listening. The no-reply set is the protocol's
-                    // (Arm::has_reply), not a flag each host re-decides.
-                    if let Err(e) = outcome {
-                        eprintln!(
-                            "[bgi] ctx.{} (fire-and-forget) failed: {e}",
-                            host.arm.as_str()
-                        );
-                    }
-                    continue;
-                }
-                let reply = match outcome {
-                    Ok(v) => Reply::ok(v),
-                    Err(e) => Reply::error(e.to_string()),
-                };
-                self.send_reply(&reply.to_value())?;
-                continue;
-            }
             if let Some(result) = ResultFrame::from_value(&msg) {
                 return Ok(result.result);
             }
+            if msg.get("host").is_some() {
+                // ONE dispatch through the shared arm core (induction-host
+                // `route_frame` — the same dispatcher mudra's host runs):
+                // an unknown arm or a malformed shape is a decode failure —
+                // an error value back into the child, never a silent
+                // unknown-op table miss. The store payload is never parsed
+                // here (schema-blind). The bridge's sync fns run to
+                // completion inside `route_frame`'s future; block_on polls
+                // it from this spawn_blocking thread (no io inside — the
+                // future cannot actually block on the runtime, it parks
+                // only until the sync fn returns).
+                let frame = match induction_host::parse_guest_value(&msg) {
+                    Some(f) => f,
+                    None => {
+                        let reply = Reply::error(format!(
+                            "induction carrier: bad host frame: {}",
+                            msg["host"]
+                        ));
+                        self.send_reply(&reply.to_value())?;
+                        continue;
+                    }
+                };
+                match block_serve(induction_host::route_frame(&BridgeOps { bridge: &self.host }, frame)) {
+                    induction_host::Routed::Reply(reply) => {
+                        self.send_reply(&reply.to_value())?;
+                    }
+                    // `emit` is fire-and-forget by CONTRACT (ADR-0043 §5):
+                    // the frame carries no reply — route_frame accepted it,
+                    // and its failure (if the bridge fn errored) is already
+                    // logged by the dispatcher, never written as an error
+                    // value into a guest that stopped listening.
+                    induction_host::Routed::Accepted | induction_host::Routed::Result(_) => {}
+                    induction_host::Routed::DecodeFailed => {
+                        self.teardown();
+                        return Err(anyhow!("induction carrier: unexpected frame {msg}"));
+                    }
+                }
+                continue;
+            }
             return Err(anyhow!("induction carrier: unexpected frame {msg}"));
-        }
-    }
-
-    /// Route one typed host frame onto the bridge's named-function table. The
-    /// arm's dotted name IS the bridge key (ADR-0043: the in-process carriers
-    /// inject the same keys as one `ctx` object — the process seam carries the
-    /// same vocabulary, typed).
-    fn call_host(&self, frame: &HostFrame) -> Result<Value> {
-        let name = frame.arm.as_str();
-        // `store` carries its instruction beside `type`, not under `args`
-        // (the schema-blind rule) — and it crosses as DATA either way.
-        let arg = match frame.arm {
-            Arm::Store => frame.op.clone().unwrap_or(Value::Null),
-            _ => frame.args.clone(),
-        };
-        match self.host.functions.get(name) {
-            Some(f) => (f)(arg),
-            None => Err(anyhow!("induction carrier: host fn '{name}' not bridged")),
         }
     }
 
@@ -541,7 +526,7 @@ impl ResidentSession for BgiSession {
         self.exchange(FrameKind::Call, handler, args.clone(), None)
     }
 
-    /// ADR-0034 over the bgi seam, unified envelope (ADR-0036): the
+    /// ADR-0034 over the induction seam, unified envelope (ADR-0036): the
     /// stream verbs are request frames — the child keeps whatever guard
     /// state or generator its language offers — and the child's reply is
     /// envelope-validated here: a plain Start reply (no `done`) wraps to
@@ -717,6 +702,132 @@ impl ResidentSession for OneShotSession {
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }
+}
+
+// ---------------------------------------------------- bridge adapter --
+
+/// Poll one routing future to completion from this synchronous
+/// (spawn_blocking) thread. The routing future holds no io and the bridge
+/// fns are synchronous — `block_on` here can never actually block on a
+/// runtime resource; it parks only while the future's sync body runs.
+/// (`futures_util::executor::block_on` would do, but its `executor` module
+/// is not a stable API surface; this is the same five lines.)
+fn block_serve<R>(fut: impl std::future::Future<Output = R>) -> R {
+    let mut fut = Box::pin(fut);
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(v) => return v,
+            std::task::Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
+
+/// The named-function bridge as a `HostOps`: one dispatcher shape for every
+/// host of the protocol. The arm name IS the table key, so this is a lookup,
+/// nothing more — semantics live in the functions (aura's ctx handles) and
+/// the arm names (the protocol's).
+struct BridgeOps<'a> {
+    bridge: &'a super::HostBridge,
+}
+
+impl induction_host::HostOps for BridgeOps<'_> {
+    fn invoke<'a>(
+        &'a self,
+        call: &'a induction_protocol::InvokeCall,
+    ) -> induction_host::OpsFuture<'a> {
+        // The flat `verb` shape has no bridge fn (verbs are a mudra host's
+        // surface); the canonical nested booth shape maps onto the
+        // `invoke` table entry the ctx handles were registered under.
+        let args = match call {
+            induction_protocol::InvokeCall::Booth { target_type, target_key, handler, args } => {
+                serde_json::json!({
+                    "type": target_type, "key": target_key, "handler": handler, "args": args,
+                })
+            }
+            induction_protocol::InvokeCall::Verb { .. } => {
+                return Box::pin(async {
+                    Err("induction carrier: host fn 'invoke' cannot serve the flat `verb` shape (no verbs on this host)".to_string())
+                });
+            }
+        };
+        let f = self.bridge.functions.get("invoke").cloned();
+        Box::pin(async move {
+            let f = f
+                .ok_or_else(|| "induction carrier: host fn 'invoke' not bridged".to_string())?;
+            (f)(args).map_err(|e| e.to_string())
+        })
+    }
+
+    fn emit(&self, event: &str, data: &Value) -> Result<(), String> {
+        let f = self
+            .bridge
+            .functions
+            .get("emit")
+            .ok_or_else(|| "host fn 'emit' not bridged".to_string())?;
+        (f)(serde_json::json!({ "event": event, "data": data }))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn store<'a>(&'a self, op: &'a Value) -> induction_host::OpsFuture<'a> {
+        // `store` carries its instruction beside `type`, not under `args`
+        // (the schema-blind rule) — route_frame hands it over verbatim.
+        let f = self.bridge.functions.get("store").cloned();
+        Box::pin(async move {
+            let f = f
+                .ok_or_else(|| "induction carrier: host fn 'store' not bridged".to_string())?;
+            (f)(op.clone()).map_err(|e| e.to_string())
+        })
+    }
+
+    fn iterate<'a>(&'a self, arm: Arm, args: &'a Value) -> induction_host::OpsFuture<'a> {
+        let name = arm.as_str();
+        let f = self.bridge.functions.get(name).cloned();
+        Box::pin(async move {
+            let f = f.ok_or_else(|| format!("induction carrier: host fn '{name}' not bridged"))?;
+            (f)(args.clone()).map_err(|e| e.to_string())
+        })
+    }
+
+    fn timer_register<'a>(&'a self, args: &'a Value) -> induction_host::OpsFuture<'a> {
+        table_fn(&self.bridge.functions, "timer.register", args)
+    }
+
+    fn timer_cancel<'a>(&'a self, args: &'a Value) -> induction_host::OpsFuture<'a> {
+        table_fn(&self.bridge.functions, "timer.cancel", args)
+    }
+
+    fn queue_depth<'a>(&'a self, args: &'a Value) -> induction_host::OpsFuture<'a> {
+        table_fn(&self.bridge.functions, "queue.depth", args)
+    }
+
+    fn queue_skip_to_head<'a>(&'a self, args: &'a Value) -> induction_host::OpsFuture<'a> {
+        table_fn(&self.bridge.functions, "queue.skip_to_head", args)
+    }
+
+    fn schema<'a>(&'a self) -> induction_host::OpsFuture<'a> {
+        let f = self.bridge.functions.get("schema").cloned();
+        Box::pin(async move {
+            let f = f
+                .ok_or_else(|| "induction carrier: host fn 'schema' not bridged".to_string())?;
+            (f)(Value::Null).map_err(|e| e.to_string())
+        })
+    }
+}
+
+/// One table lookup + call, the shape every non-invoke arm shares.
+fn table_fn<'a>(
+    functions: &'a std::collections::BTreeMap<String, super::HostFn>,
+    name: &'static str,
+    args: &'a Value,
+) -> induction_host::OpsFuture<'a> {
+    let f = functions.get(name).cloned();
+    Box::pin(async move {
+        let f = f.ok_or_else(|| format!("induction carrier: host fn '{name}' not bridged"))?;
+        (f)(args.clone()).map_err(|e| e.to_string())
+    })
 }
 
 // -------------------------------------------------------------- spawn --

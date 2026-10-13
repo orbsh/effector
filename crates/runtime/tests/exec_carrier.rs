@@ -1,8 +1,8 @@
-//! Exec/BGI carrier tests (ADR-0035): the framed resident shape (bgi —
-//! the `bgi_loop` fixture: the line protocol, call, ctx round trip, the
-//! iterate verbs, residency/sweep rules) and the bare one-shot shape
-//! (exec — the `one_shot` fixture: no protocol, one JSON in, one JSON
-//! out, nothing survives the call).
+//! Exec/Induction carrier tests (ADR-0035): the framed resident shape
+//! (induction — the `induction_loop` fixture: the line protocol, call, ctx
+//! round trip, the iterate verbs, residency/sweep rules) and the bare
+//! one-shot shape (exec — the `one_shot` fixture: no protocol, one JSON in,
+//! one JSON out, nothing survives the call).
 //!
 //! Fixtures are built by the workspace (`cargo build -p effector-runtime
 //! --examples`; the nu author script lives beside them in this crate's
@@ -114,7 +114,7 @@ fn bgi_host_call_crosses_the_seam() {
     );
 }
 
-/// ADR-0034 over the bgi seam: start carries the first envelope,
+/// ADR-0034 over the induction seam: start carries the first envelope,
 /// next advances the guard the CHILD keeps in its own memory (the
 /// residency is the stream state — the envelope producer has no
 /// generator, and it does not need one), done is written.
@@ -215,7 +215,7 @@ fn exec_oneshot_runs_per_call() {
 /// wraps stdout into `{done:true,value}` (bare script, carrier-wrapped).
 /// The STREAM is what a one-shot cannot do: the follow-up Next names the
 /// design as an error value (the cgi lineage has no residency to hold a
-/// stream — the fix is bgi, not a retry).
+/// stream — the fix is induction, not a retry).
 #[test]
 fn exec_oneshot_iterate_is_a_named_error() {
     let s = sessions();
@@ -253,7 +253,7 @@ fn exec_oneshot_iterate_is_a_named_error() {
     );
 }
 
-/// BGI residency rule: eviction closes stdin (the loop's EOF) and
+/// Induction residency rule: eviction closes stdin (the loop's EOF) and
 /// reaps; a child that died on its own is swept by sweep_dead so the
 /// next call cold-starts a fresh spawn.
 #[test]
@@ -279,7 +279,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
                 sess.as_any()
                     .downcast_mut::<effector_runtime::carrier::exec::BgiSession>()
                     .and_then(|e| e.child_pid().map(|p| json!({ "pid": p })))
-                    .ok_or_else(|| anyhow::anyhow!("not a bgi session"))
+                    .ok_or_else(|| anyhow::anyhow!("not a BgiSession"))
             },
         )
         .unwrap()["pid"]
@@ -306,7 +306,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     assert_eq!(out, json!({"echoed": "after respawn"}));
 }
 
-// ----------------------------------------------------- nu bgi (two-fifo) --
+// ------------------------------------------------- nu induction (two-fifo) --
 
 /// The nushell author script (ADR-0035 §8): `def main [req rep]` IS the
 /// loop; the session shape is chosen by the spawn spec's head (`nu`) and
@@ -315,7 +315,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
 fn nu_bgi_spec() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples/induction_nu.nu");
-    assert!(path.exists(), "nu bgi fixture missing: {}", path.display());
+    assert!(path.exists(), "nu induction fixture missing: {}", path.display());
     format!("nu {}", path.display())
 }
 
@@ -376,7 +376,12 @@ fn nu_bgi_host_call_crosses_the_seam() {
             &spec,
             Some(&bridge),
             &effector_runtime::sandbox::SandboxPolicy::None,
-            |sess| sess.call("ctx_round_trip", &json!({"q": 1})),
+            // the CANONICAL invoke payload (ADR-0001): the child forwards
+            // it verbatim into the host frame's args, where the shared
+            // dispatcher decodes the nested booth shape — an opaque
+            // payload was decode-failure bait the old unvalidated carrier
+            // let through
+            |sess| sess.call("ctx_round_trip", &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}})),
         )
         .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1, "the host fn ran once");
@@ -388,7 +393,7 @@ fn nu_bgi_host_call_crosses_the_seam() {
 
 /// The envelope stream over the nu adapter, guard state in `$env` —
 /// start carries the first item, exhaustion WRITES done (the same
-/// ADR-0034 shape the Rust bgi fixture locks; nu lands it with no
+/// ADR-0034 shape the Rust induction fixture locks; nu lands it with no
 /// generator language, only `$env`).
 #[test]
 fn nu_bgi_iterate_stream() {
@@ -444,7 +449,7 @@ fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
             let b = sess
                 .as_any()
                 .downcast_mut::<effector_runtime::carrier::exec::BgiSession>()
-                .ok_or_else(|| anyhow::anyhow!("not a bgi session"))?;
+                .ok_or_else(|| anyhow::anyhow!("not a BgiSession"))?;
             let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
             let dir = b
                 .session_dir()
@@ -481,7 +486,7 @@ fn nu_bgi_eviction_reaps_the_child_and_clears_the_dir() {
 
 // ------------------------------------------------- ADR-0037 §2 locks --
 
-/// The declared CBOR codec crosses the bgi pipes channel: the parent
+/// The declared CBOR codec crosses the induction pipes channel: the parent
 /// writes self-delimited CBOR documents, the child decodes them and
 /// answers the same way — the echo round trip works with NO line
 /// protocol in between (the frame shape is unchanged; only the codec
@@ -552,7 +557,9 @@ fn bgi_cbor_host_call_crosses_the_seam() {
             Some(&bridge),
             &effector_runtime::sandbox::SandboxPolicy::None,
             Encoding::Cbor,
-            |sess| sess.call("ctx_round_trip", &json!({"q": 1})),
+            // canonical booth payload (see the nu seam test's note): the
+            // shared dispatcher decodes the nested shape on the CBOR leg too
+            |sess| sess.call("ctx_round_trip", &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}})),
         )
         .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1, "the host fn ran once");
