@@ -726,3 +726,127 @@ fn nu_cbor_declaration_is_an_error() {
         "named the codec conflict: {err}"
     );
 }
+
+// -------------------------------------------------------- deploy runners --
+
+/// The node's runner artifacts (gravity ADR-0001 §4) live in `deploy/runners/`
+/// — a spawn spec like any other fixture, so a missing one fails loudly.
+fn runner_spec(file: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy/runners")
+        .join(file);
+    assert!(path.exists(), "runner artifact missing: {}", path.display());
+    format!("python3 {}", path.display())
+}
+
+/// A bridge whose `invoke` arm records every frame it is handed (the
+/// observation point for both tests below).
+fn recording_bridge(seen: &Arc<Mutex<Vec<Value>>>, tag: &'static str) -> HostBridge {
+    let seen = seen.clone();
+    let mut b = HostBridge::default();
+    b.functions.insert(
+        "invoke".into(),
+        Arc::new(move |arg: Value| {
+            seen.lock().unwrap().push(arg.clone());
+            Ok(json!({ "answered_by": tag, "echo": arg }))
+        }) as effector_runtime::carrier::HostFn,
+    );
+    b
+}
+
+/// The bridge is per-CALL data, the session is not (the two clocks ADR-0001
+/// separates): a second call through one resident session must reach the
+/// SECOND call's bridge. A session that kept its cold start's bridge answers
+/// with a call id nobody is waiting on any more — over the wire that is "the
+/// enclosing remote call is not in flight", an error VALUE and never a
+/// timeout, which is how the two failure shapes are told apart.
+#[test]
+fn induction_resident_session_rearms_the_bridge_per_call() {
+    let first: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let second: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let s = sessions();
+    let argv = induction_bin();
+    let args = json!({ "type": "t", "key": "k", "handler": "h", "args": { "q": 1 } });
+    let b1 = recording_bridge(&first, "first");
+    let out1 = s
+        .with_session(
+            "box/bridge-clock",
+            "induction",
+            &argv,
+            Some(&b1),
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |sess| sess.call("ctx_round_trip", &args),
+        )
+        .unwrap();
+    assert_eq!(out1["answered_by"], "first");
+    let b2 = recording_bridge(&second, "second");
+    let out2 = s
+        .with_session(
+            "box/bridge-clock",
+            "induction",
+            &argv,
+            Some(&b2),
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |sess| sess.call("ctx_round_trip", &args),
+        )
+        .unwrap();
+    assert_eq!(
+        out2["answered_by"], "second",
+        "the second call's ctx frame reached the second call's bridge"
+    );
+    assert_eq!(
+        first.lock().unwrap().len(),
+        1,
+        "the cold start's bridge is not answering later calls"
+    );
+    assert_eq!(second.lock().unwrap().len(), 1);
+}
+
+/// The python resident runner (a node artifact, not a fixture) against a
+/// bridge: the delivered script runs with `sys.stdout` REDIRECTED into the
+/// result capture buffer, so the runner's protocol writer must ride fds
+/// pinned at import. The bridge is the observation point — a guest whose
+/// frame landed in the capture buffer leaves it unfired and parks the call to
+/// its deadline, which is the failure this test exists to prevent.
+#[test]
+fn the_resident_runner_keeps_its_ctx_frames_on_the_wire() {
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let bridge = recording_bridge(&seen, "host");
+    let s = sessions();
+    let spec = runner_spec("runner_py_guest.py");
+    let out = s
+        .with_session_encoded(
+            "box/runner-guest",
+            "induction",
+            &spec,
+            Some(&bridge),
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            induction_protocol::Encoding::Json,
+            |sess| {
+                sess.iterate(StreamOp::Start {
+                    stream_id: "s1".into(),
+                    handler: "execute".into(),
+                    args: json!({
+                        "code": "import json\n\
+                                 r = ctx_invoke('sibling', '', 'execute', {'q': 1})\n\
+                                 print(json.dumps({'bridged': r}))"
+                    }),
+                })
+            },
+        )
+        .unwrap();
+    let frames = seen.lock().unwrap().clone();
+    assert_eq!(
+        frames.len(),
+        1,
+        "the runner's ctx frame reached the bridge: {frames:?}"
+    );
+    assert_eq!(frames[0]["type"], "sibling");
+    assert_eq!(frames[0]["handler"], "execute");
+    assert_eq!(frames[0]["args"], json!({ "q": 1 }));
+    assert_eq!(
+        out,
+        json!({ "done": true, "value": { "bridged": { "answered_by": "host", "echo": frames[0] } } }),
+        "the delivered script's own result came back through the envelope"
+    );
+}
