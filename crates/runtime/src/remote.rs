@@ -442,6 +442,13 @@ fn fetch_verified(url: &str, expected_sha256: &str) -> anyhow::Result<Vec<u8>> {
 
 /// Top-level loop: dial, register, serve; reconnect with backoff on drop.
 pub async fn run(config: EffectorConfig) -> Result<()> {
+    // Fail closed before dialing: a declaration this node cannot enforce is
+    // refused here rather than registered as a capability (see
+    // `EffectorConfig::validate`). The credential check below is the same
+    // shape — a startup fact, not a per-call error value.
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("effector config: {e}"))?;
     let credential = std::env::var(&config.credential_env)
         .with_context(|| format!("credential env var {} not set", config.credential_env))?;
     let sessions = Sessions::new();
@@ -464,12 +471,104 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
         backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
     }
 }
+/// The jail is built from the NODE'S OWN declaration (`CapabilitySurface`):
+/// the machine is the party that knows what it can expose, so the machine
+/// states it — nothing here is derived from a control-plane frame, and no
+/// field is left hardcoded while a declaration for it exists.
 fn sandbox_policy_for(config: &EffectorConfig) -> crate::sandbox::SandboxPolicy {
     use crate::sandbox::SandboxPolicy;
+    use effector_config::NetworkPolicy;
     SandboxPolicy::Bubblewrap {
+        // Write scope: everything else is read-only.
         allow_write: config.capabilities.fs_scope.clone(),
-        deny_read: vec![],
-        cwd: std::env::temp_dir().display().to_string(),
-        allowed_domains: vec![],
+        // The read-side declaration (credentials, shell configs, …).
+        deny_read: config.capabilities.deny_read.clone(),
+        // Declared cwd, or the pre-declaration default (the system temp dir).
+        cwd: config
+            .capabilities
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().display().to_string()),
+        // Allowlists ride the sandbox runtime's proxy, which this node does
+        // not configure: `validate()` refuses any non-`none` declaration at
+        // startup, so only `none` reaches here. The field is carried for the
+        // day the proxy path is wired (an empty list is what the jail already
+        // does — egress denied).
+        allowed_domains: match &config.capabilities.network {
+            NetworkPolicy::Allow(domains) => domains.clone(),
+            NetworkPolicy::None | NetworkPolicy::Open => Vec::new(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effector_config::{CapabilitySurface, NetworkPolicy};
+
+    fn config(capabilities: CapabilitySurface) -> EffectorConfig {
+        EffectorConfig {
+            control_plane_url: "ws://127.0.0.1:8787".into(),
+            sandbox: true,
+            credential_env: "EFFECTOR_CREDENTIAL".into(),
+            capabilities,
+        }
+    }
+
+    fn wrapped(caps: CapabilitySurface) -> (Vec<String>, Vec<String>, String, Vec<String>) {
+        match sandbox_policy_for(&config(caps)) {
+            crate::sandbox::SandboxPolicy::Bubblewrap {
+                allow_write,
+                deny_read,
+                cwd,
+                allowed_domains,
+            } => (allow_write, deny_read, cwd, allowed_domains),
+            other => panic!("a wrapped deployment builds a bwrap policy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_jail_is_the_nodes_own_declaration() {
+        let caps = CapabilitySurface {
+            node_alias: "n1".into(),
+            fs_scope: vec!["/srv/work".into()],
+            deny_read: vec!["/home/user/.ssh".into()],
+            cwd: Some("/srv/work".into()),
+            ..Default::default()
+        };
+        let (allow_write, deny_read, cwd, allowed_domains) = wrapped(caps);
+        assert_eq!(allow_write, vec!["/srv/work".to_string()]);
+        assert_eq!(deny_read, vec!["/home/user/.ssh".to_string()]);
+        assert_eq!(cwd, "/srv/work");
+        assert!(
+            allowed_domains.is_empty(),
+            "no allowlist → nothing to carry"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_cwd_keeps_the_old_default() {
+        let caps = CapabilitySurface {
+            node_alias: "n1".into(),
+            fs_scope: vec!["/srv/work".into()],
+            ..Default::default()
+        };
+        let (_, deny_read, cwd, _) = wrapped(caps);
+        assert!(deny_read.is_empty());
+        assert_eq!(cwd, std::env::temp_dir().display().to_string());
+    }
+
+    #[test]
+    fn a_declared_allowlist_reaches_the_policy_field() {
+        // The declaration→policy hop is what this node owns; the proxy that
+        // would consume it is the unwired half (validate refuses the claim
+        // until then, and this mapping is what a later wiring reads).
+        let caps = CapabilitySurface {
+            node_alias: "n1".into(),
+            network: NetworkPolicy::Allow(vec!["github.com:443".into()]),
+            ..Default::default()
+        };
+        let (_, _, _, allowed_domains) = wrapped(caps);
+        assert_eq!(allowed_domains, vec!["github.com:443".to_string()]);
     }
 }

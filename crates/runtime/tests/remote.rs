@@ -280,11 +280,43 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "link-node".into(),
-            network: NetworkPolicy::Open,
+            // `none` is the only egress declaration this node can HONOR
+            // (nothing wires an allowlist; the jail denies egress). A
+            // non-`none` value is a startup error now — effector ADR-0001 —
+            // so this test, which is about content-addressed code and not
+            // about the network, declares the enforceable thing.
+            network: NetworkPolicy::None,
             ..Default::default()
         },
     };
     std::env::set_var("EFFECTOR_LINK_CREDENTIAL", "tok");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), remote::run(config)).await;
     server.await.unwrap();
+}
+
+/// ADR-0001: a declaration this node cannot enforce is refused BEFORE it
+/// dials — the control plane never receives a capability that would not hold.
+/// The config crate pins the message; this pins that `run` consults it.
+#[tokio::test]
+async fn an_unenforceable_declaration_fails_before_dialing() {
+    let config = EffectorConfig {
+        // Nothing listens on port 1: a real dial would fail with a DIFFERENT
+        // error (connection refused), so the named config error is the proof
+        // that the node never dialed at all.
+        control_plane_url: "ws://127.0.0.1:1".into(),
+        sandbox: true,
+        credential_env: "EFFECTOR_REFUSAL_CREDENTIAL".into(),
+        capabilities: CapabilitySurface {
+            carriers: vec!["steel".into()],
+            node_alias: "refusing-node".into(),
+            network: NetworkPolicy::Allow(vec!["github.com:443".into()]),
+            ..Default::default()
+        },
+    };
+    std::env::set_var("EFFECTOR_REFUSAL_CREDENTIAL", "tok");
+    let err = remote::run(config).await.unwrap_err().to_string();
+    assert!(
+        err.contains("network") && err.contains("proxy"),
+        "the refusal names the missing enforcement point: {err}"
+    );
 }

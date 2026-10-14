@@ -27,9 +27,18 @@ pub struct CapabilitySurface {
     /// Carriers this node carries (e.g. ["steel", "python"]). Registration
     /// advertises these; a task naming a missing carrier is an error value.
     pub carriers: Vec<String>,
-    /// Filesystem paths delivered scripts may read/write. Prefix-scoped;
-    /// empty = no fs.
+    /// Filesystem paths delivered scripts may WRITE. Enforced as the jail's
+    /// write scope: everything else is read-only, and reads are not confined
+    /// by this field (deny_read is the read-side declaration).
     pub fs_scope: Vec<String>,
+    /// Paths delivered scripts must NOT read, whatever else would allow them
+    /// (credentials, shell configs, other users' trees). Enforced as the
+    /// jail's deny_read.
+    pub deny_read: Vec<String>,
+    /// Working directory inside the jail. `None` = the system temp dir (the
+    /// pre-declaration default, kept so an unconfigured node behaves as it
+    /// did before this field existed).
+    pub cwd: Option<String>,
     /// Whether delivered scripts may execute host commands.
     pub command_exec: bool,
     /// Network egress policy for script execution.
@@ -47,6 +56,8 @@ impl Default for CapabilitySurface {
         Self {
             carriers: Vec::new(),
             fs_scope: Vec::new(),
+            deny_read: Vec::new(),
+            cwd: None,
             command_exec: false,
             network: NetworkPolicy::None,
             node_alias: String::new(),
@@ -85,4 +96,90 @@ pub struct EffectorConfig {
     /// environment (single source of truth outside config files).
     pub credential_env: String,
     pub capabilities: CapabilitySurface,
+}
+
+impl EffectorConfig {
+    /// Refuse a configuration that claims containment this node cannot
+    /// enforce. A declared field IS a claim about what delivered code may do,
+    /// so every field must name its enforcement point: a claim nothing
+    /// enforces is a lie the config file tells, and this node fails closed
+    /// rather than registering it as a capability.
+    ///
+    /// Enforced today: `fs_scope` (the jail's write scope), `deny_read`, `cwd`,
+    /// and the wrap itself (`sandbox`). Not wired: a command-execution GRANT,
+    /// and any `network` other than `none` (egress allowlists ride the sandbox
+    /// runtime's proxy, which nothing here configures; the jail denies egress
+    /// outright, so a declaration of access would contradict it).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.capabilities.command_exec {
+            return Err(
+                "capabilities.command_exec = true: nothing in this node enforces a \
+                 command-execution grant (no policy field carries it, and the jail admits \
+                 exec inside its namespace regardless) — declare false, or wire the \
+                 enforcement before claiming it"
+                    .into(),
+            );
+        }
+        match &self.capabilities.network {
+            NetworkPolicy::None => Ok(()),
+            other => Err(format!(
+                "capabilities.network = {}: this node wires no enforcement for it — egress \
+                 allowlists ride the sandbox runtime's proxy (not configured here) and the \
+                 jail denies egress outright, so the declaration would contradict the jail \
+                 — declare \"none\", or wire the allowlist path first",
+                serde_json::to_string(other).unwrap_or_else(|_| "<unprintable>".into())
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(capabilities: CapabilitySurface) -> EffectorConfig {
+        EffectorConfig {
+            control_plane_url: "ws://127.0.0.1:8787".into(),
+            sandbox: true,
+            credential_env: "EFFECTOR_CREDENTIAL".into(),
+            capabilities,
+        }
+    }
+
+    fn declaring() -> CapabilitySurface {
+        CapabilitySurface {
+            node_alias: "n1".into(),
+            carriers: vec!["exec".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_declaration_without_an_enforcement_point_is_refused() {
+        let mut caps = declaring();
+        caps.command_exec = true;
+        let err = config(caps).validate().unwrap_err();
+        assert!(err.contains("command_exec"), "{err}");
+
+        let mut caps = declaring();
+        caps.network = NetworkPolicy::Allow(vec!["github.com:443".into()]);
+        let err = config(caps).validate().unwrap_err();
+        assert!(err.contains("network") && err.contains("proxy"), "{err}");
+
+        let mut caps = declaring();
+        caps.network = NetworkPolicy::Open;
+        assert!(
+            config(caps).validate().is_err(),
+            "an unrestricted-egress claim has no enforcement either"
+        );
+    }
+
+    #[test]
+    fn the_enforceable_declarations_pass() {
+        let mut caps = declaring();
+        caps.fs_scope = vec!["/srv/work".into()];
+        caps.deny_read = vec!["/home/user/.ssh".into()];
+        caps.cwd = Some("/srv/work".into());
+        assert!(config(caps).validate().is_ok());
+    }
 }
