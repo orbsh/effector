@@ -31,6 +31,13 @@ loudly rather than half-speaking it):
 Failures are VALUES (ADR-0012): a delivered script that raises, prints nothing,
 or prints a non-JSON document comes back as {"error": ...} — the runner's own
 text reaches the next inference round instead of being masked by the carrier.
+
+The wire fds are PINNED at import (`WIRE_IN` / `WIRE_OUT`) and every protocol
+frame goes through them: the delivered script runs with `sys.stdout` redirected
+into a capture buffer (its printed document IS the result), so a ctx call made
+from inside a script would otherwise write its frame into that buffer — the
+parent would wait for a line that never arrives while the script waits for a
+reply that was never sent, and the call would end at the deadline.
 """
 
 import contextlib
@@ -38,6 +45,11 @@ import io
 import json
 import os
 import sys
+
+# Pinned before anything can redirect them (see the module docstring): frame
+# lookups must never go through `sys.stdout`/`sys.stdin` at frame time.
+WIRE_IN = sys.stdin
+WIRE_OUT = sys.stdout
 
 SCHEMA_EVENT = "interface_schema"
 ENCODING_ENV = "INDUCTION_ENCODING"
@@ -55,14 +67,14 @@ SCHEMA = {
 
 
 def write_frame(value):
-    """One protocol line on stdout — the ONLY writer of this channel."""
-    sys.stdout.write(json.dumps(value) + "\n")
-    sys.stdout.flush()
+    """One protocol line on the captured wire — the ONLY writer of this channel."""
+    WIRE_OUT.write(json.dumps(value) + "\n")
+    WIRE_OUT.flush()
 
 
 def read_frame():
     """One protocol line from stdin, or None at EOF (the parent closed it)."""
-    line = sys.stdin.readline()
+    line = WIRE_IN.readline()
     if not line:
         return None
     line = line.strip()
