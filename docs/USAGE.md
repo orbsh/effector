@@ -74,6 +74,8 @@ Order of operations at effector startup:
     "node_alias": "home-pc",
     "carriers": ["steel", "python", "induction"],
     "fs_scope": ["/home/user/work"],
+    "deny_read": ["/home/user/.ssh", "/home/user/.config"],
+    "cwd": "/home/user/work",
     "command_exec": false,
     "network": "none"
   }
@@ -89,7 +91,22 @@ Order of operations at effector startup:
 - `capabilities.node_alias` — **the alias must be set.** The default is the empty
   string, and a effector registered as `""` cannot be addressed by name (the failure
   shows up on the control-plane side as "effector not connected").
+- `capabilities.fs_scope` — the paths delivered scripts may **write**. Everything
+  outside them is read-only; reads are not confined by this field (that is
+  `deny_read`'s job).
+- `capabilities.deny_read` — paths delivered scripts must **not read** (your
+  credentials, shell configs, other users' trees). Undeclared = nothing denied.
+- `capabilities.cwd` — the working directory inside the jail. Undeclared = the
+  system temp dir (the pre-declaration behavior).
 - `capabilities.network` — `"none"`, `{ "allow": ["host:port"] }`, or `"open"`.
+  **`none` is the only value this node can honor today**: egress allowlists ride
+  the sandbox runtime's proxy (not wired), and the jail denies egress outright.
+  Anything else is a **startup error**, not a silently ignored setting.
+- `capabilities.command_exec` — `true` is likewise a **startup error** today:
+  nothing blocks or grants exec inside the jail. Declare `false`.
+- The rule behind both refusals (ADR-0001): a declared field is a published
+  capability, so it must name its **enforcement point** — a claim this node
+  cannot honor fails the startup instead of being registered as a lie.
 
 Connection shape: one WS message carries exactly one frame, as JSON text tagged by
 `"type"`. The effector's reader and writer are separate tasks, so the connection is

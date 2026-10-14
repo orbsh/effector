@@ -39,6 +39,8 @@ Effector 启动顺序：
     "node_alias": "home-pc",
     "carriers": ["steel", "python", "induction"],
     "fs_scope": ["/home/user/work"],
+    "deny_read": ["/home/user/.ssh", "/home/user/.config"],
+    "cwd": "/home/user/work",
     "command_exec": false,
     "network": "none"
   }
@@ -49,7 +51,12 @@ Effector 启动顺序：
 - `sandbox` —— 默认 `true`，把会话进程包进 bubblewrap。远程部署必须保持开启（无人值守的外部代码）。
 - `credential_env` —— 注册凭据是**用户**凭据，它从不写进配置文件。
 - `capabilities.node_alias` —— **别名必须设置。** 默认值是空串，以 `""` 注册的 effector 无法按名字寻址（症状出现在控制端一侧："effector not connected"）。
-- `capabilities.network` —— `"none"`、`{ "allow": ["host:port"] }` 或 `"open"`。
+- `capabilities.fs_scope` —— 下发脚本可以**写**的路径。它们之外一律只读；**读**不受这个字段约束（那是 `deny_read` 的事）。
+- `capabilities.deny_read` —— 下发脚本**不许读**的路径（你的凭证、shell 配置、别人的目录）。不声明 = 什么都不拒。
+- `capabilities.cwd` —— jail 里的工作目录。不声明 = 系统临时目录（声明面出现之前的行为）。
+- `capabilities.network` —— `"none"`、`{ "allow": ["host:port"] }` 或 `"open"`。**今天只有 `none` 是这台节点兑现得起的**：出网允许清单要骑 sandbox runtime 的代理（未接），而 jail 直接拒绝出网。别的值都是**启动错误**，不是被静默忽略的设置。
+- `capabilities.command_exec` —— `true` 同样是**启动错误**：jail 内部能否 exec，既没有字段拦也没有字段放。声明 `false`。
+- 两条拒绝背后的规矩（ADR-0001）：声明出去的字段就是发布出去的能力，所以它必须指明自己的**执行点**——这台节点兑现不了的声明，在启动时失败，而不是被当作谎言注册出去。
 
 连接形态：一条 WS 消息恰好一个帧，JSON 文本，以 `"type"` 为内部 tag。Effector 的读端与写端是两个任务，所以连接是**全双工**的——一个调用执行期间帧仍可双向流动（§4.2 依赖这一点）。非文本 WS 消息被忽略。
 
