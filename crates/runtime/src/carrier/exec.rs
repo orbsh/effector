@@ -74,7 +74,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 pub struct InductionSession {
     /// Host functions for the child's ctx round trips — the child sends
     /// them inside a TYPED host frame (ADR-0037 §2), mapped to these
-    /// dotted keys at dispatch ("invoke", "store", …, ADR-0043).
+    /// dotted keys at dispatch ("invoke", "store", …, ADR-0043). Re-armed
+    /// per call by `set_host`: the bridge is per-call data (it carries the
+    /// enclosing call's id), the session is not.
     host: HostBridge,
     kind: SessionKind,
     next_id: u64,
@@ -584,6 +586,13 @@ impl ResidentSession for InductionSession {
             // wraps to terminal, Next's missing `done` is an error.
             _ => super::session::validate_envelope(reply, fresh, event),
         }
+    }
+
+    /// The child's ctx frames ride the bridge of the call that is running
+    /// now (the dispatch seam re-arms it on every call — a resident session
+    /// spawned by an earlier call must not answer with that call's id).
+    fn set_host(&mut self, host: Option<&HostBridge>) {
+        self.host = host.cloned().unwrap_or_default();
     }
 
     fn as_any(&mut self) -> &mut dyn std::any::Any {

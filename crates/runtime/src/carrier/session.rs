@@ -31,6 +31,17 @@ pub trait ResidentSession: Send {
     /// `{done: true, value: <ret>}` — the carrier wraps, the handler
     /// never writes the envelope sugar for an invoke (0036 §2).
     fn iterate(&mut self, op: StreamOp) -> Result<Value>;
+    /// Re-arm the host bridge for the call that is about to run. The bridge
+    /// is per-CALL data — it carries the enclosing remote call's id, which
+    /// the control plane resolves the ctx scope with — while a resident
+    /// session outlives the call that spawned it. A session whose bridge is
+    /// only the cold start's answers ctx frames with a call id nobody is
+    /// waiting on any more ("the enclosing remote call is not in flight"),
+    /// so the dispatch seam re-arms it on EVERY call, not only at spawn.
+    /// Carriers with no ctx channel keep a bridge that binds once at load
+    /// (their host fns come from realm handles, not from the call) and ride
+    /// this default.
+    fn set_host(&mut self, _host: Option<&HostBridge>) {}
     /// Downcast support (carrier-specific introspection, e.g.
     /// export-list derivation).
     fn as_any(&mut self) -> &mut dyn std::any::Any;
@@ -291,6 +302,11 @@ impl Sessions {
             }
         };
         let mut session = slot.lock().unwrap();
+        // The ctx channel's outbound path is per-call (the bridge carries
+        // the enclosing call's id): re-arm it here so a session spawned by
+        // an earlier call does not answer this call's ctx frames with a
+        // stale id (residency is the session, the bridge is the call).
+        session.set_host(host);
         f(session.as_mut())
     }
 
