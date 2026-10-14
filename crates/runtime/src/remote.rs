@@ -166,7 +166,15 @@ async fn execute_call_inner(
     let args = call.args.clone();
     let kind = call.kind;
     let stream_id = call.stream.clone().unwrap_or_default();
-    let sandbox = sandbox_policy_for(config);
+    // The deployment's policy: `sandbox: true` is the remote default
+    // (unattended external code) and wraps every session process; `false`
+    // is the trusted-domain form and passes None. The field IS the switch —
+    // the builder below only describes the wrap, it does not decide it.
+    let sandbox = if config.sandbox {
+        sandbox_policy_for(config)
+    } else {
+        crate::sandbox::SandboxPolicy::None
+    };
     // Copy the declared codec out — `call` is a reference and cannot
     // enter the move-closure (the field is Copy).
     let encoding = call.encoding;
