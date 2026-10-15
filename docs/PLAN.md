@@ -39,7 +39,7 @@ server; effector code is unchanged.
 
 Loose ends:
 
-- `EffectorConfig.sandbox` is declared but never read: `sandbox_policy_for` unconditionally returns `Bubblewrap` (it uses only `capabilities.fs_scope`), so `sandbox: false` has no effect, the in-process/aura form cannot express `SandboxPolicy::None`, and the fail-closed bwrap-present check never runs. Decide one way: honour the flag (a false policy must then be an explicit, auditable operator choice) or delete the field and make the wrapped form unconditional.
+- RESOLVED 2026-10-14 (effector ADR-0001, `cefde68`): `EffectorConfig.sandbox` is read — `false` passes `SandboxPolicy::None`, `true` builds the jail from the node's own `CapabilitySurface` (`remote.rs`, "the field IS the switch"). The bwrap-presence check the old note named has no call site in this tree; the fail-closed gate that runs is `EffectorConfig::validate`, called at the top of `remote::run`.
 
 Deferred gates:
 
