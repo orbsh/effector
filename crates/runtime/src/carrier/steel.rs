@@ -47,7 +47,7 @@ impl SteelSession {
         // Storage injection (ADR-0037 §1, Phase 4.16b): one Collection
         // per declared entry over the HOST's engine, registered in the
         // per-VM registry the six script fns read by NAME
-        // (`(collection-put! "Counters" ...)` — fixed fn names because
+        // (`(collection-merge! "Counters" ...)` — fixed fn names because
         // steel resolves free identifiers at define-compile time; see
         // okm-steel's collection.rs for the introspection-stub
         // rationale). Drop the session, drop its collections.
@@ -365,7 +365,7 @@ fn register_ctx_stubs(engine: &mut Engine) {
         Ok(handler)
     });
     // The okm storage surface (collection fns + codec fns) follows the
-    // SAME define-compile trap: a handler referencing `(collection-put!
+    // SAME define-compile trap: a handler referencing `(collection-merge!
     // ...)` or `(okm-encode-key! ...)` needs the names to exist at
     // load, or the declaration is dropped silently. The stub arms
     // error if called (introspection never calls a handler). Resident
