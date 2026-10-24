@@ -20,16 +20,20 @@ use std::ffi::CString;
 struct ClosureEngine(std::sync::Arc<StorageEngineFns>);
 
 impl okm::pyo3_impl::Engine for ClosureEngine {
-    fn put(&self, key: Vec<u8>, value: Vec<u8>) {
+    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
         (self.0.put)(key, value)
     }
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
         (self.0.get)(key)
     }
-    fn del(&self, key: &[u8]) {
+    fn del(&self, key: &[u8]) -> Result<(), String> {
         (self.0.del)(key)
     }
-    fn scan_range(&self, begin: &[u8], end: Option<&[u8]>) -> Vec<Vec<u8>> {
+    fn scan_range(
+        &self,
+        begin: &[u8],
+        end: Option<&[u8]>,
+    ) -> Result<Vec<Vec<u8>>, String> {
         (self.0.scan_range)(begin, end)
     }
 }

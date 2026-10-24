@@ -68,7 +68,7 @@ def add(args):
     // Fixed slot map (ADR-0016).
     assert_eq!(
         collections["slots"],
-        json!({ "primary": 0, "dynamic": 1, "dict_id": 2, "dict_name": 3,
+        json!({ "primary": 0, "dynamic": 1, "field_vocab_id": 2, "field_vocab_name": 3,
                 "declared_index_base": 4097, "declared_reduce_base": 8193, "junction_base": 12288 })
     );
 }

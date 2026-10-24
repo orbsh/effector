@@ -15,16 +15,24 @@ pub type HostFn = std::sync::Arc<dyn Fn(Value) -> anyhow::Result<Value> + Send +
 
 /// The host-injected byte-level engine face (ADR-0037 4.16a). FOUR
 /// closures in okm's `VirtualStorage` shapes — bytes in, bytes out.
-/// The slot carries NO okm/aura types on purpose: the contract is
-/// rev-independent, which is what lets the host (aura) hold a
-/// different okm build than the binding (okm-python) without the
-/// cross-repo type identity question ever arising. Semantics mirror
+/// No okm type crosses the slot on purpose: the contract is byte-shaped,
+/// so each side's own error type stays on its side of it. (The trait is
+/// okm-entry's, so both sides build against ONE okm rev — the SHAPE is
+/// shared even though no value type is.) Semantics mirror
 /// okm's engine rules: ordered keys, `None` end = unbounded,
 /// scan returns FULL keys (the caller's coordinate space).
-pub type PutFn = std::sync::Arc<dyn Fn(Vec<u8>, Vec<u8>) + Send + Sync>;
-pub type GetFn = std::sync::Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
-pub type DelFn = std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>;
-pub type ScanRangeFn = std::sync::Arc<dyn Fn(&[u8], Option<&[u8]>) -> Vec<Vec<u8>> + Send + Sync>;
+///
+/// Every closure answers `Result<_, String>`: since ADR-0038/0039 a
+/// storage failure is a value, and it must cross this seam as a plain
+/// string rather than as `okm_core::Error` — the same rev-independence
+/// reason. A failure is never folded into an absent row or an empty
+/// scan; the binding maps the string into its own error type.
+pub type PutFn = std::sync::Arc<dyn Fn(Vec<u8>, Vec<u8>) -> Result<(), String> + Send + Sync>;
+pub type GetFn =
+    std::sync::Arc<dyn Fn(&[u8]) -> Result<Option<Vec<u8>>, String> + Send + Sync>;
+pub type DelFn = std::sync::Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
+pub type ScanRangeFn =
+    std::sync::Arc<dyn Fn(&[u8], Option<&[u8]>) -> Result<Vec<Vec<u8>>, String> + Send + Sync>;
 
 pub struct StorageEngineFns {
     pub put: PutFn,
