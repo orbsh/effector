@@ -1,5 +1,6 @@
 //! Phase 3 acceptance: a fake control plane over a real WS endpoint.
 //! Register -> Registered -> push one ToolCall -> assert the ToolResult.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
 
 use effector_config::{CapabilitySurface, EffectorConfig, NetworkPolicy};
 use effector_protocol::{CodeRef, Frame, ToolCall, ToolResult};

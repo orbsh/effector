@@ -8,6 +8,7 @@
 //! --examples`; the nu author script lives beside them in this crate's
 //! `examples/`); a missing binary fails the test loudly — a stale build is a
 //! recipe error, never a skip.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
 
 use effector_runtime::carrier::session::StreamOp;
 use effector_runtime::carrier::HostBridge;

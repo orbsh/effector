@@ -93,7 +93,7 @@ async fn serve_connection(
                 });
             }
             Frame::Host(HostFrame::Result(hr)) => {
-                let mut pending = pending_host.lock().unwrap();
+                let mut pending = pending_host.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(tx) = pending.remove(&hr.host_call_id) {
                     let _ = tx.send(hr.outcome);
                 }
@@ -267,9 +267,9 @@ fn build_host_bridge(
                         args: gs("args"),
                     }
                 }
-                _ => unreachable!(),
+                _ => return Err(anyhow::anyhow!("host op `{name}` has no builder")),
             };
-            pending.lock().unwrap().insert(host_call_id.clone(), op_tx);
+            pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(host_call_id.clone(), op_tx);
             tx.send(Frame::Host(HostFrame::Call(HostCall {
                 host_call_id: host_call_id.clone(),
                 call_id: call_id.clone(),
@@ -350,7 +350,7 @@ fn build_host_bridge(
                         data: gs("data"),
                     },
                 };
-                pending.lock().unwrap().insert(host_call_id.clone(), op_tx);
+                pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(host_call_id.clone(), op_tx);
                 tx.send(Frame::Host(HostFrame::Call(HostCall {
                     host_call_id: host_call_id.clone(),
                     call_id: call_id.clone(),
@@ -399,7 +399,7 @@ impl CodeCache {
     /// insert. A hash mismatch is tampering or a stale resolution — an
     /// error, never a silent accept.
     pub fn resolve(&self, code: &CodeRef) -> anyhow::Result<String> {
-        if let Some(hit) = self.entries.lock().unwrap().get(&code.sha256) {
+        if let Some(hit) = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&code.sha256) {
             return Ok(hit.to_string());
         }
         let bytes = fetch_verified(&code.url, &code.sha256)?;
@@ -407,7 +407,7 @@ impl CodeCache {
             .map_err(|_| anyhow::anyhow!("fetched code is not valid UTF-8"))?;
         self.entries
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(code.sha256.clone(), Arc::from(source.as_str()));
         Ok(source)
     }

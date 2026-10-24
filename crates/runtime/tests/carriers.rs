@@ -5,6 +5,7 @@
 //! Execution is RESIDENT — one session per booth instance, loaded once,
 //! called per event. These tests double as the reference for how a booth
 //! looks in each carried language.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
 
 use effector_runtime::carrier::session::Sessions;
 use effector_runtime::carrier::{execute, HostBridge};

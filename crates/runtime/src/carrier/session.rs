@@ -285,7 +285,7 @@ impl Sessions {
         f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
     ) -> Result<Value> {
         let slot = {
-            let mut map = self.map.lock().unwrap();
+            let mut map = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             match map.get(key) {
                 Some(slot) => slot.clone(),
                 None => {
@@ -301,7 +301,7 @@ impl Sessions {
                 }
             }
         };
-        let mut session = slot.lock().unwrap();
+        let mut session = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // The ctx channel's outbound path is per-call (the bridge carries
         // the enclosing call's id): re-arm it here so a session spawned by
         // an earlier call does not answer this call's ctx frames with a
@@ -313,7 +313,7 @@ impl Sessions {
     /// Evict (drop) the session — instance idle-expiry or hot replacement.
     /// Waits for an in-flight call on the slot to finish before dropping.
     pub fn evict(&self, key: &str) {
-        self.map.lock().unwrap().remove(key);
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(key);
     }
 
     /// Evict by predicate (the exec carrier's liveness rule): a slot whose
@@ -322,7 +322,7 @@ impl Sessions {
     /// and reaps; a live child stays parked (idle_ttl eviction owns it —
     /// the child is the residency). Returns the removed keys (diagnostics).
     pub fn sweep_dead(&self) -> Vec<String> {
-        let mut map = self.map.lock().unwrap();
+        let mut map = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dead: Vec<String> = map
             .iter()
             .filter_map(|(k, slot)| {

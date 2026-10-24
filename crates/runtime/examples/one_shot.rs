@@ -6,6 +6,7 @@
 //! The codec follows `INDUCTION_ENCODING` (ADR-0037 §2 dual-protocol): json
 //! (default) or cbor — one document in, one document out either way;
 //! the request SHAPE is protocol-free under both.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
 
 use serde_json::Value;
 

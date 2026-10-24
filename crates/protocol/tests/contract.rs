@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
 use effector_protocol::{CodeRef, ToolCall};
 use induction_protocol::Encoding;
 

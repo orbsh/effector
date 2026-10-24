@@ -22,6 +22,7 @@
 //! §3): no runtime on/receives arms exist; registration is load-time.
 //!
 //! No aura dependencies: serde_json + ciborium. The protocol is the ABI.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
 
 use serde_json::Value;
 use std::collections::HashMap;
