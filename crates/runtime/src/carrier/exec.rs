@@ -49,7 +49,7 @@
 use super::session::{ResidentSession, StreamOp};
 use super::HostBridge;
 use anyhow::{anyhow, Result};
-use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, Reply, ResultFrame};
+use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, IterateKind, Reply, ResultFrame};
 use serde_json::Value;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -301,9 +301,19 @@ impl InductionSession {
         // The carrier owns the frame's identity (its own counter); the typed
         // SHAPE comes from the protocol crate — including the `op` tag the
         // iterate kinds write beside `kind`, which is that type's business.
-        let frame = match stream_id {
-            Some(id) => CallFrame::iterate(self.next_id, kind, event, args, id),
-            None => CallFrame::call(self.next_id, event, args),
+        // A frame's kind and its stream id are one decision, not two: an
+        // iterate kind without an id would silently ride out as a `call`, and
+        // a `call` with an id as a stream frame. Both are this carrier's own
+        // bug, so they return rather than reach the child.
+        let frame = match (IterateKind::try_from(kind), stream_id) {
+            (Ok(kind), Some(id)) => CallFrame::iterate(self.next_id, kind, event, args, id),
+            (Err(_), None) => CallFrame::call(self.next_id, event, args),
+            (Ok(_), None) | (Err(_), Some(_)) => {
+                return Err(anyhow!(
+                    "induction carrier: frame kind `{}` and its stream id disagree",
+                    kind.as_str()
+                ));
+            }
         };
         self.next_id += 1;
         self.send(&frame.to_value())?;
