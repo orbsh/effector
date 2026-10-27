@@ -5,7 +5,9 @@
 # It is the body of a node mount: the mount's source is this file's spawn
 # spec and never changes; everything that varies per operation arrives as
 # call arguments. The delivered operation is a nu script in `args.code`,
-# its payload in `args.args`.
+# its payload in `args.args` — a NAMED MAP, never expanded argv: a script is a
+# body delivered as data, not a command line, and argv would strip the types a
+# caller's JSON Schema check just established.
 #
 # Carrier contract (effector `exec`, one process per call): one JSON
 # document on stdin — `{"handler": <entry>, "args": {...}}`, then EOF —
