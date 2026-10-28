@@ -1,6 +1,6 @@
 # Effector
 
-Skill runtime / remote effector of the stateless agent architecture. Design: [stateless-agent-architecture.md](../../.hermes/wiki/stateless-agent-architecture.md) (wiki), Gravity (turn executor), Krystallizer (skill graph).
+Skill runtime / remote effector of the stateless agent architecture. Design: [stateless-agent-architecture.md](https://github.com/orbsh/wiki/blob/main/stateless-agent-architecture.md) (wiki), Gravity (turn executor), Krystallizer (skill graph).
 
 **Upstream-agnostic by iron rule**: effector never depends on Aura crates — all
 coupling with Aura is the frame protocol (serde types in `effector-protocol`).
