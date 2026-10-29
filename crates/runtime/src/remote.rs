@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// Serve one connection until it drops. Reconnect loop lives in `run`.
 async fn serve_connection(
     ws_url: &str,
-    credential: &str,
+    key: &effector_protocol::SigningKey,
     config: &EffectorConfig,
     sessions: &Sessions,
     code_cache: &Arc<CodeCache>,
@@ -32,11 +32,22 @@ async fn serve_connection(
         .with_context(|| format!("dial control plane {ws_url}"))?;
     let (mut sink, mut stream) = ws.split();
 
-    // Registration: presence + capability list (carried languages). The
-    // control plane writes these into the user's namespace registry.
+    // The control plane speaks first: a challenge this node signs with its key. The signature
+    // is the whole claim — the host looks the PUBLIC key up in its registry, so nothing
+    // secret ever crosses this connection (effector ADR-0002).
+    let nonce = match stream.next().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<Frame>(&text)? {
+            Frame::Challenge { nonce } => nonce,
+            other => anyhow::bail!("expected Challenge, got {other:?}"),
+        },
+        Some(Err(e)) => return Err(e.into()),
+        _ => anyhow::bail!("control plane closed before the challenge"),
+    };
+    let node_alias = config.capabilities.node_alias.clone();
     let register = Frame::Register {
-        node_alias: config.capabilities.node_alias.clone(),
-        credential: credential.to_string(),
+        public_key: effector_protocol::public_key_b64(key),
+        signature: effector_protocol::sign_register(key, &nonce, &node_alias),
+        node_alias,
         carriers: config.capabilities.carriers.clone(),
     };
     sink.send(Message::Text(serde_json::to_string(&register)?))
@@ -440,6 +451,44 @@ fn fetch_verified(url: &str, expected_sha256: &str) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// One handshake, for `effector register`: dial, answer the challenge, print the verdict,
+/// close. The connect/sign/verify path is shared with `serve_connection` — a CLI that had its
+/// own copy of the handshake would be testing a different protocol than the one that runs.
+pub async fn register_once(config: &EffectorConfig) -> Result<()> {
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("effector config: {e}"))?;
+    let key = effector_protocol::read_signing_key(std::path::Path::new(&config.private_key_path))?;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&config.control_plane_url)
+        .await
+        .with_context(|| format!("dial control plane {}", config.control_plane_url))?;
+    let nonce = match ws.next().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<Frame>(&text)? {
+            Frame::Challenge { nonce } => nonce,
+            other => anyhow::bail!("expected Challenge, got {other:?}"),
+        },
+        Some(Err(e)) => return Err(e.into()),
+        _ => anyhow::bail!("control plane closed before the challenge"),
+    };
+    let node_alias = config.capabilities.node_alias.clone();
+    let register = Frame::Register {
+        public_key: effector_protocol::public_key_b64(&key),
+        signature: effector_protocol::sign_register(&key, &nonce, &node_alias),
+        node_alias,
+        carriers: config.capabilities.carriers.clone(),
+    };
+    ws.send(Message::Text(serde_json::to_string(&register)?)).await?;
+    match ws.next().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<Frame>(&text)? {
+            Frame::Registered => Ok(()),
+            Frame::Refused { reason } => anyhow::bail!("refused: {reason}"),
+            other => anyhow::bail!("expected Registered or Refused, got {other:?}"),
+        },
+        Some(Err(e)) => Err(e.into()),
+        _ => anyhow::bail!("control plane closed without answering"),
+    }
+}
+
 /// Top-level loop: dial, register, serve; reconnect with backoff on drop.
 pub async fn run(config: EffectorConfig) -> Result<()> {
     // Fail closed before dialing: a declaration this node cannot enforce is
@@ -449,15 +498,18 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
     config
         .validate()
         .map_err(|e| anyhow::anyhow!("effector config: {e}"))?;
-    let credential = std::env::var(&config.credential_env)
-        .with_context(|| format!("credential env var {} not set", config.credential_env))?;
+    // The key is a startup fact, like the capability declaration: a node without one cannot
+    // make a claim, and that is a refusal to run, not a per-call error value.
+    let key = effector_protocol::read_signing_key(std::path::Path::new(
+        &config.private_key_path,
+    ))?;
     let sessions = Sessions::new();
     let code_cache = Arc::new(CodeCache::new());
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
         match serve_connection(
             &config.control_plane_url,
-            &credential,
+            &key,
             &config,
             &sessions,
             &code_cache,
@@ -510,7 +562,7 @@ mod tests {
         EffectorConfig {
             control_plane_url: "ws://127.0.0.1:8787".into(),
             sandbox: true,
-            credential_env: "EFFECTOR_CREDENTIAL".into(),
+            private_key_path: "/dev/null/key".into(),
             capabilities,
         }
     }

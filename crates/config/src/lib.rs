@@ -97,9 +97,12 @@ pub struct EffectorConfig {
     /// embedded deployments (aura) pass None instead.
     #[serde(default = "default_true")]
     pub sandbox: bool,
-    /// User credential used as the registration credential. Provided by the
-    /// environment (single source of truth outside config files).
-    pub credential_env: String,
+    /// Where this node's ed25519 PRIVATE key lives, written by `effector keygen` (0600).
+    /// A path, never a value from the environment: an env-carried secret is readable by every
+    /// process of the user and ends up in dumps and `/proc/<pid>/environ`; a file is what the
+    /// OS can guard. The key signs the control plane's challenge — it is not a shared token,
+    /// so the control plane never holds a copy (effector ADR-0002).
+    pub private_key_path: String,
     pub capabilities: CapabilitySurface,
 }
 
@@ -146,7 +149,7 @@ mod tests {
         EffectorConfig {
             control_plane_url: "ws://127.0.0.1:8787".into(),
             sandbox: true,
-            credential_env: "EFFECTOR_CREDENTIAL".into(),
+            private_key_path: "/dev/null/key".into(),
             capabilities,
         }
     }

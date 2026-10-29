@@ -10,12 +10,31 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
+/// A keypair on disk for one test node. `run` refuses to start without a readable key, which
+/// is the point: the key is a startup fact, not a per-call value.
+fn node_key(tag: &str) -> String {
+    let mut path = std::env::temp_dir();
+    path.push(format!("effector-test-{tag}-{}.key", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    effector_protocol::write_keypair(&path).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
 async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     let (stream, _) = listener.accept().await.unwrap();
     let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
     let (mut sink, mut stream) = ws.split();
 
-    // Registration: expect it, reply Registered.
+    // The control plane speaks first, always (one wire shape in either trust posture).
+    let nonce = effector_protocol::nonce();
+    sink.send(Message::Text(
+        serde_json::to_string(&Frame::Challenge { nonce: nonce.clone() }).unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    // Registration: the node signs the nonce with the key it claims, and the signature is
+    // checked with the SAME function the real host uses.
     let Message::Text(text) = stream.next().await.unwrap().unwrap() else {
         panic!("expected text frame");
     };
@@ -23,10 +42,13 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
         Frame::Register {
             node_alias,
             carriers,
-            ..
+            public_key,
+            signature,
         } => {
             assert_eq!(node_alias, "test-node");
             assert!(carriers.contains(&"steel".to_string()));
+            effector_protocol::verify_register(&public_key, &nonce, &node_alias, &signature)
+                .expect("the node signs the challenge with the key it claims");
         }
         other => panic!("expected Register, got {other:?}"),
     }
@@ -96,7 +118,7 @@ async fn outbound_registration_and_task_downlink() {
     let config = EffectorConfig {
         control_plane_url: format!("ws://127.0.0.1:{port}"),
         sandbox: true,
-        credential_env: "EFFECTOR_TEST_CREDENTIAL".into(),
+        private_key_path: node_key("main"),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "test-node".into(),
@@ -104,7 +126,6 @@ async fn outbound_registration_and_task_downlink() {
             ..Default::default()
         },
     };
-    std::env::set_var("EFFECTOR_TEST_CREDENTIAL", "secret-token");
 
     // The effector serves one connection; the fake plane drops it after
     // asserting, then run() reconnects forever — bound the effector with a
@@ -164,6 +185,11 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
         let (mut sink, mut stream) = ws.split();
 
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Challenge { nonce: effector_protocol::nonce() }).unwrap(),
+        ))
+        .await
+        .unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         let f: Frame = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert!(matches!(f, Frame::Register { .. }));
@@ -277,7 +303,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
     let config = EffectorConfig {
         control_plane_url: format!("ws://127.0.0.1:{ws_port}"),
         sandbox: true,
-        credential_env: "EFFECTOR_LINK_CREDENTIAL".into(),
+        private_key_path: node_key("link"),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "link-node".into(),
@@ -290,7 +316,6 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             ..Default::default()
         },
     };
-    std::env::set_var("EFFECTOR_LINK_CREDENTIAL", "tok");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), remote::run(config)).await;
     server.await.unwrap();
 }
@@ -306,7 +331,7 @@ async fn an_unenforceable_declaration_fails_before_dialing() {
         // that the node never dialed at all.
         control_plane_url: "ws://127.0.0.1:1".into(),
         sandbox: true,
-        credential_env: "EFFECTOR_REFUSAL_CREDENTIAL".into(),
+        private_key_path: node_key("refusal"),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "refusing-node".into(),
@@ -314,7 +339,6 @@ async fn an_unenforceable_declaration_fails_before_dialing() {
             ..Default::default()
         },
     };
-    std::env::set_var("EFFECTOR_REFUSAL_CREDENTIAL", "tok");
     let err = remote::run(config).await.unwrap_err().to_string();
     assert!(
         err.contains("network") && err.contains("proxy"),
