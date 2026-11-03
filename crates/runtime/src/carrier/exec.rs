@@ -22,8 +22,11 @@
 //! ("json" | "cbor"; absent = json) — an env, not an appended argv:
 //! the fifo shape passes exactly [req rep] and a runtime-generated
 //! argument would break the author's `def main` arity.
-//! One outstanding host call at a time (synchronous-by-contract, like
-//! every bridge). The source string IS the argv (whitespace-split — the
+//! Several calls may be in flight on one child: every request carries an id,
+//! results come back by that id, and a ctx frame names the request it serves
+//! (`host.call`) so the answer comes from the right call's bridge. The reader
+//! is a thread for exactly that reason. A booth that cannot be re-entered says
+//! so in its declaration and the realm never hands it two calls at once. The source string IS the argv (whitespace-split — the
 //! spawn spec; remote content-addressed binaries are a recorded
 //! residual). bwrap policy wraps the spawn (mount policy before exec,
 //! the child's capability surface = the channels + jail).
@@ -51,8 +54,10 @@ use super::HostBridge;
 use anyhow::{anyhow, Result};
 use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, IterateKind, Reply, ResultFrame};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::{mpsc, Arc, Mutex};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
@@ -72,51 +77,339 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 /// One resident induction session: the framed child, in one of two shapes.
 pub struct InductionSession {
-    /// Host functions for the child's ctx round trips — the child sends
-    /// them inside a TYPED host frame (ADR-0037 §2), mapped to these
-    /// dotted keys at dispatch ("invoke", "store", …, ADR-0043). Re-armed
-    /// per call by `set_host`: the bridge is per-call data (it carries the
-    /// enclosing call's id), the session is not.
-    host: HostBridge,
-    kind: SessionKind,
-    next_id: u64,
-    /// Declared frame codec (ADR-0037 §2, dual-protocol): the channel's
-    /// encoding for the session's whole life, both directions.
-    encoding: Encoding,
+    /// The resident child and everything shared with the reader thread.
+    shared: Arc<Shared>,
+    /// Owner-side handles: the process (kill/reap), the fifo session dir, the
+    /// reader thread. Nothing a call needs — a call only touches `shared`.
+    child: Option<Child>,
+    dir: Option<PathBuf>,
+    reader: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The request channel differs per language's blocking-read capability:
+/// What a call shares with the reader thread: the write side of the channel, the
+/// correlation counter, the frames waiting for answers, and the bridges that
+/// answer ctx frames.
 ///
-/// **Pipes** — a child that block-reads stdin (Rust fixtures, bash
-/// `read`, any line reader): the classic two-pipe shape.
-///
-/// **Fifo** — the nushell adapter (ADR-0035 §8, two fifos). nu cannot
-/// block-read non-TTY stdin and its `open` delivers at writer-EOF, so
-/// stdin-direct is impossible. The parent creates `req` + `rep` fifos
-/// and spawns `nu --no-config-file <author.nu> <req> <rep>`: the
-/// author's OWN `def main` is the loop (no generated shim, no `source`
-/// of the author module — nu auto-invokes `main` with the script
-/// arguments; dynamic `source` paths are rejected at parse). Requests
-/// ride `req` (the parent writes one frame and closes the writer — the
-/// batch EOF the child's `open --raw $req | lines` wakes on), ctx
-/// replies ride `rep` — a SECOND fifo, because two readers on one fifo
-/// race (the author's outer loop and its inline reply read would fight
-/// over frames; measured deadlock). Result frames ride stdout.
-enum SessionKind {
-    Pipes {
-        child: Option<Child>,
-        stdin: Option<ChildStdin>,
-        reader: Option<BufReader<std::process::ChildStdout>>,
-    },
-    Fifo {
-        child: Option<Child>,
-        reader: Option<BufReader<std::process::ChildStdout>>,
-        req: PathBuf,
-        rep: PathBuf,
-        /// The session dir holding both fifos; removed on teardown
-        /// (the PTY session-dir precedent).
-        dir: PathBuf,
-    },
+/// The reader is a THREAD, not the call's own loop, because one process may serve
+/// several calls at once (a concurrent guest: induction pairs replies by request
+/// id and runs each handler on its own thread). A reader owned by the call would
+/// make the process serial no matter what the guest could do.
+struct Shared {
+    /// Write side: stdin for the pipe shape, the two fifos for the nu adapter.
+    /// Held for one frame's write, never across a call.
+    out: Mutex<Out>,
+    encoding: Encoding,
+    next_id: std::sync::atomic::AtomicU64,
+    /// Requests waiting for their result, by request id.
+    pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value>>>>,
+    /// The enclosing call's bridge, by request id — a concurrent guest's ctx
+    /// frame carries `host.call` (the request it serves), so the answer comes
+    /// from the right call's host functions.
+    bridges: Mutex<HashMap<u64, HostBridge>>,
+    /// The bridge armed by `set_host`: the SERIAL answer, and the fallback for a
+    /// guest that does not label its ctx frames (pre-`host.call` wire form).
+    armed: Mutex<HostBridge>,
+    /// Why the channel died. Set once; every waiter present and future reads it
+    /// instead of parking forever on a child that will never answer.
+    dead: Mutex<Option<String>>,
+}
+
+/// The write side of the channel. The request channel and the reply channel are
+/// the same fd on the pipe shape (frames are self-describing) and two fifos on
+/// the nu adapter — two readers on one fifo race, measured (ADR-0035 §8).
+enum Out {
+    Pipes(ChildStdin),
+    Fifo { req: PathBuf, rep: PathBuf },
+    /// Torn down: the writer is gone, so every further frame is that error
+    /// rather than a guess at a half-closed channel.
+    Closed,
+}
+
+impl Shared {
+    fn dead_reason(&self) -> Option<String> {
+        self.dead
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The channel is unusable: one reason for every waiter, and no new call
+    /// starts against a corpse (the caller's own error, not a hang).
+    fn fail(&self, why: String) {
+        let mut dead = self
+            .dead
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if dead.is_some() {
+            return;
+        }
+        *dead = Some(why.clone());
+        drop(dead);
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, tx) in pending.drain() {
+            let _ = tx.send(Err(anyhow!("{why}")));
+        }
+    }
+
+    /// One frame onto the channel (JSON line or self-delimited CBOR document;
+    /// the fifo shape is JSON by construction — the nu adapter asserts it).
+    fn write_frame(&self, frame: &Value, host_reply: bool) -> Result<()> {
+        if let Some(why) = self.dead_reason() {
+            return Err(anyhow!("{why}"));
+        }
+        let mut out = self
+            .out
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &mut *out {
+            Out::Pipes(stdin) => {
+                match self.encoding {
+                    Encoding::Json => writeln!(stdin, "{frame}").map_err(|e| {
+                        anyhow!("induction carrier: write frame: {e}")
+                    })?,
+                    Encoding::Cbor => ciborium::ser::into_writer(frame, &mut *stdin)
+                        .map_err(|e| anyhow!("induction carrier: write cbor frame: {e}"))?,
+                }
+                stdin.flush()?;
+                Ok(())
+            }
+            Out::Closed => Err(anyhow!("induction carrier: session channel closed")),
+            Out::Fifo { req, rep } => {
+                let path = if host_reply { rep } else { req };
+                let writing = if host_reply { "host_reply" } else { "request" };
+                fifo_write(path, &frame.to_string()).map_err(|e| {
+                    anyhow!(
+                        "induction/nu adapter: write {writing} {}: {e}",
+                        path.display()
+                    )
+                })
+            }
+        }
+    }
+
+    /// One request frame out, one result in — the correlation is the frame's
+    /// id, so several of these run at once on one child.
+    fn exchange(
+        &self,
+        kind: FrameKind,
+        event: &str,
+        args: Value,
+        stream_id: Option<String>,
+        host: Option<&HostBridge>,
+    ) -> Result<Value> {
+        // The carrier owns the frame's identity (its own counter); the typed
+        // SHAPE comes from the protocol crate — including the `op` tag the
+        // iterate kinds write beside `kind`, which is that type's business.
+        // A frame's kind and its stream id are one decision, not two: an
+        // iterate kind without an id would silently ride out as a `call`, and
+        // a `call` with an id as a stream frame. Both are this carrier's own
+        // bug, so they return rather than reach the child.
+        let frame_id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let frame = match (IterateKind::try_from(kind), stream_id) {
+            (Ok(kind), Some(stream)) => CallFrame::iterate(frame_id, kind, event, args, stream),
+            (Err(_), None) => CallFrame::call(frame_id, event, args),
+            (Ok(_), None) | (Err(_), Some(_)) => {
+                return Err(anyhow!(
+                    "induction carrier: frame kind `{}` and its stream id disagree",
+                    kind.as_str()
+                ));
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(frame_id, tx);
+        if let Some(host) = host {
+            self.bridges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(frame_id, host.clone());
+        }
+        let written = self
+            .write_frame(&frame.to_value(), false)
+            .map(|()| rx.recv());
+        // The entries leave whether the frame went out, the child answered, or
+        // the send failed: nothing accumulates on a channel that is done.
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&frame_id);
+        self.bridges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&frame_id);
+        match written {
+            Err(e) => Err(e),
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow!(
+                "induction carrier: the child never answered request {frame_id} (channel closed)"
+            )),
+        }
+    }
+
+    /// The bridge that answers a ctx frame: the one registered for the request
+    /// the frame names, else the armed one (a serial guest, or the pre-`call`
+    /// wire form — unambiguous only while one call is in flight, which is
+    /// exactly when such a guest sends frames).
+    fn bridge_for(&self, call: Option<u64>) -> HostBridge {
+        if let Some(call) = call {
+            let bridges = self
+                .bridges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(bridge) = bridges.get(&call) {
+                return bridge.clone();
+            }
+        }
+        self.armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// The reader: one frame at a time off the child's stdout, routed by id. Results
+/// wake their request; ctx frames are answered here (the child is blocked on
+/// them, so any other order would deadlock a concurrent guest); anything else
+/// ends the channel for everybody.
+fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdout>) {
+    loop {
+        let msg: Value = match shared.encoding {
+            Encoding::Json => {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        shared.fail(
+                            "induction carrier: child closed stdout (exited or crashed)".to_string(),
+                        );
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        shared.fail(format!("induction carrier: read: {e}"));
+                        return;
+                    }
+                }
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        shared.fail(format!(
+                            "induction carrier: malformed frame {trimmed}: {e}"
+                        ));
+                        return;
+                    }
+                }
+            }
+            Encoding::Cbor => {
+                // Self-delimited CBOR reading: decode_one_value from a byte
+                // reader that blocks per byte. ciborium reports an incomplete
+                // value as EOF on the reader, so the read blocks until the
+                // document completes.
+                match ciborium::de::from_reader(&mut reader) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        shared.fail(format!("induction carrier: malformed cbor frame: {e}"));
+                        return;
+                    }
+                }
+            }
+        };
+        if let Some(result) = ResultFrame::from_value(&msg) {
+            let Some(id) = result.id.as_u64() else {
+                shared.fail(format!("induction carrier: result without a request id: {msg}"));
+                return;
+            };
+            let waiter = shared
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+            match waiter {
+                Some(tx) => {
+                    let _ = tx.send(Ok(result.result));
+                }
+                // A result nobody waits for is a guest answering twice or
+                // answering a request that already failed: noise would hide a
+                // real protocol break, so it ends the channel.
+                None => {
+                    shared.fail(format!(
+                        "induction carrier: result for unknown request {id}"
+                    ));
+                    return;
+                }
+            }
+            continue;
+        }
+        if msg.get("host").is_some() {
+            // ONE dispatch through the shared arm core (induction-host
+            // `route_frame` — the same dispatcher mudra's host runs): an unknown
+            // arm or a malformed shape is a decode failure — an error value back
+            // into the child, never a silent unknown-op table miss. The store
+            // payload is never parsed here (schema-blind). The bridge's sync fns
+            // run to completion inside `route_frame`'s future; block_on polls it
+            // from this thread (no io inside — the future cannot actually block
+            // on the runtime, it parks only until the sync fn returns).
+            let frame = match induction_host::parse_guest_value(&msg) {
+                Some(induction_protocol::GuestFrame::Host(f)) => f,
+                Some(induction_protocol::GuestFrame::Result(_)) | None => {
+                    let reply = Reply::error(format!(
+                        "induction carrier: bad host frame: {}",
+                        msg["host"]
+                    ));
+                    // An undecodable arm is answered, not fatal: the guest gets
+                    // the error and keeps its session (the serial rule, kept).
+                    if let Err(e) = shared.write_frame(&reply.to_value(), true) {
+                        shared.fail(format!("{e}"));
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let bridge = shared.bridge_for(frame.call);
+            // The ctx call's own id, echoed on the answer: several handlers of one
+            // child may be waiting at once, so "answer the next reply" is not an
+            // answer (ADR-0002 — the echo is what lets a concurrent guest pair).
+            let host_id = frame.id;
+            match block_serve(induction_host::route_frame(
+                &BridgeOps { bridge: &bridge },
+                induction_protocol::GuestFrame::Host(frame),
+            )) {
+                induction_host::Routed::Reply(reply) => {
+                    let answer = match host_id {
+                        Some(id) => reply.to_value_with_id(id),
+                        None => reply.to_value(),
+                    };
+                    if let Err(e) = shared.write_frame(&answer, true) {
+                        shared.fail(format!("{e}"));
+                        return;
+                    }
+                }
+                // `emit` is fire-and-forget by CONTRACT (ADR-0043 §5): the frame
+                // carries no reply — route_frame accepted it, and its failure (if
+                // the bridge fn errored) is already logged by the dispatcher,
+                // never written as an error value into a guest that stopped
+                // listening.
+                induction_host::Routed::Accepted | induction_host::Routed::Result(_) => {}
+                induction_host::Routed::DecodeFailed => {
+                    shared.fail(format!("induction carrier: unexpected frame {msg}"));
+                    return;
+                }
+            }
+            continue;
+        }
+        shared.fail(format!("induction carrier: unexpected frame {msg}"));
+        return;
+    }
 }
 
 /// Session dirs carry the process pid + a sequence so concurrent effectors
@@ -124,6 +417,12 @@ enum SessionKind {
 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl InductionSession {
+    /// The concurrent surface: this carrier pairs replies by request id, so one
+    /// instance can serve several calls at once (`Concurrency::Unbounded`).
+    pub fn concurrent_handle(&self) -> Arc<dyn super::session::SharedSession> {
+        self.shared.clone()
+    }
+
     /// Spawn and keep (no sandbox, JSON-lines).
     pub fn spawn(argv: &[String], host: Option<&HostBridge>) -> Result<Self> {
         Self::spawn_wrapped(
@@ -159,16 +458,48 @@ impl InductionSession {
             return Self::spawn_fifo(Path::new(author), host, policy);
         }
         let (child, stdin, reader) = spawn_child(argv, policy, encoding)?;
-        Ok(Self {
-            host: host.cloned().unwrap_or_default(),
-            kind: SessionKind::Pipes {
-                child: Some(child),
-                stdin: Some(stdin),
-                reader: Some(reader),
-            },
-            next_id: 0,
+        Ok(Self::from_parts(
+            child,
+            Out::Pipes(stdin),
+            reader,
+            None,
+            host,
             encoding,
-        })
+        ))
+    }
+
+    /// Assemble the session: one `Shared` for the calls and the reader, one
+    /// owner for the process.
+    fn from_parts(
+        child: Child,
+        out: Out,
+        reader: BufReader<std::process::ChildStdout>,
+        dir: Option<PathBuf>,
+        host: Option<&HostBridge>,
+        encoding: Encoding,
+    ) -> Self {
+        let shared = Arc::new(Shared {
+            out: Mutex::new(out),
+            encoding,
+            next_id: std::sync::atomic::AtomicU64::new(0),
+            pending: Mutex::new(HashMap::new()),
+            bridges: Mutex::new(HashMap::new()),
+            armed: Mutex::new(host.cloned().unwrap_or_default()),
+            dead: Mutex::new(None),
+        });
+        let reader = {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("induction-reader".to_string())
+                .spawn(move || read_loop(shared, reader))
+                .ok()
+        };
+        Self {
+            shared,
+            child: Some(child),
+            dir,
+            reader,
+        }
     }
 
     /// The fifo-backed spawn (nushell): session dir + two fifos, child =
@@ -227,20 +558,16 @@ impl InductionSession {
         // The fifos replaced stdin as the channels; drop the pipe writer
         // (nu never reads it — leaving it open only delays child exit).
         drop(stdin);
-        Ok(Self {
-            host: host.cloned().unwrap_or_default(),
-            kind: SessionKind::Fifo {
-                child: Some(child),
-                reader: Some(reader),
-                req,
-                rep,
-                dir,
-            },
-            next_id: 0,
+        Ok(Self::from_parts(
+            child,
+            Out::Fifo { req, rep },
+            reader,
+            Some(dir),
+            host,
             // The fifo shape is the nu adapter — JSON by construction
             // (asserted at the spawn entry).
-            encoding: Encoding::Json,
-        })
+            Encoding::Json,
+        ))
     }
 
     /// Liveness for the registry sweep (Sessions::sweep_dead): a child
@@ -252,10 +579,10 @@ impl InductionSession {
     /// child would read alive forever. WNOHANG waitpid reaps directly —
     /// 0 still-alive, negative ESRCH (already reaped), other = exited.
     pub fn is_alive(&mut self) -> bool {
-        let child = match &mut self.kind {
-            SessionKind::Pipes { child, .. } | SessionKind::Fifo { child, .. } => child.as_mut(),
-        };
-        match child {
+        if self.shared.dead_reason().is_some() {
+            return false;
+        }
+        match self.child.as_mut() {
             None => false,
             Some(child) => {
                 let pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
@@ -268,252 +595,45 @@ impl InductionSession {
     /// The session dir for the fifo shape (test surface: teardown must
     /// leave no fifo litter). Pipes sessions have none.
     pub fn session_dir(&self) -> Option<&Path> {
-        match &self.kind {
-            SessionKind::Pipes { .. } => None,
-            SessionKind::Fifo { dir, .. } => Some(dir),
-        }
+        self.dir.as_deref()
     }
 
     /// The child pid (test surface: crash-the-child-behind-the-registry
     /// scenarios need to signal it externally).
     pub fn child_pid(&self) -> Option<u32> {
-        match &self.kind {
-            SessionKind::Pipes { child, .. } | SessionKind::Fifo { child, .. } => {
-                child.as_ref().map(|c| c.id())
-            }
-        }
+        self.child.as_ref().map(Child::id)
     }
 
-    /// One request frame in, one result out, servicing typed host frames
-    /// in between (the child blocks on its ctx call; we answer and keep
-    /// reading until the result arrives). The frame codec is the session's
-    /// declared encoding (ADR-0037 §2, dual-protocol): JSON frames are
-    /// text lines, CBOR frames are self-delimited documents on the byte
-    /// stream — the same serde_json Value shape under both codecs (only
-    /// the codec changes; a CBOR frame carries no line terminator).
-    fn exchange(
-        &mut self,
-        kind: FrameKind,
-        event: &str,
-        args: Value,
-        stream_id: Option<String>,
-    ) -> Result<Value> {
-        // The carrier owns the frame's identity (its own counter); the typed
-        // SHAPE comes from the protocol crate — including the `op` tag the
-        // iterate kinds write beside `kind`, which is that type's business.
-        // A frame's kind and its stream id are one decision, not two: an
-        // iterate kind without an id would silently ride out as a `call`, and
-        // a `call` with an id as a stream frame. Both are this carrier's own
-        // bug, so they return rather than reach the child.
-        let frame = match (IterateKind::try_from(kind), stream_id) {
-            (Ok(kind), Some(id)) => CallFrame::iterate(self.next_id, kind, event, args, id),
-            (Err(_), None) => CallFrame::call(self.next_id, event, args),
-            (Ok(_), None) | (Err(_), Some(_)) => {
-                return Err(anyhow!(
-                    "induction carrier: frame kind `{}` and its stream id disagree",
-                    kind.as_str()
-                ));
-            }
-        };
-        self.next_id += 1;
-        self.send(&frame.to_value())?;
-        loop {
-            let msg: Value = match self.encoding {
-                Encoding::Json => {
-                    let mut line = String::new();
-                    let reader = match &mut self.kind {
-                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => {
-                            reader
-                                .as_mut()
-                                .ok_or_else(|| anyhow!("induction carrier: no stdout"))?
-                        }
-                    };
-                    let n = reader
-                        .read_line(&mut line)
-                        .map_err(|e| anyhow!("induction carrier: read: {e}"))?;
-                    if n == 0 {
-                        self.teardown();
-                        return Err(anyhow!(
-                            "induction carrier: child closed stdout (exited or crashed)"
-                        ));
-                    }
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    serde_json::from_str(trimmed)
-                        .map_err(|e| anyhow!("induction carrier: malformed frame {trimmed}: {e}"))?
-                }
-                Encoding::Cbor => {
-                    // Self-delimited CBOR reading: decode_one_value from a
-                    // byte reader that blocks per byte. ciborium reports
-                    // an incomplete value as EOF on the reader, so the
-                    // natural read blocks until the document completes.
-                    let rd: &mut dyn Read = match &mut self.kind {
-                        SessionKind::Pipes { reader, .. } | SessionKind::Fifo { reader, .. } => {
-                            reader
-                                .as_mut()
-                                .ok_or_else(|| anyhow!("induction carrier: no stdout"))?
-                        }
-                    };
-                    ciborium::de::from_reader(rd)
-                        .map_err(|e| anyhow!("induction carrier: malformed cbor frame: {e}"))?
-                }
-            };
-            if let Some(result) = ResultFrame::from_value(&msg) {
-                return Ok(result.result);
-            }
-            if msg.get("host").is_some() {
-                // ONE dispatch through the shared arm core (induction-host
-                // `route_frame` — the same dispatcher mudra's host runs):
-                // an unknown arm or a malformed shape is a decode failure —
-                // an error value back into the child, never a silent
-                // unknown-op table miss. The store payload is never parsed
-                // here (schema-blind). The bridge's sync fns run to
-                // completion inside `route_frame`'s future; block_on polls
-                // it from this spawn_blocking thread (no io inside — the
-                // future cannot actually block on the runtime, it parks
-                // only until the sync fn returns).
-                let frame = match induction_host::parse_guest_value(&msg) {
-                    Some(f) => f,
-                    None => {
-                        let reply = Reply::error(format!(
-                            "induction carrier: bad host frame: {}",
-                            msg["host"]
-                        ));
-                        self.send_reply(&reply.to_value())?;
-                        continue;
-                    }
-                };
-                match block_serve(induction_host::route_frame(
-                    &BridgeOps { bridge: &self.host },
-                    frame,
-                )) {
-                    induction_host::Routed::Reply(reply) => {
-                        self.send_reply(&reply.to_value())?;
-                    }
-                    // `emit` is fire-and-forget by CONTRACT (ADR-0043 §5):
-                    // the frame carries no reply — route_frame accepted it,
-                    // and its failure (if the bridge fn errored) is already
-                    // logged by the dispatcher, never written as an error
-                    // value into a guest that stopped listening.
-                    induction_host::Routed::Accepted | induction_host::Routed::Result(_) => {}
-                    induction_host::Routed::DecodeFailed => {
-                        self.teardown();
-                        return Err(anyhow!("induction carrier: unexpected frame {msg}"));
-                    }
-                }
-                continue;
-            }
-            return Err(anyhow!("induction carrier: unexpected frame {msg}"));
-        }
-    }
-
-    /// One request frame onto the request channel. JSON: text line, pipes
-    /// append + flush (the child's line reader wakes per newline), fifo
-    /// write + CLOSE (the batch EOF is what wakes the child's
-    /// `open --raw $req`). CBOR (pipes only — the fifo shape is the nu
-    /// adapter, JSON by construction): encode the self-delimited document
-    /// and flush; no newline, no length prefix.
-    fn send(&mut self, frame: &Value) -> Result<()> {
-        match &mut self.kind {
-            SessionKind::Pipes { stdin, .. } => {
-                let stdin = stdin
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("induction carrier: stdin closed"))?;
-                match self.encoding {
-                    Encoding::Json => {
-                        writeln!(stdin, "{frame}")
-                            .map_err(|e| anyhow!("induction carrier: write request: {e}"))?;
-                    }
-                    Encoding::Cbor => {
-                        ciborium::ser::into_writer(frame, &mut *stdin)
-                            .map_err(|e| anyhow!("induction carrier: write cbor request: {e}"))?;
-                    }
-                }
-                stdin.flush()?;
-                Ok(())
-            }
-            SessionKind::Fifo { req, child, .. } => {
-                fifo_write(req, &frame.to_string()).map_err(|e| {
-                    let alive = child
-                        .as_mut()
-                        .map(|c| c.try_wait().ok().flatten().is_none())
-                        .unwrap_or(false);
-                    anyhow!(
-                        "induction/nu adapter: write request {} (child alive: {alive}): {e}",
-                        req.display()
-                    )
-                })
-            }
-        }
-    }
-
-    /// One ctx reply onto the reply channel (same codec and shape rules
-    /// as `send`; the pipes reply in-band on stdin, the fifos use the
-    /// second channel — JSON only there by construction).
-    fn send_reply(&mut self, frame: &Value) -> Result<()> {
-        match &mut self.kind {
-            SessionKind::Pipes { stdin, .. } => {
-                let stdin = stdin
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("induction carrier: stdin closed"))?;
-                match self.encoding {
-                    Encoding::Json => {
-                        writeln!(stdin, "{frame}")
-                            .map_err(|e| anyhow!("induction carrier: write host_reply: {e}"))?;
-                    }
-                    Encoding::Cbor => {
-                        ciborium::ser::into_writer(frame, &mut *stdin).map_err(|e| {
-                            anyhow!("induction carrier: write cbor host_reply: {e}")
-                        })?;
-                    }
-                }
-                stdin.flush()?;
-                Ok(())
-            }
-            SessionKind::Fifo { rep, .. } => fifo_write(rep, &frame.to_string()).map_err(|e| {
-                anyhow!(
-                    "induction/nu adapter: write host_reply {}: {e}",
-                    rep.display()
-                )
-            }),
-        }
-    }
-
-    /// End the child: Pipes drop stdin (the loop's EOF), Fifo unlink
-    /// (the blocked `open` errors and the loop exits); reap with a kill
-    /// guard either way, then remove the session dir.
+    /// End the child: drop the writer (the loop's EOF), kill and reap, then
+    /// remove the session dir. The reader wakes on the closed stdout and exits
+    /// on its own — joining it here would block on a pipe the kernel is still
+    /// draining.
     fn teardown(&mut self) {
-        match &mut self.kind {
-            SessionKind::Pipes {
-                child,
-                stdin,
-                reader,
-            } => {
-                *stdin = None;
-                if let Some(mut child) = child.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                *reader = None;
-            }
-            SessionKind::Fifo {
-                child, reader, dir, ..
-            } => {
-                // Killing first is the reliable exit: the child blocks in
-                // `open --raw` and an unlink race (open before unlink)
-                // can leave it waiting on a dead inode.
-                if let Some(mut child) = child.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                *reader = None;
-                let _ = std::fs::remove_dir_all(dir);
-            }
+        {
+            let mut out = self
+                .shared
+                .out
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Dropping the writer closes the pipe (pipes) — the loop's EOF.
+            *out = Out::Closed;
         }
+        if let Some(mut child) = self.child.take() {
+            // Killing first is the reliable exit: the fifo child blocks in
+            // `open --raw` and an unlink race (open before unlink) can leave it
+            // waiting on a dead inode.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(dir) = self.dir.as_ref() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        self.reader.take();
+        self.shared
+            .fail("induction carrier: session torn down".to_string());
     }
 }
+
 
 /// Write one line to a fifo with a fresh writer fd, close (EOF) after —
 /// the per-batch writer-close discipline the child's read wakes on.
@@ -558,7 +678,8 @@ impl ResidentSession for InductionSession {
     }
 
     fn call(&mut self, handler: &str, args: &Value) -> Result<Value> {
-        self.exchange(FrameKind::Call, handler, args.clone(), None)
+        self.shared
+            .exchange(FrameKind::Call, handler, args.clone(), None, None)
     }
 
     /// ADR-0034 over the induction seam, unified envelope (ADR-0036): the
@@ -569,44 +690,90 @@ impl ResidentSession for InductionSession {
     /// must write the envelope. The seam op set is FROZEN (ADR-0037 —
     /// this transitional JSON document retires with CBOR).
     fn iterate(&mut self, op: StreamOp) -> Result<Value> {
-        let (kind, event, args, stream_id) = match &op {
-            StreamOp::Start {
-                stream_id,
-                handler,
-                args,
-            } => (FrameKind::IterateStart, handler, args, stream_id),
-            StreamOp::Next {
-                stream_id,
-                handler,
-                args,
-            } => (FrameKind::IterateNext, handler, args, stream_id),
-            StreamOp::Dispose {
-                stream_id,
-                handler,
-                args,
-            } => (FrameKind::IterateDispose, handler, args, stream_id),
-        };
-        let fresh = matches!(op, StreamOp::Start { .. });
-        let reply = self.exchange(kind, event, args.clone(), Some(stream_id.clone()))?;
-        match &op {
-            // Dispose has no envelope reply (the routing entry already
-            // left; the answer is success).
-            StreamOp::Dispose { .. } => Ok(reply),
-            // Start AND Next are envelope rounds: Start's plain reply
-            // wraps to terminal, Next's missing `done` is an error.
-            _ => super::session::validate_envelope(reply, fresh, event),
-        }
+        let (kind, event, args, stream_id, fresh) = decompose(&op);
+        let reply = self.shared.exchange(kind, &event, args, stream_id, None)?;
+        finish(reply, fresh, &event)
     }
 
     /// The child's ctx frames ride the bridge of the call that is running
     /// now (the dispatch seam re-arms it on every call — a resident session
     /// spawned by an earlier call must not answer with that call's id).
     fn set_host(&mut self, host: Option<&HostBridge>) {
-        self.host = host.cloned().unwrap_or_default();
+        if let Some(host) = host {
+            *self
+                .shared
+                .armed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = host.clone();
+        }
     }
 
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    /// This child pairs every reply with its request id and runs each handler
+    /// on its own thread, so the instance can serve calls concurrently — the
+    /// declaration's `Unbounded` case.
+    fn shared(&self) -> Option<Arc<dyn super::session::SharedSession>> {
+        Some(self.shared.clone())
+    }
+}
+
+/// One stream verb sliced into the frame it becomes, and whether it is a fresh
+/// round (an envelope the carrier must validate) or a dispose (no envelope).
+fn decompose(op: &StreamOp) -> (FrameKind, String, Value, Option<String>, Option<bool>) {
+    match op {
+        StreamOp::Start {
+            stream_id,
+            handler,
+            args,
+        } => (
+            FrameKind::IterateStart,
+            handler.clone(),
+            args.clone(),
+            Some(stream_id.clone()),
+            Some(true),
+        ),
+        StreamOp::Next {
+            stream_id,
+            handler,
+            args,
+        } => (
+            FrameKind::IterateNext,
+            handler.clone(),
+            args.clone(),
+            Some(stream_id.clone()),
+            Some(false),
+        ),
+        StreamOp::Dispose {
+            stream_id,
+            handler,
+            args,
+        } => (
+            FrameKind::IterateDispose,
+            handler.clone(),
+            args.clone(),
+            Some(stream_id.clone()),
+            None,
+        ),
+    }
+}
+
+/// The envelope rule for one round: dispose is bare, Start and Next are rounds
+/// (Start's plain reply wraps to terminal, Next's missing `done` is an error).
+fn finish(reply: Value, fresh: Option<bool>, event: &str) -> Result<Value> {
+    match fresh {
+        None => Ok(reply),
+        Some(fresh) => super::session::validate_envelope(reply, fresh, event),
+    }
+}
+
+impl super::session::SharedSession for Shared {
+    fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value> {
+        let (kind, event, args, stream_id, fresh) = decompose(&op);
+        let reply = self.exchange(kind, &event, args, stream_id, host)?;
+        finish(reply, fresh, &event)
     }
 }
 

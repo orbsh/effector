@@ -8,7 +8,13 @@
 //! --examples`; the nu author script lives beside them in this crate's
 //! `examples/`); a missing binary fails the test loudly — a stale build is a
 //! recipe error, never a skip.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::panic_in_result_fn
+)]
 
 use effector_runtime::carrier::session::StreamOp;
 use effector_runtime::carrier::HostBridge;
@@ -326,6 +332,62 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
         )
         .unwrap();
     assert_eq!(out, json!({"echoed": "after respawn"}));
+}
+
+/// An `unbounded` pool keeps NO slots: its residency is the owner handed to the
+/// concurrent handle. A sweep that reads "no slots" as "nothing alive" buries a
+/// healthy child on its first pass, so it checks the owner's own liveness.
+#[test]
+fn a_shared_session_survives_the_sweep_while_its_child_lives() {
+    let s = sessions();
+    let argv = induction_bin();
+    let out = s
+        .with_shared(
+            "box/k5",
+            "induction",
+            &argv,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            induction_protocol::Encoding::Json,
+            None,
+            |shared| {
+                shared.iterate(
+                    StreamOp::Start {
+                        stream_id: "s-shared".into(),
+                        handler: "echo".into(),
+                        args: json!({"n": 1}),
+                    },
+                    None,
+                )
+            },
+        )
+        .unwrap();
+    assert_eq!(out["value"], json!({"echoed": {"n": 1}}), "the one frame ran: {out}");
+    assert!(
+        s.sweep_dead().is_empty(),
+        "a live unbounded session is not a dead slot"
+    );
+
+    // And a call through the same key reuses that one child: the pool did not
+    // cold-start a second process behind the sweep's back.
+    s.with_shared(
+        "box/k5",
+        "induction",
+        &argv,
+        &effector_runtime::sandbox::SandboxPolicy::None,
+        induction_protocol::Encoding::Json,
+        None,
+        |shared| {
+            shared.iterate(
+                StreamOp::Start {
+                    stream_id: "s-shared-2".into(),
+                    handler: "echo".into(),
+                    args: json!({"n": 2}),
+                },
+                None,
+            )
+        },
+    )
+    .unwrap();
 }
 
 // ------------------------------------------------- nu induction (two-fifo) --

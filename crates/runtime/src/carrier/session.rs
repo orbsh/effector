@@ -45,6 +45,23 @@ pub trait ResidentSession: Send {
     /// Downcast support (carrier-specific introspection, e.g.
     /// export-list derivation).
     fn as_any(&mut self) -> &mut dyn std::any::Any;
+    /// The CONCURRENT surface, where the carrier has one: a session that pairs
+    /// every reply with the request that asked for it can serve several calls at
+    /// once, so its instance needs no queue and no second process — the
+    /// declaration's `Unbounded` (`BoothType::concurrency`). `None` (the default)
+    /// means this session must be entered one call at a time.
+    fn shared(&self) -> Option<Arc<dyn SharedSession>> {
+        None
+    }
+}
+
+/// A resident session that multiplexes: `iterate` may be called from several
+/// threads with no lock of the registry's, because the carrier carries each
+/// call's identity on the wire and routes the answers back.
+pub trait SharedSession: Send + Sync {
+    /// One stream op, with the call's own bridge (the ctx frames it provokes
+    /// belong to THIS call, not to whoever called last).
+    fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value>;
 }
 
 /// One stream verb from the control plane to a resident session
@@ -228,10 +245,88 @@ pub(crate) fn envelope_pull(session: &mut dyn ResidentSession, op: &StreamOp) ->
 /// (ctx.invoke) never contend on a global lock.
 type Slot = Mutex<Box<dyn ResidentSession>>;
 
-/// Session registry: per booth-instance key, one live session.
+/// A booth instance's residency: one slot, or a POOL of them when the booth
+/// declared that it can serve overlapping calls.
+///
+/// The capacity is the booth's own declaration (`BoothType::concurrency`), and
+/// it is the php-fpm shape: a call takes a free slot, a call that finds every
+/// slot busy takes a NEW one while the pool is under capacity, and a call past
+/// capacity WAITS on a slot. Capacity 1 is the old rule — one resident session,
+/// calls to the instance in arrival order — and it stays the default, because a
+/// booth whose code cannot be re-entered must not be handed two calls at once.
+struct Pool {
+    capacity: usize,
+    slots: Mutex<Vec<Arc<Slot>>>,
+    /// The concurrent handle, when the booth declared `Unbounded`: one session,
+    /// entered from many calls at once (the carrier does the pairing).
+    shared: Mutex<Option<Arc<dyn SharedSession>>>,
+    /// The session OWNER the handle came from: the handle routes frames, but the
+    /// process and its reader thread are owned here — dropping this kills the
+    /// child, so the pool must hold it for as long as the handle is in use.
+    owner: Mutex<Option<Box<dyn ResidentSession>>>,
+}
+
+impl Pool {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            slots: Mutex::new(Vec::new()),
+            shared: Mutex::new(None),
+            owner: Mutex::new(None),
+        }
+    }
+
+    /// Run `f` in a slot: a free one, else a fresh one under capacity, else the
+    /// first one (WAITING — the queue is the declaration's own size).
+    ///
+    /// The slot is chosen under the pool lock and LOCKED after it is dropped, so
+    /// the pool lock is never held across a call: two calls choosing different
+    /// slots do not contend on it.
+    fn run<R>(
+        &self,
+        spawn: impl FnOnce() -> Result<Box<dyn ResidentSession>>,
+        f: impl FnOnce(&mut dyn ResidentSession) -> Result<R>,
+    ) -> Result<R> {
+        let mut spawn = Some(spawn);
+        let chosen: Arc<Slot> = {
+            let mut slots = self
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut free = None;
+            for arc in slots.iter() {
+                // Probe only: the lock is taken for real below, and a probe that
+                // lost the race costs a short wait, never a correctness problem.
+                if arc.try_lock().is_ok() {
+                    free = Some(arc.clone());
+                    break;
+                }
+            }
+            match free {
+                Some(arc) => arc,
+                None if slots.len() < self.capacity => {
+                    let spawn = spawn
+                        .take()
+                        .ok_or_else(|| anyhow::anyhow!("session: spawn used twice"))?;
+                    let arc = Arc::new(Mutex::new(spawn()?));
+                    slots.push(arc.clone());
+                    arc
+                }
+                // Every slot is busy and the pool is full: wait for the first.
+                None => slots[0].clone(),
+            }
+        };
+        let mut session = chosen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(session.as_mut())
+    }
+}
+
+/// Session registry: per booth-instance key, its residency pool.
 #[derive(Default, Clone)]
 pub struct Sessions {
-    map: Arc<Mutex<HashMap<String, Arc<Slot>>>>,
+    map: Arc<Mutex<HashMap<String, Arc<Pool>>>>,
 }
 
 impl Sessions {
@@ -241,11 +336,13 @@ impl Sessions {
 
     /// Get or create the resident session for `key` and run `f` on it.
     ///
-    /// Locking: the registry lock is taken only for map get/insert; the
-    /// per-slot lock serializes calls to the SAME instance (session state
-    /// is not thread-safe and calls to one instance must order anyway).
-    /// `load` runs at cold start inside the slot lock; later calls reuse
-    /// the loaded session.
+    /// Locking: the registry lock is taken only for map get/insert; a slot's lock
+    /// is held for the length of one call. ONE slot is the serial form — calls to
+    /// the instance then order, which is what a body that cannot be re-entered
+    /// needs (aura ADR-0046, `BoothType::concurrency` = 1). A booth that declares
+    /// more gets a POOL and overlapping calls; there is no global lock to fight.
+    /// `load` runs at cold start inside the slot lock; later calls reuse the
+    /// loaded session.
     pub fn with_session(
         &self,
         key: &str,
@@ -284,36 +381,143 @@ impl Sessions {
         encoding: induction_protocol::Encoding,
         f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
     ) -> Result<Value> {
-        let slot = {
-            let mut map = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            match map.get(key) {
-                Some(slot) => slot.clone(),
+        // The serial form: one slot, calls in arrival order. Every caller that
+        // has not declared otherwise keeps exactly this behaviour.
+        self.with_slot_encoded(key, language, source, host, sandbox, encoding, 1, f)
+    }
+
+    /// The UNBOUNDED form (`Concurrency::Unbounded`): one resident session, no
+    /// queue and no cap — every call runs at once, which only a carrier that
+    /// pairs replies by request id can do. The booth declares it; the realm then
+    /// never makes a call wait for another call's completion.
+    ///
+    /// A carrier without the concurrent surface is a declaration error, not a
+    /// silent downgrade: a booth that promised overlap and cannot overlap would
+    /// otherwise queue under a name that says it does not.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_shared(
+        &self,
+        key: &str,
+        language: &str,
+        source: &str,
+        sandbox: &crate::sandbox::SandboxPolicy,
+        encoding: induction_protocol::Encoding,
+        host: Option<&HostBridge>,
+        f: impl FnOnce(&dyn SharedSession) -> Result<Value>,
+    ) -> Result<Value> {
+        let pool = {
+            let mut map = self
+                .map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            map.entry(key.to_string())
+                .or_insert_with(|| Arc::new(Pool::new(1)))
+                .clone()
+        };
+        let shared = {
+            let mut guard = pool
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match guard.as_ref() {
+                Some(shared) => shared.clone(),
                 None => {
-                    // Cold start (or after eviction): spawn + load while
-                    // holding the registry lock — spawn errors surface as
-                    // errors, never panics, and the failed entry is not
-                    // cached.
+                    // Cold start under the handle lock: a second call never sees a
+                    // half-loaded session, and the spawn happens once.
                     let mut session = spawn_session(language, source, host, sandbox, encoding)?;
                     session.load(source)?;
-                    let slot = Arc::new(Mutex::new(session));
-                    map.insert(key.to_string(), slot.clone());
-                    slot
+                    session.set_host(host);
+                    let shared = session.shared().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "booth `{key}` declares unbounded concurrency, but its carrier `{language}` has no concurrent surface — declare a queue (`concurrency: 1`) or a pool instead"
+                        )
+                    })?;
+                    // The OWNER stays: the handle routes frames, the owner holds
+                    // the process. Dropping it here would kill the child that was
+                    // just spawned.
+                    *pool
+                        .owner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
+                    *guard = Some(shared.clone());
+                    shared
                 }
             }
         };
-        let mut session = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The ctx channel's outbound path is per-call (the bridge carries
-        // the enclosing call's id): re-arm it here so a session spawned by
-        // an earlier call does not answer this call's ctx frames with a
-        // stale id (residency is the session, the bridge is the call).
-        session.set_host(host);
-        f(session.as_mut())
+        f(shared.as_ref())
+    }
+
+    /// The declared-capacity form: `capacity` slots may run at once for this
+    /// instance. The booth states the number (`BoothType::concurrency`) because
+    /// only the booth knows whether its body is re-entrant — a Rust binary that
+    /// handles each call on its own stack wants several; an interpreter holding
+    /// one VM behind a GIL wants one per PROCESS, i.e. still a queue here and a
+    /// process pool below.
+    ///
+    /// Locking: the registry lock is taken only for map get/insert; the chosen
+    /// slot's lock is held for the call. Cold start (`load`) runs inside that
+    /// slot lock, so a second call never sees a half-loaded session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_slot_encoded(
+        &self,
+        key: &str,
+        language: &str,
+        source: &str,
+        host: Option<&HostBridge>,
+        sandbox: &crate::sandbox::SandboxPolicy,
+        encoding: induction_protocol::Encoding,
+        capacity: usize,
+        f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
+    ) -> Result<Value> {
+        let pool = {
+            let mut map = self
+                .map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match map.get(key) {
+                Some(pool) if pool.capacity >= capacity.max(1) => pool.clone(),
+                // A declaration that widened the pool replaces the old one: the
+                // sessions in it stay alive for their in-flight calls, and the
+                // next call lands in a pool that can carry the new number.
+                Some(_) => {
+                    let pool = Arc::new(Pool::new(capacity));
+                    map.insert(key.to_string(), pool.clone());
+                    pool
+                }
+                None => {
+                    let pool = Arc::new(Pool::new(capacity));
+                    map.insert(key.to_string(), pool.clone());
+                    pool
+                }
+            }
+        };
+        pool.run(
+            || {
+                // Cold start (or after eviction): spawn + load BEFORE the slot is
+                // published, so a spawn error surfaces as an error and a failed
+                // entry is never cached.
+                let mut session = spawn_session(language, source, host, sandbox, encoding)?;
+                session.load(source)?;
+                Ok(session)
+            },
+            |session| {
+                // The ctx channel's outbound path is per-call (the bridge carries
+                // the enclosing call's id): re-arm it here so a session spawned by
+                // an earlier call does not answer this call's ctx frames with a
+                // stale id (residency is the session, the bridge is the call).
+                session.set_host(host);
+                f(session)
+            },
+        )
     }
 
     /// Evict (drop) the session — instance idle-expiry or hot replacement.
     /// Waits for an in-flight call on the slot to finish before dropping.
     pub fn evict(&self, key: &str) {
-        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(key);
+        self.map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
     }
 
     /// Evict by predicate (the exec carrier's liveness rule): a slot whose
@@ -322,20 +526,48 @@ impl Sessions {
     /// and reaps; a live child stays parked (idle_ttl eviction owns it —
     /// the child is the residency). Returns the removed keys (diagnostics).
     pub fn sweep_dead(&self) -> Vec<String> {
-        let mut map = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self
+            .map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dead: Vec<String> = map
             .iter()
-            .filter_map(|(k, slot)| {
+            .filter_map(|(k, pool)| {
+                // ONE session, held as the concurrent owner: its liveness is the
+                // child's own. Checked before the slots because an unbounded pool
+                // keeps no slots — reading "no slots" as "nothing alive" would bury
+                // a healthy child on the next sweep.
+                {
+                    let mut owner = pool
+                        .owner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(owner) = owner.as_mut() {
+                        let alive = owner
+                            .as_any()
+                            .downcast_mut::<crate::carrier::exec::InductionSession>()
+                            .map(crate::carrier::exec::InductionSession::is_alive)
+                            .unwrap_or(true);
+                        return (!alive).then(|| k.clone());
+                    }
+                }
+                let slots = pool
+                    .slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 // try_lock: a slot mid-call is alive by definition (a
                 // request is running) — never block the sweep behind one.
-                slot.try_lock().ok().and_then(|mut s| {
-                    let dead = s
-                        .as_any()
-                        .downcast_mut::<crate::carrier::exec::InductionSession>()
-                        .map(|e| !e.is_alive())
-                        .unwrap_or(false);
-                    dead.then(|| k.clone())
-                })
+                let any_alive = slots.iter().any(|slot| {
+                    slot.try_lock()
+                        .map(|mut s| {
+                            s.as_any()
+                                .downcast_mut::<crate::carrier::exec::InductionSession>()
+                                .map(crate::carrier::exec::InductionSession::is_alive)
+                                .unwrap_or(true)
+                        })
+                        .unwrap_or(true)
+                });
+                (!any_alive).then(|| k.clone())
             })
             .collect();
         for k in &dead {
