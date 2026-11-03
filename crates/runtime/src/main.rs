@@ -39,7 +39,10 @@ fn keygen(args: Vec<String>) -> anyhow::Result<()> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--out" | "-o" => {
-                out = Some(it.next().ok_or_else(|| anyhow::anyhow!("--out needs a path"))?)
+                out = Some(
+                    it.next()
+                        .ok_or_else(|| anyhow::anyhow!("--out needs a path"))?,
+                )
             }
             other => anyhow::bail!("keygen: unknown argument `{other}`"),
         }
@@ -52,7 +55,9 @@ fn keygen(args: Vec<String>) -> anyhow::Result<()> {
         None => {
             let base = std::env::var_os("XDG_CONFIG_HOME")
                 .map(std::path::PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+                })
                 .ok_or_else(|| anyhow::anyhow!("no HOME and no XDG_CONFIG_HOME: pass --out"))?;
             base.join("effector").join("node.key")
         }
@@ -80,7 +85,10 @@ fn register(args: Vec<String>) -> anyhow::Result<()> {
     runtime.block_on(async {
         match effector_runtime::remote::register_once(&config).await {
             Ok(()) => {
-                println!("registered: the control plane accepted this node's key for `{}`", config.capabilities.node_alias);
+                println!(
+                    "registered: the control plane accepted this node's key for `{}`",
+                    config.capabilities.node_alias
+                );
                 Ok(())
             }
             Err(e) => Err(anyhow::anyhow!("{e:#}")),
@@ -91,7 +99,9 @@ fn register(args: Vec<String>) -> anyhow::Result<()> {
 fn serve(path: Option<&str>) -> anyhow::Result<()> {
     // Single-node simplicity: no discovery layer, the operator points the effector at its
     // control plane.
-    let path = path.map(str::to_string).unwrap_or_else(|| "effector.json".into());
+    let path = path
+        .map(str::to_string)
+        .unwrap_or_else(|| "effector.json".into());
     let config = load(&path)?;
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(effector_runtime::remote::run(config))

@@ -28,8 +28,7 @@ pub type HostFn = std::sync::Arc<dyn Fn(Value) -> anyhow::Result<Value> + Send +
 /// reason. A failure is never folded into an absent row or an empty
 /// scan; the binding maps the string into its own error type.
 pub type PutFn = std::sync::Arc<dyn Fn(Vec<u8>, Vec<u8>) -> Result<(), String> + Send + Sync>;
-pub type GetFn =
-    std::sync::Arc<dyn Fn(&[u8]) -> Result<Option<Vec<u8>>, String> + Send + Sync>;
+pub type GetFn = std::sync::Arc<dyn Fn(&[u8]) -> Result<Option<Vec<u8>>, String> + Send + Sync>;
 pub type DelFn = std::sync::Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
 pub type ScanRangeFn =
     std::sync::Arc<dyn Fn(&[u8], Option<&[u8]>) -> Result<Vec<Vec<u8>>, String> + Send + Sync>;

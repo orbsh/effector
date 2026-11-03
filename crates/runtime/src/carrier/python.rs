@@ -29,11 +29,7 @@ impl okm::pyo3_impl::Engine for ClosureEngine {
     fn del(&self, key: &[u8]) -> Result<(), String> {
         (self.0.del)(key)
     }
-    fn scan_range(
-        &self,
-        begin: &[u8],
-        end: Option<&[u8]>,
-    ) -> Result<Vec<Vec<u8>>, String> {
+    fn scan_range(&self, begin: &[u8], end: Option<&[u8]>) -> Result<Vec<Vec<u8>>, String> {
         (self.0.scan_range)(begin, end)
     }
 }

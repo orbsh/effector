@@ -172,11 +172,7 @@ pub fn public_key_b64(key: &ed25519_dalek::SigningKey) -> String {
 }
 
 /// Sign one challenge. The only way a node produces a `Register`.
-pub fn sign_register(
-    key: &ed25519_dalek::SigningKey,
-    nonce: &str,
-    node_alias: &str,
-) -> String {
+pub fn sign_register(key: &ed25519_dalek::SigningKey, nonce: &str, node_alias: &str) -> String {
     use base64::Engine as _;
     use ed25519_dalek::Signer as _;
     let sig = key.sign(&register_message(nonce, node_alias));
@@ -220,8 +216,8 @@ pub fn verify_register(
 /// holds the 32-byte seed, base64. Nothing else — a key file is a key file.
 pub fn write_keypair(path: &std::path::Path) -> std::io::Result<String> {
     use base64::Engine as _;
-    use std::io::Write as _;
     use rand_core::RngCore as _;
+    use std::io::Write as _;
     let mut seed = [0u8; 32];
     rand_core::OsRng.fill_bytes(&mut seed);
     let body = base64::engine::general_purpose::STANDARD.encode(seed);
@@ -234,7 +230,9 @@ pub fn write_keypair(path: &std::path::Path) -> std::io::Result<String> {
     }
     let mut file = opts.open(path)?;
     writeln!(file, "{body}")?;
-    Ok(public_key_b64(&ed25519_dalek::SigningKey::from_bytes(&seed)))
+    Ok(public_key_b64(&ed25519_dalek::SigningKey::from_bytes(
+        &seed,
+    )))
 }
 
 /// Load the key a node signs with. A missing or malformed file is the caller's error to state:
@@ -248,7 +246,11 @@ pub fn read_signing_key(path: &std::path::Path) -> anyhow::Result<ed25519_dalek:
         .map_err(|e| anyhow::anyhow!("private key {} is not base64: {e}", path.display()))?
         .try_into()
         .map_err(|v: Vec<u8>| {
-            anyhow::anyhow!("private key {} is {} bytes, not 32", path.display(), v.len())
+            anyhow::anyhow!(
+                "private key {} is {} bytes, not 32",
+                path.display(),
+                v.len()
+            )
         })?;
     Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
 }

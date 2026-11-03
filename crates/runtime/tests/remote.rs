@@ -1,6 +1,12 @@
 //! Phase 3 acceptance: a fake control plane over a real WS endpoint.
 //! Register -> Registered -> push one ToolCall -> assert the ToolResult.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unwrap_in_result, clippy::panic_in_result_fn)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_in_result,
+    clippy::panic_in_result_fn
+)]
 
 use effector_config::{CapabilitySurface, EffectorConfig, NetworkPolicy};
 use effector_protocol::{CodeRef, Frame, ToolCall, ToolResult};
@@ -28,7 +34,10 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     // The control plane speaks first, always (one wire shape in either trust posture).
     let nonce = effector_protocol::nonce();
     sink.send(Message::Text(
-        serde_json::to_string(&Frame::Challenge { nonce: nonce.clone() }).unwrap(),
+        serde_json::to_string(&Frame::Challenge {
+            nonce: nonce.clone(),
+        })
+        .unwrap(),
     ))
     .await
     .unwrap();
@@ -186,7 +195,10 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         let (mut sink, mut stream) = ws.split();
 
         sink.send(Message::Text(
-            serde_json::to_string(&Frame::Challenge { nonce: effector_protocol::nonce() }).unwrap(),
+            serde_json::to_string(&Frame::Challenge {
+                nonce: effector_protocol::nonce(),
+            })
+            .unwrap(),
         ))
         .await
         .unwrap();

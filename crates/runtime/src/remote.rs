@@ -104,7 +104,9 @@ async fn serve_connection(
                 });
             }
             Frame::Host(HostFrame::Result(hr)) => {
-                let mut pending = pending_host.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut pending = pending_host
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(tx) = pending.remove(&hr.host_call_id) {
                     let _ = tx.send(hr.outcome);
                 }
@@ -280,7 +282,10 @@ fn build_host_bridge(
                 }
                 _ => return Err(anyhow::anyhow!("host op `{name}` has no builder")),
             };
-            pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(host_call_id.clone(), op_tx);
+            pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(host_call_id.clone(), op_tx);
             tx.send(Frame::Host(HostFrame::Call(HostCall {
                 host_call_id: host_call_id.clone(),
                 call_id: call_id.clone(),
@@ -361,7 +366,10 @@ fn build_host_bridge(
                         data: gs("data"),
                     },
                 };
-                pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(host_call_id.clone(), op_tx);
+                pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(host_call_id.clone(), op_tx);
                 tx.send(Frame::Host(HostFrame::Call(HostCall {
                     host_call_id: host_call_id.clone(),
                     call_id: call_id.clone(),
@@ -410,7 +418,12 @@ impl CodeCache {
     /// insert. A hash mismatch is tampering or a stale resolution — an
     /// error, never a silent accept.
     pub fn resolve(&self, code: &CodeRef) -> anyhow::Result<String> {
-        if let Some(hit) = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&code.sha256) {
+        if let Some(hit) = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&code.sha256)
+        {
             return Ok(hit.to_string());
         }
         let bytes = fetch_verified(&code.url, &code.sha256)?;
@@ -477,7 +490,8 @@ pub async fn register_once(config: &EffectorConfig) -> Result<()> {
         node_alias,
         carriers: config.capabilities.carriers.clone(),
     };
-    ws.send(Message::Text(serde_json::to_string(&register)?)).await?;
+    ws.send(Message::Text(serde_json::to_string(&register)?))
+        .await?;
     match ws.next().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<Frame>(&text)? {
             Frame::Registered => Ok(()),
@@ -500,9 +514,7 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("effector config: {e}"))?;
     // The key is a startup fact, like the capability declaration: a node without one cannot
     // make a claim, and that is a refusal to run, not a per-call error value.
-    let key = effector_protocol::read_signing_key(std::path::Path::new(
-        &config.private_key_path,
-    ))?;
+    let key = effector_protocol::read_signing_key(std::path::Path::new(&config.private_key_path))?;
     let sessions = Sessions::new();
     let code_cache = Arc::new(CodeCache::new());
     let mut backoff = std::time::Duration::from_secs(1);
