@@ -19,32 +19,47 @@ a namespace this runner builds, so
     calls (the one-shot form cannot keep anything; its contract is one process
     per call).
 
+Concurrency (induction ADR-0002, aura ADR-0046). This guest serves SEVERAL
+requests at once, in one process, so a booth may declare `unbounded`:
+
+  * a reader THREAD owns stdin and demultiplexes it — `host_reply` frames wake the
+    ctx call that asked for them by id, request frames are dispatched to their own
+    thread, EOF ends the process;
+  * every request runs on its own thread, and the thread remembers which request
+    it is serving (`_CURRENT.call`);
+  * every ctx frame carries `call` (the request it belongs to) beside its own
+    `id`, so the host answers it from THAT call's bridge and never from a
+    sibling's — the pairing the host needs to keep scopes apart;
+  * the delivered script's `print` is its own capture buffer (a per-call
+    function in its scope, not a global `sys.stdout` swap): two scripts running
+    at once must not write into each other's result, and nothing a script does
+    can reach the protocol channel.
+
 Wire (induction protocol, JSON-lines codec — declared by the parent through
 INDUCTION_ENCODING; this guest ships JSON only and refuses a CBOR declaration
 loudly rather than half-speaking it):
 
   parent -> guest   {"type": "initialize", ...}                -> {"type":"hello",...}
                     {"id":N,"kind":...,"event":...,"args":{}}   -> {"id":N,"result":...}
-                    {"host_reply": {"ok"|"error": ...}}         (answers a ctx call)
-  guest  -> parent  {"host": {"type": "<arm>", "args": {...}}}  (a ctx call out)
+                    {"host_reply": {"id":M,"ok"|"error": ...}}  (answers a ctx call)
+  guest  -> parent  {"host": {"type": "<arm>", "args": {...},
+                              "id": M, "call": N}}              (a ctx call out)
 
 Failures are VALUES (ADR-0012): a delivered script that raises, prints nothing,
 or prints a non-JSON document comes back as {"error": ...} — the runner's own
 text reaches the next inference round instead of being masked by the carrier.
 
 The wire fds are PINNED at import (`WIRE_IN` / `WIRE_OUT`) and every protocol
-frame goes through them: the delivered script runs with `sys.stdout` redirected
-into a capture buffer (its printed document IS the result), so a ctx call made
-from inside a script would otherwise write its frame into that buffer — the
-parent would wait for a line that never arrives while the script waits for a
-reply that was never sent, and the call would end at the deadline.
+frame goes through them under one lock (a line is the unit on the wire: two
+writers would interleave bytes, not requests).
 """
 
-import contextlib
 import io
+import itertools
 import json
 import os
 import sys
+import threading
 
 # Pinned before anything can redirect them (see the module docstring): frame
 # lookups must never go through `sys.stdout`/`sys.stdin` at frame time.
@@ -55,7 +70,8 @@ SCHEMA_EVENT = "interface_schema"
 ENCODING_ENV = "INDUCTION_ENCODING"
 
 # Guest-scope state: the residency this form buys. Scripts may read and mutate
-# it (they run in the namespace below); nothing here is persisted.
+# it (they run in the namespace below); nothing here is persisted, and two
+# requests running at once SEE each other's writes — the author's business.
 STATE = {}
 
 SCHEMA = {
@@ -63,13 +79,29 @@ SCHEMA = {
     "wildcard_receives": [],
     "hooks": [],
     "auth": None,
+    # Consulted by the host at registration (aura ADR-0046): ONE resident process
+    # serving every call at once — no queue, no second process. A serial runner
+    # would say `"concurrency": 1` here and get the queue its body needs.
+    "lifecycle": {"concurrency": "unbounded"},
 }
+
+# The write side, one lock: a frame is one line, and two lines must not merge.
+_WRITE_LOCK = threading.Lock()
+# Ctx calls waiting for the host, by the ctx id they were written with.
+_PENDING = {}
+_PENDING_LOCK = threading.Lock()
+# Which request the CURRENT thread is serving (stamped onto its ctx frames).
+_CURRENT = threading.local()
+_NEXT_CTX = itertools.count(1)
+_STOP = threading.Event()
 
 
 def write_frame(value):
-    """One protocol line on the captured wire — the ONLY writer of this channel."""
-    WIRE_OUT.write(json.dumps(value) + "\n")
-    WIRE_OUT.flush()
+    """One protocol line on the wire — the only writer of this channel."""
+    line = json.dumps(value) + "\n"
+    with _WRITE_LOCK:
+        WIRE_OUT.write(line)
+        WIRE_OUT.flush()
 
 
 def read_frame():
@@ -87,21 +119,47 @@ def read_frame():
         return {}
 
 
+def _fail_pending(reason):
+    """The host is gone: every ctx call waiting on it fails instead of hanging."""
+    with _PENDING_LOCK:
+        waiting = list(_PENDING.items())
+        _PENDING.clear()
+    for _, slot in waiting:
+        slot["error"] = reason
+        slot["event"].set()
+
+
 def ctx_call(arm, args):
-    """One host round trip: the arm's frame out, the host_reply back in."""
-    write_frame({"host": {"type": arm, "args": args}})
-    while True:
-        reply = read_frame()
-        if reply is None:
-            raise RuntimeError("runner_py_guest: host closed during a ctx call")
-        if "host_reply" in reply:
-            hr = reply["host_reply"]
-            if "ok" in hr:
-                return hr["ok"]
-            raise RuntimeError(hr.get("error") or hr.get("err") or "ctx call failed")
-        # A request frame arriving mid-call is a host bug; fail loudly rather
-        # than silently treating it as the reply.
-        raise RuntimeError(f"runner_py_guest: expected host_reply, got {reply}")
+    """One host round trip, paired by id: the frame out, ITS reply back in.
+
+    Several calls of several requests may be in flight at once, so the answer is
+    matched on the id this call wrote — never "the next frame", which is another
+    request's answer the moment two calls are live.
+    """
+    ctx_id = next(_NEXT_CTX)
+    slot = {"event": threading.Event(), "reply": None, "error": None}
+    with _PENDING_LOCK:
+        _PENDING[ctx_id] = slot
+    host = {"type": arm, "args": args, "id": ctx_id}
+    call = getattr(_CURRENT, "call", None)
+    if call is not None:
+        # The request this ctx call belongs to (induction ADR-0002): without it
+        # the host cannot tell whose bridge should answer.
+        host["call"] = call
+    try:
+        write_frame({"host": host})
+        slot["event"].wait()
+    finally:
+        with _PENDING_LOCK:
+            _PENDING.pop(ctx_id, None)
+    if slot["error"] is not None:
+        raise RuntimeError(slot["error"])
+    reply = slot["reply"]
+    if reply is None:
+        raise RuntimeError("runner_py_guest: host closed during a ctx call")
+    if "ok" in reply:
+        return reply["ok"]
+    raise RuntimeError(reply.get("error") or "ctx call failed")
 
 
 def ctx_invoke(target_type, key, handler, args):
@@ -114,32 +172,49 @@ def ctx_invoke(target_type, key, handler, args):
 
 def ctx_emit(event, data):
     """Publish into the realm's MQ plane — fire-and-forget by contract: the
-    host answers NOTHING, so reading here would block the loop."""
-    write_frame({"host": {"type": "emit", "args": {"event": event, "data": data}}})
+    host answers NOTHING, so waiting here would cost a round trip that has no
+    reply to come back."""
+    host = {"type": "emit", "args": {"event": event, "data": data}}
+    call = getattr(_CURRENT, "call", None)
+    if call is not None:
+        host["call"] = call
+    write_frame({"host": host})
+
+
+def _printer(buf):
+    """The delivered script's `print`: ITS buffer, never the shared stdout."""
+
+    def emit(*parts, **kwargs):
+        kwargs.pop("file", None)
+        print(*parts, file=buf, **kwargs)
+
+    return emit
 
 
 def run_delivered(payload):
     """Execute the operation's script in this process and return its result.
 
-    The script's stdout is captured — this channel belongs to the protocol —
-    and its result is the one JSON document it prints.
+    The script's result is the one JSON document it prints, captured in a buffer
+    of its own: this channel belongs to the protocol, and with several requests
+    running at once a process-wide stdout swap would hand one script's output to
+    another.
     """
     code = payload.get("code")
     if not code:
         return {"error": "runner_py_guest: args.code missing (the operation's script)"}
     payload_args = payload.get("args") or {}
+    buf = io.StringIO()
     scope = {
         "ARGS": payload_args,
         "STATE": STATE,
         "ctx_invoke": ctx_invoke,
         "ctx_emit": ctx_emit,
         "json": json,
+        "print": _printer(buf),
         "__name__": "__delivered__",
     }
-    buf = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buf):
-            exec(compile(code, "<delivered>", "exec"), scope)
+        exec(compile(code, "<delivered>", "exec"), scope)
     except BaseException as e:  # the script's failure is a value, not a crash
         return {"error": f"runner_py_guest: delivered code failed: {e}"}
     out = buf.getvalue().strip()
@@ -154,26 +229,10 @@ def run_delivered(payload):
         return {"error": f"runner_py_guest: stdout is not one JSON document: {e}"}
 
 
-def main():
-    declared = os.environ.get(ENCODING_ENV, "json").lower()
-    if declared != "json":
-        print(
-            f"[runner_py_guest] declared codec '{declared}' is not json — this "
-            f"runner ships the JSON-lines codec only",
-            file=sys.stderr,
-        )
-        return 1
-
-    while True:
-        frame = read_frame()
-        if frame is None:
-            return 0  # EOF: the parent closed the session
-        if frame.get("type") == "initialize":
-            write_frame({"type": "hello", "name": "runner_py_guest", "schema": SCHEMA})
-            continue
-        if "id" not in frame or "event" not in frame:
-            print(f"[runner_py_guest] undecodable frame: {frame}", file=sys.stderr)
-            continue
+def serve(frame):
+    """One request, on its own thread, answered with its own id."""
+    _CURRENT.call = frame["id"]
+    try:
         event = frame["event"]
         kind = frame.get("kind") or "call"
         if event == SCHEMA_EVENT and kind == "call":
@@ -188,7 +247,53 @@ def main():
                 "error": f"runner_py_guest: {kind} is not served by this runner "
                 "(delivered scripts answer in one round — no stream state)"
             }
-        write_frame({"id": frame["id"], "result": result})
+    finally:
+        _CURRENT.call = None
+    write_frame({"id": frame["id"], "result": result})
+
+
+def read_loop():
+    """The reader: replies to their ctx calls, requests to their own threads."""
+    while not _STOP.is_set():
+        frame = read_frame()
+        if frame is None:
+            _STOP.set()
+            _fail_pending("runner_py_guest: host closed the channel")
+            return
+        if "host_reply" in frame:
+            reply = frame["host_reply"]
+            ctx_id = reply.get("id")
+            with _PENDING_LOCK:
+                slot = _PENDING.get(ctx_id) if ctx_id is not None else None
+            if slot is None:
+                print(
+                    f"[runner_py_guest] reply for unknown ctx id {ctx_id}",
+                    file=sys.stderr,
+                )
+                continue
+            slot["reply"] = reply
+            slot["event"].set()
+            continue
+        if frame.get("type") == "initialize":
+            write_frame({"type": "hello", "name": "runner_py_guest", "schema": SCHEMA})
+            continue
+        if "id" not in frame or "event" not in frame:
+            print(f"[runner_py_guest] undecodable frame: {frame}", file=sys.stderr)
+            continue
+        threading.Thread(target=serve, args=(frame,), daemon=True).start()
+
+
+def main():
+    declared = os.environ.get(ENCODING_ENV, "json").lower()
+    if declared != "json":
+        print(
+            f"[runner_py_guest] declared codec '{declared}' is not json — this "
+            f"runner ships the JSON-lines codec only",
+            file=sys.stderr,
+        )
+        return 1
+    read_loop()
+    return 0
 
 
 if __name__ == "__main__":
