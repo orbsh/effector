@@ -367,6 +367,24 @@ fn a_shared_session_survives_the_sweep_while_its_child_lives() {
         "a live unbounded session is not a dead slot"
     );
 
+    // ONE instance, ONE process: a queued call on the same key must refuse rather
+    // than open a slot session beside the shared one.
+    let refused = s
+        .with_session(
+            "box/k5",
+            "induction",
+            &argv,
+            None,
+            &effector_runtime::sandbox::SandboxPolicy::None,
+            |sess| sess.call("echo", &json!(0)),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("shared session"),
+        "the queued path names the dispatcher bug: {refused}"
+    );
+
     // And a call through the same key reuses that one child: the pool did not
     // cold-start a second process behind the sweep's back.
     s.with_shared(

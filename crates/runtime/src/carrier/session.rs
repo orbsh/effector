@@ -62,6 +62,10 @@ pub trait SharedSession: Send + Sync {
     /// One stream op, with the call's own bridge (the ctx frames it provokes
     /// belong to THIS call, not to whoever called last).
     fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value>;
+    /// One plain handler call on the same terms — a lifecycle hook rides the
+    /// resident session too, and it must not open a second process beside the
+    /// one the calls are using.
+    fn call(&self, handler: &str, args: &Value, host: Option<&HostBridge>) -> Result<Value>;
 }
 
 /// One stream verb from the control plane to a resident session
@@ -474,6 +478,22 @@ impl Sessions {
                 .map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // ONE instance, ONE process: a pool that already runs through its
+            // shared session must not open a slot session beside it. Reaching
+            // here means a caller took the queue path for a booth that declared
+            // `unbounded` — a bug in the dispatcher, said plainly.
+            if let Some(pool) = map.get(key) {
+                if pool
+                    .shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+                {
+                    anyhow::bail!(
+                        "instance `{key}` runs through its shared session (declared unbounded); a queued call would give it a second process — dispatch it on the shared surface"
+                    );
+                }
+            }
             match map.get(key) {
                 Some(pool) if pool.capacity >= capacity.max(1) => pool.clone(),
                 // A declaration that widened the pool replaces the old one: the

@@ -775,6 +775,10 @@ impl super::session::SharedSession for Shared {
         let reply = self.exchange(kind, &event, args, stream_id, host)?;
         finish(reply, fresh, &event)
     }
+
+    fn call(&self, handler: &str, args: &Value, host: Option<&HostBridge>) -> Result<Value> {
+        self.exchange(FrameKind::Call, handler, args.clone(), None, host)
+    }
 }
 
 impl Drop for InductionSession {
