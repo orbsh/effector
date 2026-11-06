@@ -10,8 +10,8 @@ use effector_runtime::carrier::steel::introspect;
 #[test]
 fn steel_introspect_derives_and_merges() {
     let src = r##"
-(on "add_to_cart" "user_id" (lambda (args) (hash "ok" #t)))
-(on "order.*" "" (lambda (args) #t))
+(on "add_to_cart" (hash "key" "user_id") (lambda (args) (hash "ok" #t)))
+(on "order.*" (hash) (lambda (args) #t))
 
 (define (interface_schema args)
   (hash "lifecycle" (hash "idle_ttl" "5m")))
@@ -26,7 +26,7 @@ fn steel_introspect_derives_and_merges() {
 #[test]
 fn steel_introspect_derived_only() {
     let src = r##"
-(on "remove_from_cart" "" (lambda (args) #t))
+(on "remove_from_cart" (hash) (lambda (args) #t))
 "##;
     let schema = introspect(src).unwrap();
     assert!(schema["receives"]["remove_from_cart"].is_object());
@@ -61,7 +61,7 @@ fn steel_collector_and_explicit_receives_deep_merge() {
     // Both sources contribute their own keys; a collision keeps the
     // collector's (decorator-wins, the python merge contract).
     let src = r##"
-(on "from.collector" "uid" (lambda (args) #t))
+(on "from.collector" (hash "key" "uid") (lambda (args) #t))
 (define (interface_schema args)
   (hash "receives" (hash "from.explicit" (hash "key" "k")
                          "from.collector" (hash "key" "shadowed"))))
@@ -87,9 +87,9 @@ fn steel_ctx_on_collects_reserved_hooks_into_the_schema() {
     // never in receives — and the handler still binds under the reserved
     // name for the realm's Declared-hook dispatch.
     let src = r##"
-(ctx.on "__sleep" "" (lambda (args) #t))
-(ctx.on "__wake" "" (lambda (args) #t))
-(on "evt" "" (lambda (args) #t))
+(ctx.on "__sleep" (hash) (lambda (args) #t))
+(ctx.on "__wake" (hash) (lambda (args) #t))
+(on "evt" (hash) (lambda (args) #t))
 "##;
     let schema = introspect(src).unwrap();
     let hooks = schema["hooks"].as_array().expect("hooks array present");
@@ -109,7 +109,7 @@ fn steel_ctx_on_collects_reserved_hooks_into_the_schema() {
 #[test]
 fn steel_unknown_reserved_name_is_a_declaration_error() {
     let src = r##"
-(ctx.on "__nope" "" (lambda (args) #t))
+(ctx.on "__nope" (hash) (lambda (args) #t))
 "##;
     let err = introspect(src).unwrap_err();
     assert!(
@@ -125,11 +125,31 @@ fn steel_handler_phase_on_is_an_error_value() {
     // dynamic subscription stays rejected, never a silent no-op.
     let src = r##"
 (define (sneaky args)
-  (on "late" "" (lambda (a) #t)))
+  (on "late" (hash) (lambda (a) #t)))
 (define (interface_schema args)
   (sneaky #f)
   (hash "lifecycle" (hash "idle_ttl" "1m")))
 "##;
     let err = introspect(src).unwrap_err();
     assert!(format!("{err:#}").contains("phase gate"), "{err}");
+}
+
+#[test]
+fn steel_auth_rides_the_event_declaration() {
+    // `auth #t` sits on the SAME `on` that names the event: one object per event, so the name is
+    // written once and the flag cannot drift from it (the old top-level `auth` table keyed by
+    // event was the same name in two places).
+    let src = r##"
+(on "ui:turn.submit" (hash "key" "device" "auth" #t) (lambda (args) #t))
+(on "ui:connect" (hash "key" "device") (lambda (args) #t))
+"##;
+    let schema = introspect(src).unwrap();
+    println!("STEEL AUTH: {schema}");
+    assert_eq!(schema["receives"]["ui:turn.submit"]["auth"], true);
+    assert_eq!(schema["receives"]["ui:turn.submit"]["key"], "device");
+    assert!(
+        schema["receives"]["ui:connect"].get("auth").is_none(),
+        "an ungated declaration carries no auth key: {schema}"
+    );
+    assert!(schema.get("auth").is_none(), "no second table: {schema}");
 }

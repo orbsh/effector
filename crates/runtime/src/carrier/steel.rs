@@ -71,24 +71,7 @@ impl SteelSession {
         // BEFORE the source runs so the body's load-phase calls resolve;
         // the phase gate lives in the shared collector (sealed after
         // bind_event_handlers, error value after).
-        engine.register_fn("ctx.on", move |event: String, key: String, handler: SteelVal| -> Result<SteelVal, String> {
-            if SEALED.with(|s| *s.borrow()) {
-                return Err("ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op".to_string());
-            }
-            if event.starts_with("__") {
-                if !RESERVED_HOOKS.contains(&event.as_str()) {
-                    return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
-                }
-                HOOKS.with(|h| {
-                    if !h.borrow().contains(&event) {
-                        h.borrow_mut().push(event);
-                    }
-                });
-                return Ok(handler);
-            }
-            DECLARATIONS.with(|d| d.borrow_mut().push((event, key, handler.clone())));
-            Ok(handler)
-        });
+        engine.register_fn("ctx.on", collect_on);
         Ok(Self { engine })
     }
 }
@@ -226,12 +209,22 @@ fn steel_to_json(v: &SteelVal) -> ExecResult {
     Ok(out)
 }
 
+/// One `on` declaration, collected during the load phase: the event, how its targets are keyed,
+/// whether it is served only to bound users, and the handler bound under the event name.
+#[derive(Clone)]
+struct OnDecl {
+    event: String,
+    key: String,
+    auth: bool,
+    handler: SteelVal,
+}
+
 thread_local! {
-    /// (event, key, handler) declarations collected by `on` during the
+    /// (event, key, auth, handler) declarations collected by `on` during the
     /// body run. Thread-local because SteelVal carries Rc internals (not
     /// Send) and register_fn closures must be Send — the whole execution
     /// (VM + builtins) stays on one thread, so thread-local is exact.
-    static DECLARATIONS: std::cell::RefCell<Vec<(String, String, SteelVal)>> =
+    static DECLARATIONS: std::cell::RefCell<Vec<OnDecl>> =
         const { std::cell::RefCell::new(Vec::new()) };
     /// Reserved-name lifecycle hooks collected via `ctx.on` / `on` at load
     /// (names only — the handler binding rides DECLARATIONS' machinery is
@@ -250,7 +243,7 @@ thread_local! {
 /// accepts; they land in the schema's `hooks` array, never in `receives`.
 pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake"];
 
-/// Event-declaration collector, bound before the source runs: `(on "event"
+/// Event-declaration collector, bound before the source runs: `(on "event" (hash "key" "field")
 /// "key" handler)` records the declaration and returns the handler
 /// unchanged. This IS `ctx.on`'s resident-side body (decorators are sugar
 /// lowering to the same primitive, ADR-0043 §3): the load-phase registration
@@ -261,24 +254,65 @@ fn register_on_collector(engine: &mut Engine) {
     DECLARATIONS.with(|d| d.borrow_mut().clear());
     HOOKS.with(|h| h.borrow_mut().clear());
     SEALED.with(|s| *s.borrow_mut() = false);
-    engine.register_fn("on", move |event: String, key: String, handler: SteelVal| -> Result<SteelVal, String> {
-        if SEALED.with(|s| *s.borrow()) {
-            return Err("ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op".to_string());
+    engine.register_fn("on", collect_on);
+}
+
+/// THE ONE REGISTRATION CHANNEL: `on` (the decorator sugar) and `ctx.on` (its resident alias) both
+/// land here, so the phase gate, the reserved-name rules and the declaration shape cannot drift
+/// between two names for the same act.
+///
+/// `(on "ui:add-to-cart" (hash "key" "user_id" "auth" #t) handler)`: the event's knobs ride ONE
+/// options hash rather than a positional key, because steel has no keyword arguments and a growing
+/// tail of booleans is a shape nobody can read. The event is named once, here.
+fn collect_on(event: String, opts: SteelVal, handler: SteelVal) -> Result<SteelVal, String> {
+    if SEALED.with(|s| *s.borrow()) {
+        return Err("ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op".to_string());
+    }
+    if event.starts_with("__") {
+        if !RESERVED_HOOKS.contains(&event.as_str()) {
+            return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
         }
-        if event.starts_with("__") {
-            if !RESERVED_HOOKS.contains(&event.as_str()) {
-                return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
+        HOOKS.with(|h| {
+            if !h.borrow().contains(&event) {
+                h.borrow_mut().push(event);
             }
-            HOOKS.with(|h| {
-                if !h.borrow().contains(&event) {
-                    h.borrow_mut().push(event);
-                }
-            });
-            return Ok(handler);
-        }
-        DECLARATIONS.with(|d| d.borrow_mut().push((event, key, handler.clone())));
-        Ok(handler)
+        });
+        return Ok(handler);
+    }
+    let (key, auth) = on_opts(&opts)?;
+    DECLARATIONS.with(|d| {
+        d.borrow_mut().push(OnDecl {
+            event,
+            key,
+            auth,
+            handler: handler.clone(),
+        })
     });
+    Ok(handler)
+}
+
+/// Read a declaration's options hash: `key` (the payload field carrying the instance) and `auth`
+/// (serve this event only to senders with a bound user). Absent = the empty string / false, so
+/// `(hash)` declares a keyless public subscription.
+fn on_opts(opts: &SteelVal) -> Result<(String, bool), String> {
+    let SteelVal::HashMapV(map) = opts else {
+        return Err(
+            "on: the second argument is the declaration's options hash — (on \"ui:x\" (hash \"key\" \"user_id\" \"auth\" #t) handler)"
+                .to_string(),
+        );
+    };
+    let get = |name: &str| map.get(&SteelVal::StringV(name.into()));
+    let key = match get("key") {
+        Some(SteelVal::StringV(s)) => s.to_string(),
+        Some(other) => return Err(format!("on: `key` must be a string, got {other:?}")),
+        None => String::new(),
+    };
+    let auth = match get("auth") {
+        Some(SteelVal::BoolV(b)) => *b,
+        Some(other) => return Err(format!("on: `auth` must be a boolean, got {other:?}")),
+        None => false,
+    };
+    Ok((key, auth))
 }
 
 /// Seal the activation phase: after this, `on`/`ctx.on` are error values.
@@ -296,16 +330,16 @@ fn collected_hooks() -> Vec<String> {
 /// dotted names are fine: env lookup is by string, not parser ident).
 fn bind_event_handlers(engine: &mut Engine) {
     DECLARATIONS.with(|d| {
-        for (event, _key, handler) in d.borrow().iter() {
-            engine.register_value(event, handler.clone());
+        for decl in d.borrow().iter() {
+            engine.register_value(&decl.event, decl.handler.clone());
         }
     });
     // Reserved hooks bind under their own names (the realm calls them by
     // the reserved name through the session, ADR-0043 §3).
     DECLARATIONS.with(|d| {
-        for (event, _key, handler) in d.borrow().iter() {
-            if event.starts_with("__") {
-                engine.register_value(event.as_str(), handler.clone());
+        for decl in d.borrow().iter() {
+            if decl.event.starts_with("__") {
+                engine.register_value(&decl.event, decl.handler.clone());
             }
         }
     });
@@ -346,24 +380,7 @@ fn register_ctx_stubs(engine: &mut Engine) {
     // collector must see its registrations), so the introspection engine
     // binds the same primitive the resident session binds (register_on_collector
     // owns the gate + the reserved-name rules, ADR-0043 §3).
-    engine.register_fn("ctx.on", move |event: String, key: String, handler: SteelVal| -> Result<SteelVal, String> {
-        if SEALED.with(|s| *s.borrow()) {
-            return Err("ctx.on is legal during activation only (ADR-0043 §3 phase gate) — a handler-phase registration is an error, not a no-op".to_string());
-        }
-        if event.starts_with("__") {
-            if !RESERVED_HOOKS.contains(&event.as_str()) {
-                return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
-            }
-            HOOKS.with(|h| {
-                if !h.borrow().contains(&event) {
-                    h.borrow_mut().push(event);
-                }
-            });
-            return Ok(handler);
-        }
-        DECLARATIONS.with(|d| d.borrow_mut().push((event, key, handler.clone())));
-        Ok(handler)
-    });
+    engine.register_fn("ctx.on", collect_on);
     // The okm storage surface (collection fns + codec fns) follows the
     // SAME define-compile trap: a handler referencing `(collection-merge!
     // ...)` or `(okm-encode-key! ...)` needs the names to exist at
@@ -375,13 +392,8 @@ fn register_ctx_stubs(engine: &mut Engine) {
     okm_steel::collection::register_codec_stubs(engine);
 }
 
-fn collected() -> Vec<(String, String)> {
-    DECLARATIONS.with(|d| {
-        d.borrow()
-            .iter()
-            .map(|(e, k, _)| (e.clone(), k.clone()))
-            .collect()
-    })
+fn collected() -> Vec<OnDecl> {
+    DECLARATIONS.with(|d| d.borrow().clone())
 }
 
 /// Upload-time introspection: run the source once in a fresh VM (load
@@ -401,16 +413,21 @@ pub fn introspect(source: &str) -> ExecResult {
     // Derived half from the collected declarations.
     let mut receives = serde_json::Map::new();
     let mut wildcards: Vec<Value> = Vec::new();
-    for (event, key) in declarations.iter() {
-        if event.ends_with(".*") {
-            wildcards.push(Value::String(event.clone()));
+    for decl in declarations.iter() {
+        if decl.event.ends_with(".*") {
+            wildcards.push(Value::String(decl.event.clone()));
             continue;
         }
         let mut entry = serde_json::Map::new();
-        if !key.is_empty() {
-            entry.insert("key".into(), Value::String(key.clone()));
+        if !decl.key.is_empty() {
+            entry.insert("key".into(), Value::String(decl.key.clone()));
         }
-        receives.insert(event.clone(), Value::Object(entry));
+        // The declaration's own words in its own entry (python's `@on(..., auth=True)` lands in
+        // the same place): one entry per event, so the event name is written once.
+        if decl.auth {
+            entry.insert("auth".into(), Value::Bool(true));
+        }
+        receives.insert(decl.event.clone(), Value::Object(entry));
     }
     let mut derived = Value::Object(
         [

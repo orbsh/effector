@@ -46,3 +46,4 @@ Deferred gates:
 
 - Aura-embedded form (Wasmtime-heavy-isolation sibling): deferred until the remote effector is stable; embedding changes nothing in the task contract.
 - Skill packaging/install lifecycle: skills are emergent (Krystallizer graph), not installed artifacts — revisit only if cold-start cost of spec fetch becomes measurable.
+A RECEIVE'S KNOBS RIDE ITS DECLARATION 2026-11-06: `@on("ui:x", key="device", auth=True)` and steel's `(on "ui:x" (hash "key" "device" "auth" #t) h)`. The carrier writes both into the receive's own schema entry (`auth` used to be a top-level table keyed by event), so the event name is written once. steel's `on`/`ctx.on` now share ONE collector body (`collect_on`) instead of two copies that had already drifted in comments; a non-hash second argument is a declaration error naming the shape.

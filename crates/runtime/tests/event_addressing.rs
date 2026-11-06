@@ -52,7 +52,7 @@ def remove(args):
 fn steel_event_name_addressing() {
     // (on ...) binds the handler under the event name in the VM; resident.
     let src = r##"
-(on "add_to_cart" "user_id" (lambda (args) (hash "added" (hash-ref args "item"))))
+(on "add_to_cart" (hash "key" "user_id") (lambda (args) (hash "added" (hash-ref args "item"))))
 "##;
     let sessions = Sessions::new();
     let out = sessions
@@ -89,7 +89,7 @@ def bump(args):
 "##;
     let steel_src = r##"
 (define count 0)
-(on "bump" "" (lambda (args)
+(on "bump" (hash) (lambda (args)
   (set! count (+ count (hash-ref args "by")))
   (hash "count" count)))
 "##;

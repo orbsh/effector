@@ -80,9 +80,17 @@ fn load_module<'py>(
         let first = args.get_item(0)?;
         if first.extract::<String>().is_ok() {
             let mut key = String::new();
+            // The event's own knobs ride the DECORATOR (one place per event): `key` names the
+            // payload field carrying the instance, `auth` says the event is served only to senders
+            // with a bound user. A separate auth table keyed by event would be the same name
+            // written twice.
+            let mut auth = false;
             if let Some(kw) = kw {
                 if let Some(k) = kw.get_item("key")? {
                     key = k.extract()?;
+                }
+                if let Some(a) = kw.get_item("auth")? {
+                    auth = a.extract()?;
                 }
             }
             let event = first.extract::<String>()?;
@@ -106,7 +114,7 @@ fn load_module<'py>(
                 // calls (by the reserved name), so fall through to the same
                 // binder with an empty key.
             }
-            reg.append((event.clone(), key))?;
+            reg.append((event.clone(), key, auth))?;
             // The returned decorator binds the function under the EVENT
             // NAME — event delivery addresses handlers by event name, so
             // the module must expose them there. The module handle is
@@ -258,7 +266,7 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
         let mut receives = serde_json::Map::new();
         let mut wildcards: Vec<Value> = Vec::new();
         for item in reg.iter() {
-            let pair: (String, String) = match item.extract() {
+            let pair: (String, String, bool) = match item.extract() {
                 Ok(p) => p,
                 Err(e) => {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -273,6 +281,11 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
             let mut entry = serde_json::Map::new();
             if !pair.1.is_empty() {
                 entry.insert("key".into(), Value::String(pair.1));
+            }
+            // The declaration's own words, in the declaration's own entry: `auth` is not a table
+            // beside `receives`, it is a property of THIS receive.
+            if pair.2 {
+                entry.insert("auth".into(), Value::Bool(true));
             }
             receives.insert(pair.0, Value::Object(entry));
         }
