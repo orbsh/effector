@@ -91,7 +91,7 @@ pub type ExecResult = anyhow::Result<Value>;
 pub mod exec;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod session;
+pub mod executor;
 #[cfg(feature = "steel")]
 pub mod steel;
 
@@ -100,9 +100,9 @@ pub mod steel;
 pub fn execute(language: &str, _req: ExecRequest) -> anyhow::Result<Value> {
     match language {
         #[cfg(feature = "steel")]
-        "steel" => anyhow::bail!("steel is resident-only: use carrier::session"),
+        "steel" => anyhow::bail!("steel is resident-only: use carrier::executor"),
         #[cfg(feature = "python")]
-        "python" => anyhow::bail!("python is resident-only: use carrier::session"),
+        "python" => anyhow::bail!("python is resident-only: use carrier::executor"),
         other => anyhow::bail!("language not carried by this effector build: {other}"),
     }
 }
@@ -115,7 +115,7 @@ pub fn introspect(language: &str, source: &str) -> anyhow::Result<Value> {
 }
 
 /// The declared-encoding form (ADR-0037 §2): the process carriers spawn
-/// their throwaway session in the DECLARED codec — a CBOR-declared induction
+/// their throwaway executor in the DECLARED codec — a CBOR-declared induction
 /// booth's `interface_schema` frame round trip must ride CBOR too, or
 /// the child would not parse the request.
 pub fn introspect_encoded(
@@ -129,19 +129,19 @@ pub fn introspect_encoded(
         #[cfg(feature = "python")]
         "python" => python::introspect(source),
         // Languages without collectors: the script hand-writes the whole
-        // `interface_schema` — run it in a THROWAWAY resident session
+        // `interface_schema` — run it in a THROWAWAY resident executor
         // (load, call the schema function, drop). Same contract, no
         // one-shot execution path.
         _ => {
-            let sessions = session::Sessions::new();
-            sessions.with_session_encoded(
+            let executors = executor::Executors::new();
+            executors.with_executor_encoded(
                 "__introspect",
                 language,
                 source,
                 None,
                 &crate::sandbox::SandboxPolicy::None,
                 encoding,
-                |s: &mut dyn crate::carrier::session::ResidentSession| {
+                |s: &mut dyn crate::carrier::executor::Executor| {
                     s.call("interface_schema", &Value::Null)
                 },
             )

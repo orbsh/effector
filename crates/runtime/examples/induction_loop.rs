@@ -134,7 +134,7 @@ fn run_cbor() {
     // ciborium reads EXACTLY the declared bytes per value (no
     // over-read), so sequential from_reader calls on the persistent
     // blocking reader land document-by-document; a decode error (the
-    // parent closed stdin = EOF) ends the session.
+    // parent closed stdin = EOF) ends the link.
     while let Ok(req) = ciborium::de::from_reader(&mut reader) {
         let job = job_from(&req);
         let mut host = |frame: Value| -> Value {
@@ -165,7 +165,7 @@ fn run_cbor() {
 
 /// The shared dispatch (identical under both codecs): one request in,
 /// the reply frame's result value out — the caller emits it in the
-/// session's codec (the codec is I/O, the dispatch is logic).
+/// link's codec (the codec is I/O, the dispatch is logic).
 fn dispatch(
     job: &Job,
     streams: &mut HashMap<String, Guard>,
@@ -207,7 +207,7 @@ fn dispatch(
             }}}}
         }),
         // Reserved lifecycle hooks (ADR-0043 §3): the realm's Declared
-        // dispatch calls the session by the reserved name. __sleep runs
+        // dispatch calls the executor by the reserved name. __sleep runs
         // before eviction (return ignored), __wake on reactivation.
         ("call" | "iterate_start", "__sleep") => serde_json::json!({"slept": true}),
         ("call" | "iterate_start", "__wake") => serde_json::json!({"woke": true}),

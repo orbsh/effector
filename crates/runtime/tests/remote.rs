@@ -67,13 +67,13 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     .await
     .unwrap();
 
-    // Push one call: a steel counter handler. Session identity and entry
-    // name are separate: residency is keyed by `session` alone.
+    // Push one call: a steel counter handler. Executor identity and entry
+    // name are separate: residency is keyed by `executor` alone.
     let call = ToolCall {
         call_id: "c-1".into(),
         kind: effector_protocol::CallKind::IterateStart,
         stream: Some("s-1".into()),
-        session: "counter/k1".into(),
+        executor: "counter/k1".into(),
         entry: "counter".into(),
         language: "steel".into(),
         encoding: induction_protocol::Encoding::Json,
@@ -216,7 +216,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             call_id: "c-link".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
-            session: "triple/k1".into(),
+            executor: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
             encoding: induction_protocol::Encoding::Json,
@@ -243,14 +243,14 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // A SECOND call with the SAME code (new session so the resident
+        // A SECOND call with the SAME code (new executor so the resident
         // load actually re-resolves): the per-hash cache must serve it —
         // the HTTP source stays at exactly one hit across the exchange.
         let call = ToolCall {
             call_id: "c-cached".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
-            session: "triple/k2".into(),
+            executor: "triple/k2".into(),
             entry: "triple".into(),
             language: "steel".into(),
             encoding: induction_protocol::Encoding::Json,
@@ -287,7 +287,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             call_id: "c-bad".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
-            session: "triple/k1".into(),
+            executor: "triple/k1".into(),
             entry: "triple".into(),
             language: "steel".into(),
             encoding: induction_protocol::Encoding::Json,

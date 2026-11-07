@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use effector_runtime::carrier::session::{Sessions, StreamOp};
+use effector_runtime::carrier::executor::{Executors, StreamOp};
 use effector_runtime::carrier::HostBridge;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -36,16 +36,16 @@ fn run(code: &str, args: Value, stream: &str) -> StreamOp {
 /// Queued (the serial runner this replaced) it takes 1.6 s.
 #[test]
 fn two_python_requests_run_at_once_in_one_process() {
-    let sessions = Sessions::new();
+    let executors = Executors::new();
     let argv = guest();
     let code = "import time\ntime.sleep(0.8)\nprint(json.dumps({'n': ARGS['n']}))";
     let started = Instant::now();
     let mut handles = Vec::new();
     for n in 0..2 {
-        let sessions = sessions.clone();
+        let executors = executors.clone();
         let argv = argv.clone();
         handles.push(std::thread::spawn(move || {
-            sessions
+            executors
                 .with_shared(
                     "box/py-concurrent",
                     "induction",
@@ -75,14 +75,14 @@ fn two_python_requests_run_at_once_in_one_process() {
 /// call at once — the case where "answer the last call's bridge" is wrong.
 #[test]
 fn a_ctx_call_is_answered_by_its_own_requests_bridge() {
-    let sessions = Sessions::new();
+    let executors = Executors::new();
     let argv = guest();
     let code = "import time\ntime.sleep(0.5)\n\
                 r = ctx_invoke('sibling', 'k', 'echo', {'x': 1})\n\
                 print(json.dumps({'marker': r['who']}))";
     let mut handles = Vec::new();
     for tag in ["A", "B"] {
-        let sessions = sessions.clone();
+        let executors = executors.clone();
         let argv = argv.clone();
         let bridge = HostBridge {
             functions: BTreeMap::from([(
@@ -92,7 +92,7 @@ fn a_ctx_call_is_answered_by_its_own_requests_bridge() {
             storage: None,
         };
         handles.push(std::thread::spawn(move || {
-            sessions
+            executors
                 .with_shared(
                     "box/py-attribution",
                     "induction",

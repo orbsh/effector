@@ -1,6 +1,6 @@
 //! Python carrier (PyO3, in-process CPython, zero IPC).
 
-use super::session::StreamOp;
+use super::executor::StreamOp;
 use super::{ExecResult, HostBridge, HostFn, StorageEngineFns};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyCFunction, PyDict, PyFloat, PyInt, PyList, PyModule, PyString};
@@ -347,27 +347,27 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
     Ok((module, registry, hooks))
 }
 
-/// Resident python session: module loaded once, handlers called by name
-/// across calls. The module's global dict IS the session state — variables
+/// Resident python executor: module loaded once, handlers called by name
+/// across calls. The module's global dict IS the executor state — variables
 /// set by one handler are visible to the next. Drop = state gone. Host
 /// functions are bound at load and stay bound.
-pub struct PythonSession {
+pub struct PythonExecutor {
     module: Option<Py<PyModule>>,
     host: Option<HostBridge>,
     /// Live iterate streams (ADR-0034 generator mode): the framework
     /// drives the native generator; the handler never sees the wire
     /// protocol. stream_id -> the generator object (GIL held whenever
-    /// this is touched — the session already lives under one slot lock).
-    /// `unsafe impl Send` below covers the whole session; streams die
+    /// this is touched — the executor already lives under one slot lock).
+    /// `unsafe impl Send` below covers the whole executor; streams die
     /// with it (eviction = failed stream, per the ADR).
     streams: HashMap<String, Py<PyAny>>,
 }
 
-// Py<PyModule> is not Send; sessions live on one runtime thread each, so
+// Py<PyModule> is not Send; executors live on one runtime thread each, so
 // the Send impl is exact (same reasoning as steel's thread-local design).
-unsafe impl Send for PythonSession {}
+unsafe impl Send for PythonExecutor {}
 
-impl PythonSession {
+impl PythonExecutor {
     pub fn new(host: Option<&HostBridge>) -> anyhow::Result<Self> {
         Ok(Self {
             module: None,
@@ -377,12 +377,12 @@ impl PythonSession {
     }
 }
 
-impl super::session::ResidentSession for PythonSession {
+impl super::executor::Executor for PythonExecutor {
     fn load(&mut self, source: &str) -> anyhow::Result<()> {
         Python::attach(|py| -> anyhow::Result<()> {
             let (module, _registry, _hooks) =
                 load_module(py, source).map_err(|e| anyhow::anyhow!("python load: {e}"))?;
-            // Host functions bind once at load and stay for the session's
+            // Host functions bind once at load and stay for the executor's
             // whole life — same marshal contract as the old one-shot path.
             // ADR-0043: the host bridge is ONE module-level object `ctx`,
             // its attribute tree mirroring the dotted bridge keys
@@ -470,8 +470,8 @@ impl super::session::ResidentSession for PythonSession {
                         })?;
                         // Release the GIL around the host call: ctx fns
                         // block_on an async round trip that may run ANOTHER
-                        // python booth's session (iterate, invoke) — that
-                        // session needs the GIL. Holding it across the
+                        // python booth's executor (iterate, invoke) — that
+                        // executor needs the GIL. Holding it across the
                         // block is a guaranteed deadlock; allow_threads is
                         // the pyo3 contract for exactly this (ADR-0034 e2e
                         // caught it; the same shape applies to ctx.invoke
@@ -544,7 +544,7 @@ impl super::session::ResidentSession for PythonSession {
             let module = self
                 .module
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("python session: call before load"))?
+                .ok_or_else(|| anyhow::anyhow!("python executor: call before load"))?
                 .bind(py);
             // Handlers are addressed by their EVENT name (the @on
             // decorator binds functions under it). No fallback: a name
@@ -575,7 +575,7 @@ impl super::session::ResidentSession for PythonSession {
             let module = self
                 .module
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("python session: iterate before load"))?
+                .ok_or_else(|| anyhow::anyhow!("python executor: iterate before load"))?
                 .bind(py);
             match op {
                 StreamOp::Start {

@@ -5,7 +5,7 @@
 //! and speaks the line protocol — request
 //! frames in, result frames out, ctx round trips inline (host frames the
 //! parent answers). The author's code runs a loop: its own, or the
-//! nushell fifo adapter (the "fcgi-adapts-cgi" move — see `SessionKind`).
+//! nushell fifo adapter (the "fcgi-adapts-cgi" move — see `CarrierShape`).
 //! Frame line:
 //!   parent → child: {"id":N,"kind":"call|iterate_start|iterate_next|iterate_dispose","event":"...","op":"start|next|dispose","args":...,"stream_id":"..."}
 //!   child → parent: {"host":{"type":"invoke|iterate.start|iterate.next|iterate.dispose|store|schema",…}} — TYPED frames (ADR-0037 §2): the discriminator fails at decode, never as a silent unknown-op string lookup. Arms are the ctx method paths (ADR-0043): a wrong type is a decode error, never a table miss.
@@ -49,7 +49,7 @@
 //! ADR-0035's "B is A-without-a-loop" phrasing is superseded by this
 //! file's shape: B is NOT a degraded protocol — it has no protocol.
 
-use super::session::{ResidentSession, StreamOp};
+use super::executor::{Executor, StreamOp};
 use super::HostBridge;
 use anyhow::{anyhow, Result};
 use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, IterateKind, Reply, ResultFrame};
@@ -75,11 +75,11 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 // ---------------------------------------------------------- induction --
 
-/// One resident induction session: the framed child, in one of two shapes.
-pub struct InductionSession {
+/// One resident induction executor: the framed child, in one of two shapes.
+pub struct InductionExecutor {
     /// The resident child and everything shared with the reader thread.
     shared: Arc<Shared>,
-    /// Owner-side handles: the process (kill/reap), the fifo session dir, the
+    /// Owner-side handles: the process (kill/reap), the fifo executor dir, the
     /// reader thread. Nothing a call needs — a call only touches `shared`.
     child: Option<Child>,
     dir: Option<PathBuf>,
@@ -176,7 +176,7 @@ impl Shared {
                 stdin.flush()?;
                 Ok(())
             }
-            Out::Closed => Err(anyhow!("induction carrier: session channel closed")),
+            Out::Closed => Err(anyhow!("induction carrier: executor channel closed")),
             Out::Fifo { req, rep } => {
                 let path = if host_reply { rep } else { req };
                 let writing = if host_reply { "host_reply" } else { "request" };
@@ -367,7 +367,7 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
                         msg["host"]
                     ));
                     // An undecodable arm is answered, not fatal: the guest gets
-                    // the error and keeps its session (the serial rule, kept).
+                    // the error and keeps its executor (the serial rule, kept).
                     if let Err(e) = shared.write_frame(&reply.to_value(), true) {
                         shared.fail(format!("{e}"));
                         return;
@@ -412,14 +412,14 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
     }
 }
 
-/// Session dirs carry the process pid + a sequence so concurrent effectors
+/// Executor dirs carry the process pid + a sequence so concurrent effectors
 /// never collide (same rule as the PTY carrier).
 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-impl InductionSession {
+impl InductionExecutor {
     /// The concurrent surface: this carrier pairs replies by request id, so one
     /// instance can serve several calls at once (`Concurrency::Unbounded`).
-    pub fn concurrent_handle(&self) -> Arc<dyn super::session::SharedSession> {
+    pub fn concurrent_handle(&self) -> Arc<dyn super::executor::SharedExecutor> {
         self.shared.clone()
     }
 
@@ -468,7 +468,7 @@ impl InductionSession {
         ))
     }
 
-    /// Assemble the session: one `Shared` for the calls and the reader, one
+    /// Assemble the executor: one `Shared` for the calls and the reader, one
     /// owner for the process.
     fn from_parts(
         child: Child,
@@ -502,7 +502,7 @@ impl InductionSession {
         }
     }
 
-    /// The fifo-backed spawn (nushell): session dir + two fifos, child =
+    /// The fifo-backed spawn (nushell): executor dir + two fifos, child =
     /// `nu --no-config-file <author> <req> <rep>` with stdout piped (the
     /// result frames); stderr inherits — diagnostics, never frames.
     fn spawn_fifo(
@@ -518,7 +518,7 @@ impl InductionSession {
         }
         // Sandbox dirs follow the PTY carrier's precedent: under a
         // Bubblewrap policy /tmp is tmpfs-mounted (files written outside
-        // vanish), so the session dir lives under the policy's cwd
+        // vanish), so the executor dir lives under the policy's cwd
         // (bind-mounted, visible to the child).
         let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = match policy {
@@ -570,7 +570,7 @@ impl InductionSession {
         ))
     }
 
-    /// Liveness for the registry sweep (Sessions::sweep_dead): a child
+    /// Liveness for the registry sweep (Executors::sweep_dead): a child
     /// that exited is a broken cache entry — evict so the next call
     /// cold-starts.
     ///
@@ -592,9 +592,9 @@ impl InductionSession {
         }
     }
 
-    /// The session dir for the fifo shape (test surface: teardown must
-    /// leave no fifo litter). Pipes sessions have none.
-    pub fn session_dir(&self) -> Option<&Path> {
+    /// The executor dir for the fifo shape (test surface: teardown must
+    /// leave no fifo litter). Pipes executors have none.
+    pub fn executor_dir(&self) -> Option<&Path> {
         self.dir.as_deref()
     }
 
@@ -605,7 +605,7 @@ impl InductionSession {
     }
 
     /// End the child: drop the writer (the loop's EOF), kill and reap, then
-    /// remove the session dir. The reader wakes on the closed stdout and exits
+    /// remove the executor dir. The reader wakes on the closed stdout and exits
     /// on its own — joining it here would block on a pipe the kernel is still
     /// draining.
     fn teardown(&mut self) {
@@ -630,7 +630,7 @@ impl InductionSession {
         }
         self.reader.take();
         self.shared
-            .fail("induction carrier: session torn down".to_string());
+            .fail("induction carrier: executor torn down".to_string());
     }
 }
 
@@ -670,7 +670,7 @@ fn fifo_write(path: &Path, line: &str) -> std::io::Result<()> {
     res
 }
 
-impl ResidentSession for InductionSession {
+impl Executor for InductionExecutor {
     /// The source was consumed by spawn (the argv); the child's module
     /// state is its own.
     fn load(&mut self, _source: &str) -> Result<()> {
@@ -696,7 +696,7 @@ impl ResidentSession for InductionSession {
     }
 
     /// The child's ctx frames ride the bridge of the call that is running
-    /// now (the dispatch seam re-arms it on every call — a resident session
+    /// now (the dispatch seam re-arms it on every call — a resident executor
     /// spawned by an earlier call must not answer with that call's id).
     fn set_host(&mut self, host: Option<&HostBridge>) {
         if let Some(host) = host {
@@ -715,7 +715,7 @@ impl ResidentSession for InductionSession {
     /// This child pairs every reply with its request id and runs each handler
     /// on its own thread, so the instance can serve calls concurrently — the
     /// declaration's `Unbounded` case.
-    fn shared(&self) -> Option<Arc<dyn super::session::SharedSession>> {
+    fn shared(&self) -> Option<Arc<dyn super::executor::SharedExecutor>> {
         Some(self.shared.clone())
     }
 }
@@ -765,11 +765,11 @@ fn decompose(op: &StreamOp) -> (FrameKind, String, Value, Option<String>, Option
 fn finish(reply: Value, fresh: Option<bool>, event: &str) -> Result<Value> {
     match fresh {
         None => Ok(reply),
-        Some(fresh) => super::session::validate_envelope(reply, fresh, event),
+        Some(fresh) => super::executor::validate_envelope(reply, fresh, event),
     }
 }
 
-impl super::session::SharedSession for Shared {
+impl super::executor::SharedExecutor for Shared {
     fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value> {
         let (kind, event, args, stream_id, fresh) = decompose(&op);
         let reply = self.exchange(kind, &event, args, stream_id, host)?;
@@ -781,7 +781,7 @@ impl super::session::SharedSession for Shared {
     }
 }
 
-impl Drop for InductionSession {
+impl Drop for InductionExecutor {
     fn drop(&mut self) {
         self.teardown();
     }
@@ -789,11 +789,11 @@ impl Drop for InductionSession {
 
 // -------------------------------------------------------------- exec --
 
-/// The bare one-shot carrier: NO ResidentSession, NO protocol — the cgi
+/// The bare one-shot carrier: NO Executor, NO protocol — the cgi
 /// shape. Spawn, feed the whole request as one JSON document on stdin,
 /// close, read stdout to EOF as the result. Nothing survives the call
 /// (php-fpm semantics, on purpose: the SKILL downgrade; nushell takes
-/// this shape bare — no loop needed — or the induction fifo via `SessionKind::Fifo`).
+/// this shape bare — no loop needed — or the induction fifo via `CarrierShape::Fifo`).
 pub struct ExecOneShot {
     argv: Vec<String>,
     policy: crate::sandbox::SandboxPolicy,
@@ -869,19 +869,19 @@ impl ExecOneShot {
     }
 }
 
-/// The session-seam wrapper so the dispatch machinery (aura run_job, the
+/// The executor-seam wrapper so the dispatch machinery (aura run_job, the
 /// remote carrier path, the introspection throwaway) keeps ONE shape:
 /// this parks no process between calls — every `call` spawns, feeds,
 /// reaps. `iterate` is an error value on principle: a one-shot booth has
 /// no residency to hold a stream (same ruling as Rust closure bodies,
 /// ADR-0034 — the cgi lineage is stateless by definition, not by
-/// omission). Sweep ignores these slots (not a InductionSession: nothing can
+/// omission). Sweep ignores these slots (not a InductionExecutor: nothing can
 /// die that was never promised to live).
-pub struct OneShotSession {
+pub struct OneShotExecutor {
     inner: ExecOneShot,
 }
 
-impl OneShotSession {
+impl OneShotExecutor {
     pub fn new(
         argv: &[String],
         policy: &crate::sandbox::SandboxPolicy,
@@ -893,7 +893,7 @@ impl OneShotSession {
     }
 }
 
-impl ResidentSession for OneShotSession {
+impl Executor for OneShotExecutor {
     /// Nothing to load — the spawn spec is the whole program.
     fn load(&mut self, _source: &str) -> Result<()> {
         Ok(())

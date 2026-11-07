@@ -8,7 +8,7 @@
 
 Effector 是**客户端**：它主动拨出、注册，然后服务到达的帧。它不开端口，也不自发发起任何动作——它唯一会去取的 URL 是某个调用声明的 `code.url`。
 
-Effector 同时是**技能盲**的：它看不到 skill、看不到操作名、看不到 LLM 提示词。到达的是 `session`（驻留身份）、`entry`（代码里的入口点）、`language`（用哪个运行时）、`args`、`code`（可执行部分）。把 skill 解析成这一组是控制端的工作——而且其中没有任何字段携带能力语义：`session` 与 `entry` 在 Effector 眼里只是一个身份与一个入口名，别无其他。
+Effector 同时是**技能盲**的：它看不到 skill、看不到操作名、看不到 LLM 提示词。到达的是 `executor`（执行单元）、`entry`（代码里的入口点）、`language`（用哪个运行时）、`args`、`code`（可执行部分）。把 skill 解析成这一组是控制端的工作——而且其中没有任何字段携带能力语义：`executor` 与 `entry` 在 Effector 眼里只是一个身份与一个入口名，别无其他。
 
 Effector 拥有运行时、常驻会话与 sandbox。控制端拥有身份、调度、deadline、ctx 作用域与策略（某个操作是 AI 现场生成还是预先审计过的）。
 
@@ -89,7 +89,7 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
 
 ### 4.1 `call` / `result`
 
-`session` 是调用方给的不透明**驻留身份**：Effector 用它给常驻运行时定键（`effector/<node_alias>/<session>`），所以共享同一 `session` 的调用共享运行时状态（VM / module 全局），不同值之间绝不共享。它必须跨调用稳定——上游摊位 的 `type/key` 是自然取值。每次调用唯一的 `call_id` 顶不了这个位置：拿它定键等于每次都冷启一个运行时。
+`executor` 是调用方给的不透明**执行单元名**：Effector 用它给 executor 定键（`effector/<node_alias>/<executor>`），所以共享同一 `executor` 的调用共享运行时状态（VM / module 全局），不同值之间绝不共享。它必须跨调用稳定——上游摊位 的 `type/key` 是自然取值。每次调用唯一的 `call_id` 顶不了这个位置：拿它定键等于每次都冷启一个运行时。
 
 `entry` 是所交付代码里的入口点名字。它**不是**查表键：Effector 没有注册表，也不拿它的值解析任何东西。代码没有绑定这个名字时就是错误值，绝无魔法回落（每语言一种执行形态，分派表裁决：有运行时查表的语言用它——python/steel 的 dict/getattr、wasm 的导出表；没有的手写 `main` + match 字面名）。
 
@@ -103,7 +103,7 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
   "call_id": "rp-7",
   "kind": "iterate_start",
   "stream": "stream-12",
-  "session": "notes/7",
+  "executor": "notes/7",
   "entry": "read_file",
   "language": "python",
   "args": { "path": "/tmp/x" },
@@ -117,7 +117,7 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
   "call_id": "rp-8",
   "kind": "iterate_start",
   "stream": "stream-13",
-  "session": "heavy/1",
+  "executor": "heavy/1",
   "entry": "main",
   "language": "induction",
   "args": {},
@@ -213,7 +213,7 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
 ```
 effector → CP   {"type":"register","node_alias":"home-pc","credential":"tok-abc","carriers":["steel","python"]}
 CP → effector   {"type":"registered"}
-CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","session":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"url":"http://cp.local/code/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
+CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","executor":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"url":"http://cp.local/code/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
 effector → CP   {"type":"host","kind":"call","host_call_id":"h-1","call_id":"rp-7","op":{"op":"store_emit","instruction":{"collection":"counters","doc":{"visits":1},"key":{"id":1},"op":"put_document"}}}
 CP → effector   {"type":"host","kind":"result","host_call_id":"h-1","outcome":{"Ok":{"ok":true}}}
 effector → CP   {"type":"result","call_id":"rp-7","outcome":{"Ok":{"done":true,"value":{"n":4}}}}

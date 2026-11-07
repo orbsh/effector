@@ -59,7 +59,7 @@ pub struct CapabilitySurface {
     /// Host alias identifying this node's connection: `register` carries it,
     /// and the control plane keys the live connection by it. Residency and
     /// entry addressing do NOT ride on it — those are the call's own
-    /// `session` (opaque residency identity) and `entry` (entry point in the
+    /// `executor` (the opaque name of one execution unit) and `entry` (entry point in the
     /// delivered code) fields.
     pub node_alias: String,
 }
@@ -100,7 +100,7 @@ pub struct EffectorConfig {
     /// Control plane endpoint for the outbound registration connection
     /// WS only — no degraded fallback (long-polling explicitly rejected).
     pub control_plane_url: String,
-    /// Wrap session processes in bubblewrap. Remote deployments MUST set
+    /// Wrap executor processes in bubblewrap. Remote deployments MUST set
     /// true (unattended external code); requires bwrap on PATH. In-process
     /// embedded deployments (aura) pass None instead.
     #[serde(default = "default_true")]

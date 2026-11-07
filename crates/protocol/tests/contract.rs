@@ -14,7 +14,7 @@ fn roundtrip_call_carries_a_code_reference() {
         call_id: "c1".into(),
         kind: effector_protocol::CallKind::IterateStart,
         stream: None,
-        session: "notes/7".into(),
+        executor: "notes/7".into(),
         entry: "read_file".into(),
         language: "induction".into(),
         encoding: Encoding::Json,
@@ -28,7 +28,7 @@ fn roundtrip_call_carries_a_code_reference() {
     let back: ToolCall = serde_json::from_str(&s).unwrap();
     assert_eq!(back.call_id, "c1");
     assert_eq!(
-        back.session, "notes/7",
+        back.executor, "notes/7",
         "residency identity survives the wire"
     );
     assert_eq!(back.entry, "read_file", "entry name survives the wire");

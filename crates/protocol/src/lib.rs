@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// crate (and so a version bump is one line here rather than two manifests that can disagree).
 pub use ed25519_dalek::SigningKey;
 
-/// The verb a ToolCall asks the session to perform (ADR-0034, unified
+/// The verb a ToolCall asks the executor to perform (ADR-0034, unified
 /// envelope ADR-0036 — the Invoke kind retired: every dispatch job is a
 /// stream op, invoke is the stream whose first round is terminal,
 /// `IterateStart` with a plain handler reply is exactly an invoke).
@@ -44,9 +44,9 @@ pub enum CallKind {
 
 /// One operation arriving at the Effector.
 ///
-/// The Effector ships no built-in operations and keeps no registry. `session`
-/// is the caller's opaque residency identity and `entry` names the point the
-/// delivered code exposes; `code` always carries its executable part.
+/// The Effector ships no built-in operations and keeps no registry. `executor`
+/// is the caller's opaque name for one execution unit and `entry` names the point
+/// the delivered code exposes; `code` always carries its executable part.
 /// `language` names the carrier to run it in — the node must carry it
 /// (registration advertises carried languages) or the call is an error value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub struct ToolCall {
     /// Correlates the eventual ToolResult back to the caller (Gravity's
     /// pending_calls deadline scan reuses this id).
     pub call_id: String,
-    /// What this call asks the session to do (ADR-0034, unified
+    /// What this call asks the executor to do (ADR-0034, unified
     /// envelope ADR-0036). Every dispatch job is a stream op:
     /// `IterateStart` runs the handler as a producer (a plain handler is
     /// legal there — its bare reply wraps to `{done:true,value}` at the
@@ -70,14 +70,14 @@ pub struct ToolCall {
     /// identity, no new machinery.
     #[serde(default)]
     pub stream: Option<String>,
-    /// Opaque residency identity, minted by the caller: the Effector keys its
-    /// resident session by this value, so calls sharing a `session` share
-    /// runtime state (VM / module globals) and calls with different values
-    /// never do. The Effector derives nothing from it beyond identity — an
-    /// upstream booth's `type/key` is the natural value. It cannot be the
-    /// per-call id: residency needs an identity that is stable across calls,
-    /// or every call would start a cold runtime.
-    pub session: String,
+    /// Opaque name of the execution unit, minted by the caller: the Effector
+    /// keys its executor by this value, so calls sharing an `executor` share
+    /// the loaded logic and its runtime state (module globals, a child's
+    /// memory) and calls with different values never do. The Effector derives
+    /// nothing from it beyond identity — an upstream booth's `type/key` is the
+    /// natural value. It cannot be the per-call id: the unit must be stable
+    /// across calls, or every call would start a cold one.
+    pub executor: String,
     /// Entry point inside the delivered code — the function/event name the
     /// code binds, whichever convention it uses. This is NOT a lookup key:
     /// the Effector resolves nothing against it (no registration, no
@@ -120,7 +120,7 @@ pub struct ToolCall {
 /// stands on the wrong side. The effector fetches on demand, verifies
 /// against this hash (mismatch = error, never a silent accept), and
 /// caches by hash — a discardable hot layer, same legitimacy tier as the
-/// resident session itself.
+/// executor itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeRef {
     pub url: String,

@@ -16,7 +16,7 @@
     clippy::panic_in_result_fn
 )]
 
-use effector_runtime::carrier::session::StreamOp;
+use effector_runtime::carrier::executor::StreamOp;
 use effector_runtime::carrier::HostBridge;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -40,18 +40,18 @@ fn bin(name: &str) -> String {
     path.to_str().unwrap().to_string()
 }
 
-fn sessions() -> effector_runtime::carrier::session::Sessions {
-    effector_runtime::carrier::session::Sessions::new()
+fn executors() -> effector_runtime::carrier::executor::Executors {
+    effector_runtime::carrier::executor::Executors::new()
 }
 
-/// Plain call through the resident session: request frame out, result
+/// Plain call through the resident executor: request frame out, result
 /// frame back — the invoke shape across the process boundary.
 #[test]
 fn induction_call_round_trip() {
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_session(
+        .with_executor(
             "box/k1",
             "induction",
             &argv,
@@ -64,9 +64,9 @@ fn induction_call_round_trip() {
 
     // The SECOND call reuses the same child (residency): if each call
     // re-spawned, the stream guard state below would never work — and
-    // here, the same session key must not have been evicted.
+    // here, the same executor key must not have been evicted.
     let out2 = s
-        .with_session(
+        .with_executor(
             "box/k1",
             "induction",
             &argv,
@@ -97,10 +97,10 @@ fn induction_host_call_crosses_the_seam() {
         );
         b
     };
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_session(
+        .with_executor(
             "box/k2",
             "induction",
             &argv,
@@ -127,13 +127,13 @@ fn induction_host_call_crosses_the_seam() {
 /// generator, and it does not need one), done is written.
 #[test]
 fn induction_iterate_stream() {
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
-    // One with_session per pull — each call re-enters the SAME child
+    // One with_executor per pull — each call re-enters the SAME child
     // (the registry keys residency; the guard state lives in the
-    // child's memory across the calls, exactly like a session VM).
+    // child's memory across the calls, exactly like a executor VM).
     let pull = |op: StreamOp| -> Value {
-        s.with_session(
+        s.with_executor(
             "box/k3",
             "induction",
             &argv,
@@ -176,7 +176,7 @@ fn induction_iterate_stream() {
     // Pull-after-done: the child's guard is gone — a failed pull (an
     // error value through the stream), never a resurrection.
     let late = s
-        .with_session(
+        .with_executor(
             "box/k3",
             "induction",
             &argv,
@@ -205,10 +205,10 @@ fn induction_iterate_stream() {
 /// args say — a guard counter could not exist).
 #[test]
 fn exec_oneshot_runs_per_call() {
-    let s = sessions();
+    let s = executors();
     let argv = one_shot_bin();
     let call = |v: Value| {
-        s.with_session(
+        s.with_executor(
             "box/b1",
             "exec",
             &argv,
@@ -233,9 +233,9 @@ fn exec_oneshot_runs_per_call() {
 /// stream — the fix is induction, not a retry).
 #[test]
 fn exec_oneshot_iterate_is_a_named_error() {
-    let s = sessions();
+    let s = executors();
     let argv = one_shot_bin();
-    let r = s.with_session(
+    let r = s.with_executor(
         "box/b2",
         "exec",
         &argv,
@@ -273,10 +273,10 @@ fn exec_oneshot_iterate_is_a_named_error() {
 /// next call cold-starts a fresh spawn.
 #[test]
 fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
     // Spawn + one call.
-    s.with_session(
+    s.with_executor(
         "box/k4",
         "induction",
         &argv,
@@ -289,7 +289,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     // Kill the child behind the registry's back (simulates a crash):
     // sweep_dead finds it and drops the slot (which reaps + releases).
     let pid = s
-        .with_session(
+        .with_executor(
             "box/k4",
             "induction",
             &argv,
@@ -297,9 +297,9 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
             &effector_runtime::sandbox::SandboxPolicy::None,
             |sess| {
                 sess.as_any()
-                    .downcast_mut::<effector_runtime::carrier::exec::InductionSession>()
+                    .downcast_mut::<effector_runtime::carrier::exec::InductionExecutor>()
                     .and_then(|e| e.child_pid().map(|p| json!({ "pid": p })))
-                    .ok_or_else(|| anyhow::anyhow!("not a InductionSession"))
+                    .ok_or_else(|| anyhow::anyhow!("not a InductionExecutor"))
             },
         )
         .unwrap()["pid"]
@@ -322,7 +322,7 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
         "the dead slot is swept: {swept:?}"
     );
     let out = s
-        .with_session(
+        .with_executor(
             "box/k4",
             "induction",
             &argv,
@@ -338,8 +338,8 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
 /// concurrent handle. A sweep that reads "no slots" as "nothing alive" buries a
 /// healthy child on its first pass, so it checks the owner's own liveness.
 #[test]
-fn a_shared_session_survives_the_sweep_while_its_child_lives() {
-    let s = sessions();
+fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
+    let s = executors();
     let argv = induction_bin();
     let out = s
         .with_shared(
@@ -364,13 +364,13 @@ fn a_shared_session_survives_the_sweep_while_its_child_lives() {
     assert_eq!(out["value"], json!({"echoed": {"n": 1}}), "the one frame ran: {out}");
     assert!(
         s.sweep_dead().is_empty(),
-        "a live unbounded session is not a dead slot"
+        "a live unbounded executor is not a dead slot"
     );
 
     // ONE instance, ONE process: a queued call on the same key must refuse rather
-    // than open a slot session beside the shared one.
+    // than open a slot executor beside the shared one.
     let refused = s
-        .with_session(
+        .with_executor(
             "box/k5",
             "induction",
             &argv,
@@ -381,7 +381,7 @@ fn a_shared_session_survives_the_sweep_while_its_child_lives() {
         .unwrap_err()
         .to_string();
     assert!(
-        refused.contains("shared session"),
+        refused.contains("shared executor"),
         "the queued path names the dispatcher bug: {refused}"
     );
 
@@ -411,7 +411,7 @@ fn a_shared_session_survives_the_sweep_while_its_child_lives() {
 // ------------------------------------------------- nu induction (two-fifo) --
 
 /// The nushell author script (ADR-0035 §8): `def main [req rep]` IS the
-/// loop; the session shape is chosen by the spawn spec's head (`nu`) and
+/// loop; the executor shape is chosen by the spawn spec's head (`nu`) and
 /// the protocol is IDENTICAL to the pipes shape — the fifos replace
 /// stdin only because nu cannot block-read a pipe.
 fn nu_induction_spec() -> String {
@@ -429,10 +429,10 @@ fn nu_induction_spec() -> String {
 /// the fixture documents — `each` would eat the writes).
 #[test]
 fn nu_induction_call_round_trip_and_residency() {
-    let s = sessions();
+    let s = executors();
     let spec = nu_induction_spec();
     let call = |event: &str, args: Value| {
-        s.with_session(
+        s.with_executor(
             "box/nu1",
             "induction",
             &spec,
@@ -476,10 +476,10 @@ fn nu_induction_host_call_crosses_the_seam() {
         );
         b
     };
-    let s = sessions();
+    let s = executors();
     let spec = nu_induction_spec();
     let out = s
-        .with_session(
+        .with_executor(
             "box/nu2",
             "induction",
             &spec,
@@ -511,10 +511,10 @@ fn nu_induction_host_call_crosses_the_seam() {
 /// generator language, only `$env`).
 #[test]
 fn nu_induction_iterate_stream() {
-    let s = sessions();
+    let s = executors();
     let spec = nu_induction_spec();
     let pull = |op: StreamOp| -> Value {
-        s.with_session(
+        s.with_executor(
             "box/nu3",
             "induction",
             &spec,
@@ -552,13 +552,13 @@ fn nu_induction_iterate_stream() {
 }
 
 /// Teardown discipline of the fifo shape: eviction kills the child and
-/// removes the session dir (the blocked `open` cannot be EOF-released
+/// removes the executor dir (the blocked `open` cannot be EOF-released
 /// like a pipe — unlink alone races with the open).
 #[test]
 fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
-    let s = sessions();
+    let s = executors();
     let spec = nu_induction_spec();
-    s.with_session(
+    s.with_executor(
         "box/nu4",
         "induction",
         &spec,
@@ -568,7 +568,7 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
     )
     .unwrap();
     let got = s
-        .with_session(
+        .with_executor(
             "box/nu4",
             "induction",
             &spec,
@@ -577,12 +577,12 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
             |sess| {
                 let b = sess
                     .as_any()
-                    .downcast_mut::<effector_runtime::carrier::exec::InductionSession>()
-                    .ok_or_else(|| anyhow::anyhow!("not a InductionSession"))?;
+                    .downcast_mut::<effector_runtime::carrier::exec::InductionExecutor>()
+                    .ok_or_else(|| anyhow::anyhow!("not a InductionExecutor"))?;
                 let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
                 let dir = b
-                    .session_dir()
-                    .ok_or_else(|| anyhow::anyhow!("no session dir"))?
+                    .executor_dir()
+                    .ok_or_else(|| anyhow::anyhow!("no executor dir"))?
                     .to_path_buf();
                 Ok(json!({"pid": pid, "dir": dir.display().to_string()}))
             },
@@ -590,7 +590,7 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
         .unwrap();
     let pid = got["pid"].as_u64().unwrap() as i32;
     let dir = PathBuf::from(got["dir"].as_str().unwrap());
-    assert!(dir.exists(), "the session dir exists while the child lives");
+    assert!(dir.exists(), "the executor dir exists while the child lives");
 
     s.evict("box/nu4");
     // Reaped: the pid is gone (ESRCH) — poll for the kernel's delivery.
@@ -606,8 +606,8 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
         dead,
         "the evicted nu child is reaped (pid {pid} still alive)"
     );
-    // The session dir is removed on teardown (no fifo litter) — THIS
-    // session's dir, never a glob (parallel tests own their dirs).
+    // The executor dir is removed on teardown (no fifo litter) — THIS
+    // executor's dir, never a glob (parallel tests own their dirs).
     for _ in 0..50 {
         if !dir.exists() {
             break;
@@ -616,7 +616,7 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
     }
     assert!(
         !dir.exists(),
-        "the session dir is cleaned on teardown: {}",
+        "the executor dir is cleaned on teardown: {}",
         dir.display()
     );
 }
@@ -631,10 +631,10 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
 #[test]
 fn induction_cbor_round_trip() {
     use induction_protocol::Encoding;
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_session_encoded(
+        .with_executor_encoded(
             "box/cbor1",
             "induction",
             &argv,
@@ -648,7 +648,7 @@ fn induction_cbor_round_trip() {
 
     // Residency holds across calls on the same codec (one child).
     let out2 = s
-        .with_session_encoded(
+        .with_executor_encoded(
             "box/cbor1",
             "induction",
             &argv,
@@ -686,10 +686,10 @@ fn induction_cbor_host_call_crosses_the_seam() {
         );
         b
     };
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_session_encoded(
+        .with_executor_encoded(
             "box/cbor2",
             "induction",
             &argv,
@@ -733,10 +733,10 @@ fn induction_untyped_host_frame_fails_at_decode() {
         );
         b
     };
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_session(
+        .with_executor(
             "box/untyped",
             "induction",
             &argv,
@@ -766,10 +766,10 @@ fn induction_untyped_host_frame_fails_at_decode() {
 #[test]
 fn exec_cbor_round_trip() {
     use induction_protocol::Encoding;
-    let s = sessions();
+    let s = executors();
     let argv = one_shot_bin();
     let out = s
-        .with_session_encoded(
+        .with_executor_encoded(
             "box/exec-cbor",
             "exec",
             &argv,
@@ -788,10 +788,10 @@ fn exec_cbor_round_trip() {
 #[test]
 fn nu_cbor_declaration_is_an_error() {
     use induction_protocol::Encoding;
-    let s = sessions();
+    let s = executors();
     let spec = nu_induction_spec();
     let err = s
-        .with_session_encoded(
+        .with_executor_encoded(
             "box/nu-cbor-bad",
             "induction",
             &spec,
@@ -835,22 +835,22 @@ fn recording_bridge(seen: &Arc<Mutex<Vec<Value>>>, tag: &'static str) -> HostBri
     b
 }
 
-/// The bridge is per-CALL data, the session is not (the two clocks ADR-0001
-/// separates): a second call through one resident session must reach the
-/// SECOND call's bridge. A session that kept its cold start's bridge answers
+/// The bridge is per-CALL data, the executor is not (the two clocks ADR-0001
+/// separates): a second call through one resident executor must reach the
+/// SECOND call's bridge. A executor that kept its cold start's bridge answers
 /// with a call id nobody is waiting on any more — over the wire that is "the
 /// enclosing remote call is not in flight", an error VALUE and never a
 /// timeout, which is how the two failure shapes are told apart.
 #[test]
-fn induction_resident_session_rearms_the_bridge_per_call() {
+fn induction_executor_rearms_the_bridge_per_call() {
     let first: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let second: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let s = sessions();
+    let s = executors();
     let argv = induction_bin();
     let args = json!({ "type": "t", "key": "k", "handler": "h", "args": { "q": 1 } });
     let b1 = recording_bridge(&first, "first");
     let out1 = s
-        .with_session(
+        .with_executor(
             "box/bridge-clock",
             "induction",
             &argv,
@@ -862,7 +862,7 @@ fn induction_resident_session_rearms_the_bridge_per_call() {
     assert_eq!(out1["answered_by"], "first");
     let b2 = recording_bridge(&second, "second");
     let out2 = s
-        .with_session(
+        .with_executor(
             "box/bridge-clock",
             "induction",
             &argv,
@@ -893,10 +893,10 @@ fn induction_resident_session_rearms_the_bridge_per_call() {
 fn the_resident_runner_keeps_its_ctx_frames_on_the_wire() {
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = recording_bridge(&seen, "host");
-    let s = sessions();
+    let s = executors();
     let spec = runner_spec("runner_py_guest.py");
     let out = s
-        .with_session_encoded(
+        .with_executor_encoded(
             "box/runner-guest",
             "induction",
             &spec,

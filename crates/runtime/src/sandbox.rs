@@ -1,11 +1,11 @@
 //! Sandbox policy: process-boundary containment for code-executing
-//! sessions. Belongs to the DEPLOYMENT FORM, not the execution mechanism —
-//! effector (unattended machine, external code) wraps session processes in a
+//! executors. Belongs to the DEPLOYMENT FORM, not the execution mechanism —
+//! effector (unattended machine, external code) wraps executor processes in a
 //! bwrap sandbox; aura in-process (user's own trust domain) passes None.
 
 use serde::{Deserialize, Serialize};
 
-/// Sandbox policy for a session's process.
+/// Sandbox policy for a executor's process.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SandboxPolicy {
@@ -14,7 +14,7 @@ pub enum SandboxPolicy {
     /// the user's own Krystallizer graph, user present).
     #[default]
     None,
-    /// Wrap the session process in bubblewrap: fs mounts from the allow
+    /// Wrap the executor process in bubblewrap: fs mounts from the allow
     /// lists, network unshared (allowlist domains ride the proxy when
     /// configured). Linux only; macOS uses sandbox-exec.
     Bubblewrap {

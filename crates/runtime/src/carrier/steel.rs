@@ -29,18 +29,18 @@ impl okm_steel::okm_entry::Engine for ClosureEngine {
     }
 }
 
-/// Resident steel session: one VM per booth instance. The source runs ONCE
+/// Resident steel executor: one VM per booth instance. The source runs ONCE
 /// at load (with the `on` collector bound and handlers bound under event
 /// names); every later call addresses a handler by name in the SAME VM —
 /// definitions, `define`s and other top-level state persist across calls.
 /// Drop = VM gone.
-pub struct SteelSession {
+pub struct SteelExecutor {
     engine: Engine,
 }
 
-unsafe impl Send for SteelSession {}
+unsafe impl Send for SteelExecutor {}
 
-impl SteelSession {
+impl SteelExecutor {
     pub fn new(host: Option<&HostBridge>) -> anyhow::Result<Self> {
         let mut engine = Engine::new();
         register_host(&mut engine, host);
@@ -50,14 +50,14 @@ impl SteelSession {
         // (`(collection-merge! "Counters" ...)` — fixed fn names because
         // steel resolves free identifiers at define-compile time; see
         // okm-steel's collection.rs for the introspection-stub
-        // rationale). Drop the session, drop its collections.
+        // rationale). Drop the executor, drop its collections.
         if let Some(slot) = host.and_then(|b| b.storage.as_ref()) {
             let reg = okm_steel::collection::StorageRegistry::default();
             let byte_engine: std::sync::Arc<dyn okm_steel::okm_entry::Engine> =
                 std::sync::Arc::new(ClosureEngine(slot.engine.clone()));
             for coll in &slot.collections {
                 // A failed inject is a DECLARATION error (bad entry
-                // data) — the session never starts, the same shape the
+                // data) — the executor never starts, the same shape the
                 // python carrier's load errors with (the caller turns
                 // it into an instance error).
                 reg.inject(byte_engine.clone(), &coll.name, &coll.entry, slot.ns)
@@ -76,7 +76,7 @@ impl SteelSession {
     }
 }
 
-impl super::session::ResidentSession for SteelSession {
+impl super::executor::Executor for SteelExecutor {
     fn load(&mut self, source: &str) -> anyhow::Result<()> {
         self.engine
             .run(source.to_owned())
@@ -103,8 +103,8 @@ impl super::session::ResidentSession for SteelSession {
     /// the handler is a repeatedly callable function that returns the
     /// `{item, done}` envelope explicitly (the framework injects
     /// `{stream_id, op}` into args and validates the envelope).
-    fn iterate(&mut self, op: super::session::StreamOp) -> anyhow::Result<Value> {
-        super::session::envelope_pull(self, &op)
+    fn iterate(&mut self, op: super::executor::StreamOp) -> anyhow::Result<Value> {
+        super::executor::envelope_pull(self, &op)
     }
 
     fn as_any(&mut self) -> &mut dyn std::any::Any {
@@ -335,7 +335,7 @@ fn bind_event_handlers(engine: &mut Engine) {
         }
     });
     // Reserved hooks bind under their own names (the realm calls them by
-    // the reserved name through the session, ADR-0043 §3).
+    // the reserved name through the executor, ADR-0043 §3).
     DECLARATIONS.with(|d| {
         for decl in d.borrow().iter() {
             if decl.event.starts_with("__") {
@@ -347,7 +347,7 @@ fn bind_event_handlers(engine: &mut Engine) {
 }
 
 /// Ctx-fn stubs for the introspection throwaway engine ONLY (never the
-/// resident session — there the real host bridge functions must win).
+/// resident executor — there the real host bridge functions must win).
 /// The list mirrors aura's ctx bridge (`crates/realm/src/ctx.rs`
 /// host_bridge_for) EXACTLY under the ADR-0043 dotted method paths
 /// (timer/queue landed 2026-10-09, ADR-0016 §3b; ctx_timer_* renamed with
@@ -378,7 +378,7 @@ fn register_ctx_stubs(engine: &mut Engine) {
     }
     // ctx.on is NOT a stub: at introspection the source runs for real (the
     // collector must see its registrations), so the introspection engine
-    // binds the same primitive the resident session binds (register_on_collector
+    // binds the same primitive the resident executor binds (register_on_collector
     // owns the gate + the reserved-name rules, ADR-0043 §3).
     engine.register_fn("ctx.on", collect_on);
     // The okm storage surface (collection fns + codec fns) follows the
@@ -386,7 +386,7 @@ fn register_ctx_stubs(engine: &mut Engine) {
     // ...)` or `(okm-encode-key! ...)` needs the names to exist at
     // load, or the declaration is dropped silently. The stub arms
     // error if called (introspection never calls a handler). Resident
-    // sessions get the REAL fns (SteelSession::new / okm_steel::register
+    // executors get the REAL fns (SteelExecutor::new / okm_steel::register
     // — never shadowed here, the same scoping rule as the ctx stubs).
     okm_steel::collection::StorageRegistry::register_stubs(engine);
     okm_steel::collection::register_codec_stubs(engine);

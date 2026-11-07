@@ -2,6 +2,8 @@
 
 Design lives in the wiki (stateless-agent-architecture.md); this file only sequences phases.
 
+RENAMED 2026-11-07: the live execution unit is `executor`. Every earlier entry here that spells `session` (or `resident session`) for it reads `executor`; `Sessions` / `ResidentSession` / `SharedSession` read `Executors` / `Executor` / `SharedExecutor`; `Trait` and the registry live in `carrier/executor.rs`; the wire field is `ToolCall.executor`.
+
 **Iron rule — effector never depends on Aura crates.** All coupling with Aura is
 limited to the frame protocol (serde types in `effector-protocol`). The effector is
 upstream-agnostic: any service that speaks the frames can drive it — the

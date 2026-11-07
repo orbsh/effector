@@ -16,13 +16,13 @@ opens no port and initiates nothing of its own — the only URL it ever fetches 
 call's declared `code.url`.
 
 The Effector is also **skill-blind**: it never sees a skill, an operation name, or an
-LLM prompt. What arrives is `session` (residency identity), `entry` (the entry
+LLM prompt. What arrives is `executor` (the name of the execution unit), `entry` (the entry
 point inside the code), `language` (which runtime), `args`, and `code` (the
 executable). Resolving a skill into that set is control-plane work — and none of
-the fields carries capability semantics: the Effector derives nothing from `session`
+the fields carries capability semantics: the Effector derives nothing from `executor`
 or `entry` beyond an identity and an entry-point name.
 
-The Effector owns runtimes, resident sessions, and the sandbox. The control plane owns identity, scheduling, deadlines, ctx scope, and
+The Effector owns runtimes, executors, and the sandbox. The control plane owns identity, scheduling, deadlines, ctx scope, and
 policy (whether an operation is AI-generated live or pre-audited).
 
 ### 1.1 The hops: which protocol runs where
@@ -43,7 +43,7 @@ has its own ABI:
   names an executable, spawns it, handshakes, delivers typed frames over stdio,
   and serves the `ctx.*` arms the child invokes back; the child dies with the
   host. Its only site in this workspace's effector-side code is the process
-  carriers: `crates/runtime/src/carrier/exec.rs` (plus the session registry that
+  carriers: `crates/runtime/src/carrier/exec.rs` (plus the executor registry that
   owns the children). The bare `exec` one-shot carrier is deliberately NOT
   Induction — it has no protocol at all.
 - Which hop a booth rides is the control plane's decision: `language` names the
@@ -84,7 +84,7 @@ Order of operations at effector startup:
 
 - `control_plane_url` — WebSocket only. There is no degraded fallback by design
   (long-polling was rejected; a WS-only egress is the contract).
-- `sandbox` — defaults to `true`; wraps session processes in bubblewrap. Remote
+- `sandbox` — defaults to `true`; wraps executor processes in bubblewrap. Remote
   deployments must keep it on (unattended external code).
 - `credential_env` — the registration credential is the **user** credential; it
   never lives in the config file.
@@ -146,12 +146,12 @@ The first frame the effector sends is `register`; the control plane must answer
 
 ### 4.1 `call` / `result`
 
-`session` is the caller's opaque **residency identity**: the Effector keys its
-resident runtime by it (`effector/<node_alias>/<session>`), so calls sharing a
-`session` share runtime state (VM / module globals) and calls with different
+`executor` is the caller's opaque **name for one execution unit**: the Effector
+keys its executor by it (`effector/<node_alias>/<executor>`), so calls sharing an
+`executor` share runtime state (VM / module globals) and calls with different
 values never do. It must be stable across calls — an upstream booth's `type/key`
 is the natural value. The per-call `call_id` cannot serve here: it is unique per
-call, so residency keyed by it would start a cold runtime every time.
+call, so an executor keyed by it would cold-start every time.
 
 `entry` names the entry point inside the delivered code. It is **not** a lookup
 key: the Effector keeps no registry and resolves nothing against its value. A name
@@ -175,7 +175,7 @@ language is an error value in `result`, not a dropped call.
   "call_id": "rp-7",
   "kind": "iterate_start",
   "stream": "stream-12",
-  "session": "notes/7",
+  "executor": "notes/7",
   "entry": "read_file",
   "language": "python",
   "args": { "path": "/tmp/x" },
@@ -189,7 +189,7 @@ language is an error value in `result`, not a dropped call.
   "call_id": "rp-8",
   "kind": "iterate_start",
   "stream": "stream-13",
-  "session": "heavy/1",
+  "executor": "heavy/1",
   "entry": "main",
   "language": "induction",
   "args": {},
@@ -236,7 +236,7 @@ the control plane — the operation handles them on the Effector side.
 
 A running script can call back into the control plane. **This is how a delivered
 script persists anything durable**: the control plane's store is the durable truth
-and the effector keeps nothing between calls (its resident session is a discardable
+and the effector keeps nothing between calls (its executor is a discardable
 hot cache). State externalization is the architecture's founding shape, not an
 escape hatch — and it is the reason the effector holds no storage and no data-plane
 credentials of its own.
@@ -314,18 +314,18 @@ enum arm + control-plane resolver + effector binding, one wave.
 - A **clean** close by the control plane does not reconnect: the effector treats it as
   fatal (`control plane closed the connection cleanly`) and exits the process. Use
   it only when you want that effector gone from that machine.
-- Resident session state is process memory; it survives reconnects but not an
+- Executor state is process memory; it survives reconnects but not an
   eviction or a process exit. Durable truth lives in the control plane's store.
 
 ## 7. Transcript
 
-A complete session, one frame per line, as it appears on the wire (pretty-printed
+A complete exchange, one frame per line, as it appears on the wire (pretty-printed
 above; single-line here for the flow):
 
 ```
 effector → CP   {"type":"register","node_alias":"home-pc","credential":"tok-abc","carriers":["steel","python"]}
 CP → effector   {"type":"registered"}
-CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","session":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"url":"http://cp.local/code/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
+CP → effector   {"type":"call","call_id":"rp-7","kind":"iterate_start","stream":"stream-9","executor":"counter/k1","entry":"counter","language":"steel","args":{"n":4},"code":{"url":"http://cp.local/code/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
 effector → CP   {"type":"host","kind":"call","host_call_id":"h-1","call_id":"rp-7","op":{"op":"store_emit","instruction":{"collection":"counters","doc":{"visits":1},"key":{"id":1},"op":"put_document"}}}
 CP → effector   {"type":"host","kind":"result","host_call_id":"h-1","outcome":{"Ok":{"ok":true}}}
 effector → CP   {"type":"result","call_id":"rp-7","outcome":{"Ok":{"done":true,"value":{"n":4}}}}

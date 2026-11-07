@@ -1,6 +1,6 @@
-//! Resident VM sessions: one long-lived execution context per language,
+//! Resident VM executors: one long-lived execution context per language,
 //! loaded once, called per event until evicted. Replaces one-shot execution
-//! (fresh VM per call) — cross-call state survives inside the session.
+//! (fresh VM per call) — cross-call state survives inside the executor.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use super::HostBridge;
 
-/// One resident session for an booth instance. Loaded once (source in),
+/// One resident executor for an booth instance. Loaded once (source in),
 /// then each call addresses a handler by name with JSON args and gets a
-/// JSON result. Session state (defined vars, loaded code) persists across
+/// JSON result. Executor state (defined vars, loaded code) persists across
 /// calls; eviction = drop.
-pub trait ResidentSession: Send {
+pub trait Executor: Send {
     /// Load the booth module (defines handlers / declarations).
     fn load(&mut self, source: &str) -> Result<()>;
     /// Invoke one handler by name with parsed JSON args.
@@ -34,7 +34,7 @@ pub trait ResidentSession: Send {
     /// Re-arm the host bridge for the call that is about to run. The bridge
     /// is per-CALL data — it carries the enclosing remote call's id, which
     /// the control plane resolves the ctx scope with — while a resident
-    /// session outlives the call that spawned it. A session whose bridge is
+    /// executor outlives the call that spawned it. A executor whose bridge is
     /// only the cold start's answers ctx frames with a call id nobody is
     /// waiting on any more ("the enclosing remote call is not in flight"),
     /// so the dispatch seam re-arms it on EVERY call, not only at spawn.
@@ -45,33 +45,33 @@ pub trait ResidentSession: Send {
     /// Downcast support (carrier-specific introspection, e.g.
     /// export-list derivation).
     fn as_any(&mut self) -> &mut dyn std::any::Any;
-    /// The CONCURRENT surface, where the carrier has one: a session that pairs
+    /// The CONCURRENT surface, where the carrier has one: a executor that pairs
     /// every reply with the request that asked for it can serve several calls at
     /// once, so its instance needs no queue and no second process — the
     /// declaration's `Unbounded` (`BoothType::concurrency`). `None` (the default)
-    /// means this session must be entered one call at a time.
-    fn shared(&self) -> Option<Arc<dyn SharedSession>> {
+    /// means this executor must be entered one call at a time.
+    fn shared(&self) -> Option<Arc<dyn SharedExecutor>> {
         None
     }
 }
 
-/// A resident session that multiplexes: `iterate` may be called from several
+/// A resident executor that multiplexes: `iterate` may be called from several
 /// threads with no lock of the registry's, because the carrier carries each
 /// call's identity on the wire and routes the answers back.
-pub trait SharedSession: Send + Sync {
+pub trait SharedExecutor: Send + Sync {
     /// One stream op, with the call's own bridge (the ctx frames it provokes
     /// belong to THIS call, not to whoever called last).
     fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value>;
     /// One plain handler call on the same terms — a lifecycle hook rides the
-    /// resident session too, and it must not open a second process beside the
+    /// resident executor too, and it must not open a second process beside the
     /// one the calls are using.
     fn call(&self, handler: &str, args: &Value, host: Option<&HostBridge>) -> Result<Value>;
 }
 
-/// One stream verb from the control plane to a resident session
+/// One stream verb from the control plane to a resident executor
 /// (ADR-0034). Every op carries the handler name + args: envelope-mode
-/// sessions are stateless per call (the handler keeps its own guard
-/// state in module globals), and generator-mode sessions use
+/// executors are stateless per call (the handler keeps its own guard
+/// state in module globals), and generator-mode executors use
 /// `stream_id` only as the map key — the registry of live streams lives
 /// in the control plane either way.
 #[derive(Debug, Clone)]
@@ -208,7 +208,7 @@ pub(crate) fn validate_envelope(reply: Value, fresh: bool, handler: &str) -> Res
 /// narrows the guard-value footgun, it does not eliminate it. A plain
 /// (envelope-free) Start reply wraps to a terminal envelope here, at
 /// the carrier (ADR-0036 §2).
-pub(crate) fn envelope_pull(session: &mut dyn ResidentSession, op: &StreamOp) -> Result<Value> {
+pub(crate) fn envelope_pull(executor: &mut dyn Executor, op: &StreamOp) -> Result<Value> {
     let mut args = op.args().clone();
     let inject = serde_json::json!({
         "stream_id": op.stream_id(),
@@ -237,17 +237,17 @@ pub(crate) fn envelope_pull(session: &mut dyn ResidentSession, op: &StreamOp) ->
             op.args()
         );
     }
-    let envelope = session.call(op.handler(), &args)?;
+    let envelope = executor.call(op.handler(), &args)?;
     if matches!(op, StreamOp::Dispose { .. }) {
         return Ok(Value::Null);
     }
     validate_envelope(envelope, matches!(op, StreamOp::Start { .. }), op.handler())
 }
-/// Per-instance slot: the session plus its own lock. The lock is held only
+/// Per-instance slot: the executor plus its own lock. The lock is held only
 /// for the duration of one call on THAT instance — other instances proceed
 /// concurrently, and host functions that call back into other instances
 /// (ctx.invoke) never contend on a global lock.
-type Slot = Mutex<Box<dyn ResidentSession>>;
+type Slot = Mutex<Box<dyn Executor>>;
 
 /// A booth instance's residency: one slot, or a POOL of them when the booth
 /// declared that it can serve overlapping calls.
@@ -255,19 +255,19 @@ type Slot = Mutex<Box<dyn ResidentSession>>;
 /// The capacity is the booth's own declaration (`BoothType::concurrency`), and
 /// it is the php-fpm shape: a call takes a free slot, a call that finds every
 /// slot busy takes a NEW one while the pool is under capacity, and a call past
-/// capacity WAITS on a slot. Capacity 1 is the old rule — one resident session,
+/// capacity WAITS on a slot. Capacity 1 is the old rule — one resident executor,
 /// calls to the instance in arrival order — and it stays the default, because a
 /// booth whose code cannot be re-entered must not be handed two calls at once.
 struct Pool {
     capacity: usize,
     slots: Mutex<Vec<Arc<Slot>>>,
-    /// The concurrent handle, when the booth declared `Unbounded`: one session,
+    /// The concurrent handle, when the booth declared `Unbounded`: one executor,
     /// entered from many calls at once (the carrier does the pairing).
-    shared: Mutex<Option<Arc<dyn SharedSession>>>,
-    /// The session OWNER the handle came from: the handle routes frames, but the
+    shared: Mutex<Option<Arc<dyn SharedExecutor>>>,
+    /// The executor OWNER the handle came from: the handle routes frames, but the
     /// process and its reader thread are owned here — dropping this kills the
     /// child, so the pool must hold it for as long as the handle is in use.
-    owner: Mutex<Option<Box<dyn ResidentSession>>>,
+    owner: Mutex<Option<Box<dyn Executor>>>,
 }
 
 impl Pool {
@@ -288,8 +288,8 @@ impl Pool {
     /// slots do not contend on it.
     fn run<R>(
         &self,
-        spawn: impl FnOnce() -> Result<Box<dyn ResidentSession>>,
-        f: impl FnOnce(&mut dyn ResidentSession) -> Result<R>,
+        spawn: impl FnOnce() -> Result<Box<dyn Executor>>,
+        f: impl FnOnce(&mut dyn Executor) -> Result<R>,
     ) -> Result<R> {
         let mut spawn = Some(spawn);
         let chosen: Arc<Slot> = {
@@ -311,7 +311,7 @@ impl Pool {
                 None if slots.len() < self.capacity => {
                     let spawn = spawn
                         .take()
-                        .ok_or_else(|| anyhow::anyhow!("session: spawn used twice"))?;
+                        .ok_or_else(|| anyhow::anyhow!("executor: spawn used twice"))?;
                     let arc = Arc::new(Mutex::new(spawn()?));
                     slots.push(arc.clone());
                     arc
@@ -320,25 +320,25 @@ impl Pool {
                 None => slots[0].clone(),
             }
         };
-        let mut session = chosen
+        let mut executor = chosen
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(session.as_mut())
+        f(executor.as_mut())
     }
 }
 
-/// Session registry: per booth-instance key, its residency pool.
+/// Executor registry: one entry per booth-instance key, holding its pool.
 #[derive(Default, Clone)]
-pub struct Sessions {
+pub struct Executors {
     map: Arc<Mutex<HashMap<String, Arc<Pool>>>>,
 }
 
-impl Sessions {
+impl Executors {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Get or create the resident session for `key` and run `f` on it.
+    /// Get or create the resident executor for `key` and run `f` on it.
     ///
     /// Locking: the registry lock is taken only for map get/insert; a slot's lock
     /// is held for the length of one call. ONE slot is the serial form — calls to
@@ -346,17 +346,17 @@ impl Sessions {
     /// needs (aura ADR-0046, `BoothType::concurrency` = 1). A booth that declares
     /// more gets a POOL and overlapping calls; there is no global lock to fight.
     /// `load` runs at cold start inside the slot lock; later calls reuse the
-    /// loaded session.
-    pub fn with_session(
+    /// loaded executor.
+    pub fn with_executor(
         &self,
         key: &str,
         language: &str,
         source: &str,
         host: Option<&HostBridge>,
         sandbox: &crate::sandbox::SandboxPolicy,
-        f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
+        f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
     ) -> Result<Value> {
-        self.with_session_encoded(
+        self.with_executor_encoded(
             key,
             language,
             source,
@@ -371,11 +371,11 @@ impl Sessions {
     /// frame codec for the PROCESS carriers (induction/exec). Embedded carriers
     /// carry no channel — the encoding is inert there; `Json` is the
     /// stdlib-reachable default every older call site rides.
-    // The session-spawn parameter set (+codec) is the shape `with_session`
+    // The executor-spawn parameter set (+codec) is the shape `with_executor`
     // already carries; grouping them into a struct would churn every
     // existing call site for no semantic gain.
     #[allow(clippy::too_many_arguments)]
-    pub fn with_session_encoded(
+    pub fn with_executor_encoded(
         &self,
         key: &str,
         language: &str,
@@ -383,14 +383,14 @@ impl Sessions {
         host: Option<&HostBridge>,
         sandbox: &crate::sandbox::SandboxPolicy,
         encoding: induction_protocol::Encoding,
-        f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
+        f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
     ) -> Result<Value> {
         // The serial form: one slot, calls in arrival order. Every caller that
         // has not declared otherwise keeps exactly this behaviour.
         self.with_slot_encoded(key, language, source, host, sandbox, encoding, 1, f)
     }
 
-    /// The UNBOUNDED form (`Concurrency::Unbounded`): one resident session, no
+    /// The UNBOUNDED form (`Concurrency::Unbounded`): one resident executor, no
     /// queue and no cap — every call runs at once, which only a carrier that
     /// pairs replies by request id can do. The booth declares it; the realm then
     /// never makes a call wait for another call's completion.
@@ -407,7 +407,7 @@ impl Sessions {
         sandbox: &crate::sandbox::SandboxPolicy,
         encoding: induction_protocol::Encoding,
         host: Option<&HostBridge>,
-        f: impl FnOnce(&dyn SharedSession) -> Result<Value>,
+        f: impl FnOnce(&dyn SharedExecutor) -> Result<Value>,
     ) -> Result<Value> {
         let pool = {
             let mut map = self
@@ -427,11 +427,11 @@ impl Sessions {
                 Some(shared) => shared.clone(),
                 None => {
                     // Cold start under the handle lock: a second call never sees a
-                    // half-loaded session, and the spawn happens once.
-                    let mut session = spawn_session(language, source, host, sandbox, encoding)?;
-                    session.load(source)?;
-                    session.set_host(host);
-                    let shared = session.shared().ok_or_else(|| {
+                    // half-loaded executor, and the spawn happens once.
+                    let mut executor = spawn_executor(language, source, host, sandbox, encoding)?;
+                    executor.load(source)?;
+                    executor.set_host(host);
+                    let shared = executor.shared().ok_or_else(|| {
                         anyhow::anyhow!(
                             "booth `{key}` declares unbounded concurrency, but its carrier `{language}` has no concurrent surface — declare a queue (`concurrency: 1`) or a pool instead"
                         )
@@ -442,7 +442,7 @@ impl Sessions {
                     *pool
                         .owner
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(executor);
                     *guard = Some(shared.clone());
                     shared
                 }
@@ -460,7 +460,7 @@ impl Sessions {
     ///
     /// Locking: the registry lock is taken only for map get/insert; the chosen
     /// slot's lock is held for the call. Cold start (`load`) runs inside that
-    /// slot lock, so a second call never sees a half-loaded session.
+    /// slot lock, so a second call never sees a half-loaded executor.
     #[allow(clippy::too_many_arguments)]
     pub fn with_slot_encoded(
         &self,
@@ -471,7 +471,7 @@ impl Sessions {
         sandbox: &crate::sandbox::SandboxPolicy,
         encoding: induction_protocol::Encoding,
         capacity: usize,
-        f: impl FnOnce(&mut dyn ResidentSession) -> Result<Value>,
+        f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
     ) -> Result<Value> {
         let pool = {
             let mut map = self
@@ -479,7 +479,7 @@ impl Sessions {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             // ONE instance, ONE process: a pool that already runs through its
-            // shared session must not open a slot session beside it. Reaching
+            // shared executor must not open a slot executor beside it. Reaching
             // here means a caller took the queue path for a booth that declared
             // `unbounded` — a bug in the dispatcher, said plainly.
             if let Some(pool) = map.get(key) {
@@ -490,14 +490,14 @@ impl Sessions {
                     .is_some()
                 {
                     anyhow::bail!(
-                        "instance `{key}` runs through its shared session (declared unbounded); a queued call would give it a second process — dispatch it on the shared surface"
+                        "instance `{key}` runs through its shared executor (declared unbounded); a queued call would give it a second process — dispatch it on the shared surface"
                     );
                 }
             }
             match map.get(key) {
                 Some(pool) if pool.capacity >= capacity.max(1) => pool.clone(),
                 // A declaration that widened the pool replaces the old one: the
-                // sessions in it stay alive for their in-flight calls, and the
+                // executors in it stay alive for their in-flight calls, and the
                 // next call lands in a pool that can carry the new number.
                 Some(_) => {
                     let pool = Arc::new(Pool::new(capacity));
@@ -516,22 +516,22 @@ impl Sessions {
                 // Cold start (or after eviction): spawn + load BEFORE the slot is
                 // published, so a spawn error surfaces as an error and a failed
                 // entry is never cached.
-                let mut session = spawn_session(language, source, host, sandbox, encoding)?;
-                session.load(source)?;
-                Ok(session)
+                let mut executor = spawn_executor(language, source, host, sandbox, encoding)?;
+                executor.load(source)?;
+                Ok(executor)
             },
-            |session| {
+            |executor| {
                 // The ctx channel's outbound path is per-call (the bridge carries
-                // the enclosing call's id): re-arm it here so a session spawned by
+                // the enclosing call's id): re-arm it here so a executor spawned by
                 // an earlier call does not answer this call's ctx frames with a
-                // stale id (residency is the session, the bridge is the call).
-                session.set_host(host);
-                f(session)
+                // stale id (residency is the executor, the bridge is the call).
+                executor.set_host(host);
+                f(executor)
             },
         )
     }
 
-    /// Evict (drop) the session — instance idle-expiry or hot replacement.
+    /// Evict (drop) the executor — instance idle-expiry or hot replacement.
     /// Waits for an in-flight call on the slot to finish before dropping.
     pub fn evict(&self, key: &str) {
         self.map
@@ -542,7 +542,7 @@ impl Sessions {
 
     /// Evict by predicate (the exec carrier's liveness rule): a slot whose
     /// child DIED is a broken cache entry — remove it so the next call
-    /// cold-starts a fresh spawn. Dropping the exec session closes stdin
+    /// cold-starts a fresh spawn. Dropping the exec executor closes stdin
     /// and reaps; a live child stays parked (idle_ttl eviction owns it —
     /// the child is the residency). Returns the removed keys (diagnostics).
     pub fn sweep_dead(&self) -> Vec<String> {
@@ -553,7 +553,7 @@ impl Sessions {
         let dead: Vec<String> = map
             .iter()
             .filter_map(|(k, pool)| {
-                // ONE session, held as the concurrent owner: its liveness is the
+                // ONE executor, held as the concurrent owner: its liveness is the
                 // child's own. Checked before the slots because an unbounded pool
                 // keeps no slots — reading "no slots" as "nothing alive" would bury
                 // a healthy child on the next sweep.
@@ -565,8 +565,8 @@ impl Sessions {
                     if let Some(owner) = owner.as_mut() {
                         let alive = owner
                             .as_any()
-                            .downcast_mut::<crate::carrier::exec::InductionSession>()
-                            .map(crate::carrier::exec::InductionSession::is_alive)
+                            .downcast_mut::<crate::carrier::exec::InductionExecutor>()
+                            .map(crate::carrier::exec::InductionExecutor::is_alive)
                             .unwrap_or(true);
                         return (!alive).then(|| k.clone());
                     }
@@ -581,8 +581,8 @@ impl Sessions {
                     slot.try_lock()
                         .map(|mut s| {
                             s.as_any()
-                                .downcast_mut::<crate::carrier::exec::InductionSession>()
-                                .map(crate::carrier::exec::InductionSession::is_alive)
+                                .downcast_mut::<crate::carrier::exec::InductionExecutor>()
+                                .map(crate::carrier::exec::InductionExecutor::is_alive)
                                 .unwrap_or(true)
                         })
                         .unwrap_or(true)
@@ -604,13 +604,13 @@ fn shellish_split(source: &str) -> Vec<String> {
     source.split_whitespace().map(|s| s.to_string()).collect()
 }
 
-fn spawn_session(
+fn spawn_executor(
     language: &str,
     source: &str,
     host: Option<&HostBridge>,
     sandbox: &crate::sandbox::SandboxPolicy,
     encoding: induction_protocol::Encoding,
-) -> Result<Box<dyn ResidentSession>> {
+) -> Result<Box<dyn Executor>> {
     // `source` is consumed by the wasmtime arm (compile at spawn); the
     // other arms ignore it (the spawn spec is argv) or one or both.
     // `encoding` is consumed by the process carriers only (induction/exec —
@@ -618,12 +618,12 @@ fn spawn_session(
     let _ = (language, source, host, sandbox, encoding);
     Ok(match language {
         #[cfg(feature = "steel")]
-        "steel" => Box::new(super::steel::SteelSession::new(host)?),
+        "steel" => Box::new(super::steel::SteelExecutor::new(host)?),
         #[cfg(feature = "python")]
-        "python" => Box::new(super::python::PythonSession::new(host)?),
+        "python" => Box::new(super::python::PythonExecutor::new(host)?),
         // Induction (ADR-0035; the pipe protocol, ADR-0001): the source string
         // IS the argv (whitespace-separated, quoted-free — the spawn spec);
-        // the child lives as long as the session and runs the framed loop
+        // the child lives as long as the executor and runs the framed loop
         // over the line protocol. A `nu` head selects the two-fifo adapter
         // shape inside the carrier (the nushell PTY carrier retired — one
         // execution shape per language, the nu form is `induction` with
@@ -631,7 +631,7 @@ fn spawn_session(
         // bwrap-wrapped (the mount policy runs before exec).
         "induction" => {
             let argv: Vec<String> = shellish_split(source);
-            Box::new(super::exec::InductionSession::spawn_wrapped(
+            Box::new(super::exec::InductionExecutor::spawn_wrapped(
                 &argv, host, sandbox, encoding,
             )?)
         }
@@ -643,12 +643,12 @@ fn spawn_session(
         // residency to sweep. The SKILL shape (user ruling 2026-09-28).
         "exec" => {
             let argv: Vec<String> = shellish_split(source);
-            Box::new(super::exec::OneShotSession::new(&argv, sandbox, encoding))
+            Box::new(super::exec::OneShotExecutor::new(&argv, sandbox, encoding))
         }
         // Wasm compiles AT SPAWN (from_source) — its `load` is a no-op;
-        // other carriers load lazily inside `load`. Same session shape.
+        // other carriers load lazily inside `load`. Same executor shape.
         other => anyhow::bail!("language not resident-carried by this effector build: {other}"),
     })
 }
 
-pub type DynSession = Box<dyn ResidentSession>;
+pub type DynExecutor = Box<dyn Executor>;

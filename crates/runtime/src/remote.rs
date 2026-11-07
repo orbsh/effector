@@ -1,12 +1,12 @@
 //! The remote wrapper (Phase 3): outbound WS to the control plane, register
 //! presence + capability, then serve pushed-down calls against the resident
-//! carrier sessions. No inbound ports — the effector always dials out; the
+//! carrier executors. No inbound ports — the effector always dials out; the
 //! connection carries both directions. No degraded fallback exists by
 //! design: long-polling was explicitly rejected (WS-only is the contract —
 //! the control determines compromise, not the industry's conservative
 //! defaults).
 
-use crate::carrier::session::Sessions;
+use crate::carrier::executor::Executors;
 use crate::carrier::HostBridge;
 use anyhow::{Context, Result};
 use effector_config::EffectorConfig;
@@ -22,7 +22,7 @@ async fn serve_connection(
     ws_url: &str,
     key: &effector_protocol::SigningKey,
     config: &EffectorConfig,
-    sessions: &Sessions,
+    executors: &Executors,
     code_cache: &Arc<CodeCache>,
 ) -> Result<()> {
     let pending_host: Arc<PendingHost> =
@@ -89,13 +89,13 @@ async fn serve_connection(
                 let tx = tx.clone();
                 let pending_host = pending_host.clone();
                 let config = config.clone();
-                let sessions = sessions.clone();
+                let executors = executors.clone();
                 let code_cache = code_cache.clone();
-                // One session task per call; host calls it makes run
+                // One executor task per call; host calls it makes run
                 // concurrently over the same writer channel.
                 tokio::spawn(async move {
                     let result =
-                        execute_call(&config, &sessions, &call, &tx, &pending_host, &code_cache)
+                        execute_call(&config, &executors, &call, &tx, &pending_host, &code_cache)
                             .await;
                     let _ = tx.send(Frame::Result(ToolResult {
                         call_id: call.call_id.clone(),
@@ -127,26 +127,26 @@ type PendingHost = std::sync::Mutex<
     >,
 >;
 
-/// Execute one ToolCall against the resident sessions. Phase 4 adds the
+/// Execute one ToolCall against the resident executors. Phase 4 adds the
 /// `link` payload form; today only inline bytes are consumed (a `link`
 /// payload is an explicit error, not a silent fetch — the effector initiates
 /// no fetch of its own).
 async fn execute_call(
     config: &EffectorConfig,
-    sessions: &Sessions,
+    executors: &Executors,
     call: &ToolCall,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
     code_cache: &Arc<CodeCache>,
 ) -> Result<serde_json::Value, String> {
-    execute_call_inner(config, sessions, call, tx, pending_host, code_cache)
+    execute_call_inner(config, executors, call, tx, pending_host, code_cache)
         .await
         .map_err(|e| e.to_string())
 }
 
 async fn execute_call_inner(
     config: &EffectorConfig,
-    sessions: &Sessions,
+    executors: &Executors,
     call: &ToolCall,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
@@ -155,32 +155,32 @@ async fn execute_call_inner(
     // Content-addressed code (ADR-0027): the frame carries a reference,
     // bytes ride the data path. Resolve = per-hash cache hit, else fetch +
     // verify (mismatch = error, never silent). The cache is a discardable
-    // hot layer — same legitimacy tier as the resident session; nothing
+    // hot layer — same legitimacy tier as the resident executor; nothing
     // in it would need to be recovered.
     let source = code_cache.resolve(&call.code)?;
 
     // Args carry no partition here — the control plane's booth model owns
-    // partitioning; the effector only keys residency by the caller's session
+    // partitioning; the effector only keys residency by the caller's executor
     // identity (below).
     // Host bridge: ctx ops ride Frame::Host over the same connection, each
     // with a unique host_call_id; the closure awaits the correlated reply.
     let bridge = build_host_bridge(call.call_id.clone(), tx, pending_host);
-    // Residency: the caller's session identity keys the resident runtime —
-    // calls sharing a `session` share VM/module state, different ones never
+    // Residency: the caller's executor identity keys the resident runtime —
+    // calls sharing a `executor` share VM/module state, different ones never
     // do. The node alias in the key is only for readability (the registry is
     // process-local). `entry` names the point the delivered code exposes.
     let key = format!(
         "effector/{}/{}",
-        config.capabilities.node_alias, call.session
+        config.capabilities.node_alias, call.executor
     );
-    let sessions = sessions.clone();
+    let executors = executors.clone();
     let language = call.language.clone();
     let entry = call.entry.clone();
     let args = call.args.clone();
     let kind = call.kind;
     let stream_id = call.stream.clone().unwrap_or_default();
     // The deployment's policy: `sandbox: true` is the remote default
-    // (unattended external code) and wraps every session process; `false`
+    // (unattended external code) and wraps every executor process; `false`
     // is the trusted-domain form and passes None. The field IS the switch —
     // the builder below only describes the wrap, it does not decide it.
     let sandbox = if config.sandbox {
@@ -192,7 +192,7 @@ async fn execute_call_inner(
     // enter the move-closure (the field is Copy).
     let encoding = call.encoding;
     tokio::task::spawn_blocking(move || {
-        sessions.with_session_encoded(
+        executors.with_executor_encoded(
             &key,
             &language,
             &source,
@@ -206,26 +206,26 @@ async fn execute_call_inner(
             // op — invoke is the stream whose first round is terminal
             // (plain handlers answer bare, the carrier wraps to
             // `{done:true,value}`). The generator/envelope verbs drive
-            // the session's iterate surface exactly as ADR-0034; the
+            // the executor's iterate surface exactly as ADR-0034; the
             // stream_id is minted by the control plane — the effector
             // derives nothing from it.
-            move |s: &mut dyn crate::carrier::session::ResidentSession| match kind {
+            move |s: &mut dyn crate::carrier::executor::Executor| match kind {
                 effector_protocol::CallKind::IterateStart => {
-                    s.iterate(crate::carrier::session::StreamOp::Start {
+                    s.iterate(crate::carrier::executor::StreamOp::Start {
                         stream_id,
                         handler: entry,
                         args,
                     })
                 }
                 effector_protocol::CallKind::IterateNext => {
-                    s.iterate(crate::carrier::session::StreamOp::Next {
+                    s.iterate(crate::carrier::executor::StreamOp::Next {
                         stream_id,
                         handler: entry,
                         args,
                     })
                 }
                 effector_protocol::CallKind::IterateDispose => {
-                    s.iterate(crate::carrier::session::StreamOp::Dispose {
+                    s.iterate(crate::carrier::executor::StreamOp::Dispose {
                         stream_id,
                         handler: entry,
                         args,
@@ -235,7 +235,7 @@ async fn execute_call_inner(
         )
     })
     .await
-    .unwrap_or_else(|e| Err(anyhow::anyhow!("session task join: {e}")))
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("executor task join: {e}")))
 }
 
 /// Build a HostBridge whose functions send Frame::Host(Call) over the
@@ -515,7 +515,7 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
     // The key is a startup fact, like the capability declaration: a node without one cannot
     // make a claim, and that is a refusal to run, not a per-call error value.
     let key = effector_protocol::read_signing_key(std::path::Path::new(&config.private_key_path))?;
-    let sessions = Sessions::new();
+    let executors = Executors::new();
     let code_cache = Arc::new(CodeCache::new());
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
@@ -523,7 +523,7 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
             &config.control_plane_url,
             &key,
             &config,
-            &sessions,
+            &executors,
             &code_cache,
         )
         .await

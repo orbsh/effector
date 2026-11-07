@@ -2,7 +2,7 @@
 //!
 //! Every carrier honors the same contract: JSON args in, JSON result out,
 //! handlers addressed by name, failures as error values (never panics).
-//! Execution is RESIDENT — one session per booth instance, loaded once,
+//! Execution is RESIDENT — one executor per booth instance, loaded once,
 //! called per event. These tests double as the reference for how a booth
 //! looks in each carried language.
 #![allow(
@@ -13,7 +13,7 @@
     clippy::panic_in_result_fn
 )]
 
-use effector_runtime::carrier::session::Sessions;
+use effector_runtime::carrier::executor::Executors;
 use effector_runtime::carrier::{execute, HostBridge};
 
 fn run(
@@ -22,14 +22,14 @@ fn run(
     handler: &str,
     args: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let sessions = Sessions::new();
-    sessions.with_session(
+    let executors = Executors::new();
+    executors.with_executor(
         "t1",
         language,
         src,
         None::<&HostBridge>,
         &effector_runtime::sandbox::SandboxPolicy::None,
-        |s: &mut dyn effector_runtime::carrier::session::ResidentSession| s.call(handler, args),
+        |s: &mut dyn effector_runtime::carrier::executor::Executor| s.call(handler, args),
     )
 }
 
@@ -44,18 +44,18 @@ fn py_entry_with_args() {
     assert_eq!(out, serde_json::json!({"doubled": 42}));
 }
 
-// Module-level state persists across calls in the same session.
+// Module-level state persists across calls in the same executor.
 #[cfg(feature = "python")]
 #[test]
 fn py_state_persists() {
     let src = "acc = []\ndef push(args):\n    acc.append(args[\"item\"])\n    return acc\n";
-    let sessions = Sessions::new();
+    let executors = Executors::new();
     let host: Option<&HostBridge> = None;
-    let call = |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+    let call = |s: &mut dyn effector_runtime::carrier::executor::Executor| {
         s.call("push", &serde_json::json!({"item": "book"}))
     };
-    sessions
-        .with_session(
+    executors
+        .with_executor(
             "i",
             "python",
             src,
@@ -64,8 +64,8 @@ fn py_state_persists() {
             call,
         )
         .unwrap();
-    let out = sessions
-        .with_session(
+    let out = executors
+        .with_executor(
             "i",
             "python",
             src,
@@ -106,19 +106,19 @@ fn steel_entry_with_args() {
 }
 
 // A language the node does not carry is an error value: the control plane
-// declares, the Effector only validates. (Surfaces at session spawn.)
+// declares, the Effector only validates. (Surfaces at executor spawn.)
 #[cfg(feature = "steel")]
 #[test]
 fn unknown_language_is_error_value() {
-    let sessions = Sessions::new();
-    let err = sessions
-        .with_session(
+    let executors = Executors::new();
+    let err = executors
+        .with_executor(
             "t1",
             "koto",
             "(+ 1 2)",
             None::<&HostBridge>,
             &effector_runtime::sandbox::SandboxPolicy::None,
-            |s: &mut dyn effector_runtime::carrier::session::ResidentSession| {
+            |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("f", &serde_json::json!(null))
             },
         )
