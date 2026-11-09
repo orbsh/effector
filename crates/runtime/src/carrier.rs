@@ -13,6 +13,85 @@ use serde_json::Value;
 /// carrier only marshals values across the VM boundary.
 pub type HostFn = std::sync::Arc<dyn Fn(Value) -> anyhow::Result<Value> + Send + Sync>;
 
+/// Stage two of a stop, at a node (aura ADR-0047, effector's half): one CALL's
+/// cancel handle. Per call and never per carrier — an executor outlives the call,
+/// and a flag that outlived it would stop the next one.
+///
+/// Two things live here, and the difference is the honest part: the FLAG is what
+/// the carrier's wait loop reads (it stops the caller from waiting), and the HOOK
+/// is what the carrier registers when it also has a way to tell the work itself
+/// (writing induction's interrupt frame into a guest, killing a child). A carrier
+/// that registers no hook can be released but not interrupted, and `interrupt()`
+/// says so instead of pretending.
+#[derive(Clone, Default)]
+pub struct CallControl {
+    inner: std::sync::Arc<ControlInner>,
+}
+
+#[derive(Default)]
+struct ControlInner {
+    cancelled: std::sync::atomic::AtomicBool,
+    hook: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for CallControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CallControl")
+            .field(&self.is_cancelled())
+            .field(&self.has_hook())
+            .finish()
+    }
+}
+
+impl CallControl {
+    /// Raised? What a blocking wait loop reads between timeouts.
+    pub fn is_cancelled(&self) -> bool {
+        self.inner
+            .cancelled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// True once the carrier armed it — the capability question, separate from
+    /// whether anybody has asked yet.
+    pub fn has_hook(&self) -> bool {
+        self.inner
+            .hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// The carrier's way to reach the work itself. Called once per call, from the
+    /// carrier, right after it knows what to address (`frame_id`, a child pid).
+    pub fn arm(&self, hook: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        let mut slot = self
+            .inner
+            .hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(hook);
+    }
+
+    /// Raise the flag and tell the work, if this carrier can. The return value is
+    /// "the node acted", not "the work is dead": a guest that never looks at its
+    /// token still finishes, and its result is discarded.
+    pub fn interrupt(&self) -> bool {
+        self.inner
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let hook = self
+            .inner
+            .hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match hook {
+            Some(hook) => hook(),
+            None => false,
+        }
+    }
+}
+
 /// The host-injected byte-level engine face (ADR-0037 4.16a). FOUR
 /// closures in okm's `VirtualStorage` shapes — bytes in, bytes out.
 /// No okm type crosses the slot on purpose: the contract is byte-shaped,

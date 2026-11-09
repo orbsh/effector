@@ -285,6 +285,16 @@ pub enum Frame {
     Call(ToolCall),
     /// Effector to control plane: the operation's answer.
     Result(ToolResult),
+    /// Control plane to effector: stop waiting for this call (aura ADR-0047 stage
+    /// two — the realm lifted an in-flight operation). Addressed by `call_id` because
+    /// that is the only handle the control plane holds; the node answers with
+    /// `Interrupted`, which says whether it could act, not whether the work died.
+    Interrupt { call_id: String },
+    /// Effector to control plane: what the node did with an `Interrupt`. `landed:
+    /// false` is the honest answer from a carrier with no way in (an embedded VM
+    /// mid-call) — the operation continues and its result is discarded, which the
+    /// control plane must not read as "it stopped".
+    Interrupted { call_id: String, landed: bool },
     /// Bidirectional: a host-function round trip (ctx bridge over the
     /// wire). Effector -> control plane = Call, control plane -> effector =
     /// Result; the `host_call_id` correlates. The control plane resolves

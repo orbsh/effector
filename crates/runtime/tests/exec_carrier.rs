@@ -931,3 +931,46 @@ fn the_resident_runner_keeps_its_ctx_frames_on_the_wire() {
         "the delivered script's own result came back through the envelope"
     );
 }
+
+/// STAGE TWO OF A STOP, carrier half (aura ADR-0047): the control plane stopped
+/// waiting, and this node can say whether it did anything about it. Here it can —
+/// the carrier arms a hook that writes induction's interrupt frame to the guest
+/// whose handler is blocked, and releases its own wait. The clock is the assertion:
+/// the handler's own ceiling is 30 s.
+#[test]
+fn an_interrupt_releases_the_wait_and_reaches_the_guest() {
+    use effector_runtime::carrier::CallControl;
+    let s = executors();
+    let argv = bin("interrupt_guest");
+    let control = CallControl::default();
+    assert!(!control.has_hook(), "nothing armed before the call");
+
+    let arm = control.clone();
+    let fire = control.clone();
+    let started = std::time::Instant::now();
+    let out = s.with_executor(
+        "box/interrupt",
+        "induction",
+        &argv,
+        None,
+        &effector_runtime::sandbox::SandboxPolicy::None,
+        move |sess| {
+            sess.arm_interrupt(&arm);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                assert!(fire.interrupt(), "the guest carrier can be told");
+            });
+            sess.call("wait", &json!({}))
+        },
+    );
+
+    // The caller is released with an error — the work is not "answered", it is
+    // abandoned, and the terminal value belongs to the control plane that asked.
+    assert!(out.is_err(), "the wait ended by interrupt, not by answer: {out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "released by the interrupt, not by the guest's own clock: {:?}",
+        started.elapsed()
+    );
+    assert!(control.is_cancelled());
+}

@@ -31,6 +31,12 @@ pub trait Executor: Send {
     /// `{done: true, value: <ret>}` — the carrier wraps, the handler
     /// never writes the envelope sugar for an invoke (0036 §2).
     fn iterate(&mut self, op: StreamOp) -> Result<Value>;
+    /// Arm this call's stop handle (ADR-0047 stage two), if the carrier can be told
+    /// about one at all. The default arms nothing, and `CallControl::interrupt` then
+    /// answers `landed: false` — an embedded VM mid-call has no place to receive a
+    /// stop, and saying so is the only correct answer.
+    fn arm_interrupt(&mut self, _control: &crate::carrier::CallControl) {}
+
     /// Re-arm the host bridge for the call that is about to run. The bridge
     /// is per-CALL data — it carries the enclosing remote call's id, which
     /// the control plane resolves the ctx scope with — while a resident

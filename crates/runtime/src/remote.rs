@@ -7,7 +7,7 @@
 //! defaults).
 
 use crate::carrier::executor::Executors;
-use crate::carrier::HostBridge;
+use crate::carrier::{CallControl, HostBridge};
 use anyhow::{Context, Result};
 use effector_config::EffectorConfig;
 use effector_protocol::{CodeRef, Frame, HostCall, HostFrame, HostOp, ToolCall, ToolResult};
@@ -26,6 +26,11 @@ async fn serve_connection(
     code_cache: &Arc<CodeCache>,
 ) -> Result<()> {
     let pending_host: Arc<PendingHost> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    // Stage two of a stop (ADR-0047): one control per in-flight call, addressed by the
+    // control plane's call id. It dies with the call's entry — a handle that outlived
+    // the call would stop the next one.
+    let calls: Arc<std::sync::Mutex<std::collections::HashMap<String, CallControl>>> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let (ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
@@ -86,6 +91,11 @@ async fn serve_connection(
         let frame: Frame = serde_json::from_str(&text)?;
         match frame {
             Frame::Call(call) => {
+                let control = CallControl::default();
+                calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(call.call_id.clone(), control.clone());
                 let tx = tx.clone();
                 let pending_host = pending_host.clone();
                 let config = config.clone();
@@ -94,14 +104,36 @@ async fn serve_connection(
                 // One executor task per call; host calls it makes run
                 // concurrently over the same writer channel.
                 tokio::spawn(async move {
-                    let result =
-                        execute_call(&config, &executors, &call, &tx, &pending_host, &code_cache)
-                            .await;
+                    let result = execute_call(
+                        &config,
+                        &executors,
+                        &call,
+                        &tx,
+                        &pending_host,
+                        &code_cache,
+                        &control,
+                    )
+                    .await;
                     let _ = tx.send(Frame::Result(ToolResult {
                         call_id: call.call_id.clone(),
                         outcome: result,
                     }));
                 });
+            }
+            // The control plane stopped waiting. Two outcomes, and the difference is
+            // the honest part: `landed: true` means this carrier reached the work
+            // (a guest's token, a child's kill); `false` means the flag went up, this
+            // wait will return, and the work itself will finish into the void.
+            Frame::Interrupt { call_id } => {
+                let control = calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&call_id);
+                let landed = match control {
+                    Some(control) => control.interrupt(),
+                    None => false,
+                };
+                let _ = tx.send(Frame::Interrupted { call_id, landed });
             }
             Frame::Host(HostFrame::Result(hr)) => {
                 let mut pending = pending_host
@@ -138,8 +170,9 @@ async fn execute_call(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
     code_cache: &Arc<CodeCache>,
+    control: &CallControl,
 ) -> Result<serde_json::Value, String> {
-    execute_call_inner(config, executors, call, tx, pending_host, code_cache)
+    execute_call_inner(config, executors, call, tx, pending_host, code_cache, control)
         .await
         .map_err(|e| e.to_string())
 }
@@ -151,6 +184,7 @@ async fn execute_call_inner(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
     code_cache: &Arc<CodeCache>,
+    control: &CallControl,
 ) -> Result<serde_json::Value> {
     // Content-addressed code (ADR-0027): the frame carries a reference,
     // bytes ride the data path. Resolve = per-hash cache hit, else fetch +
@@ -191,6 +225,9 @@ async fn execute_call_inner(
     // Copy the declared codec out — `call` is a reference and cannot
     // enter the move-closure (the field is Copy).
     let encoding = call.encoding;
+    // The control is owned by the task: the hook a carrier arms outlives this
+    // function's borrow (it lives as long as the call does).
+    let control = control.clone();
     tokio::task::spawn_blocking(move || {
         executors.with_executor_encoded(
             &key,
@@ -209,7 +246,12 @@ async fn execute_call_inner(
             // the executor's iterate surface exactly as ADR-0034; the
             // stream_id is minted by the control plane — the effector
             // derives nothing from it.
-            move |s: &mut dyn crate::carrier::executor::Executor| match kind {
+            move |s: &mut dyn crate::carrier::executor::Executor| {
+                // Arm before the op: a carrier that can be told registers its hook
+                // here, and one that cannot leaves the control unhooked — which the
+                // `Interrupted` frame then reports rather than hides.
+                s.arm_interrupt(&control);
+                match kind {
                 effector_protocol::CallKind::IterateStart => {
                     s.iterate(crate::carrier::executor::StreamOp::Start {
                         stream_id,
@@ -230,6 +272,7 @@ async fn execute_call_inner(
                         handler: entry,
                         args,
                     })
+                }
                 }
             },
         )

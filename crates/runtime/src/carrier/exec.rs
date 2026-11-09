@@ -79,6 +79,10 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 pub struct InductionExecutor {
     /// The resident child and everything shared with the reader thread.
     shared: Arc<Shared>,
+    /// This call's stop handle (ADR-0047 stage two), armed by the dispatch seam.
+    /// Per-call state on a per-SLOT object: the serial path arms and then runs with
+    /// nothing in between, so it cannot be another call's handle.
+    control: Option<crate::carrier::CallControl>,
     /// Owner-side handles: the process (kill/reap), the fifo executor dir, the
     /// reader thread. Nothing a call needs — a call only touches `shared`.
     child: Option<Child>,
@@ -112,6 +116,11 @@ struct Shared {
     /// Why the channel died. Set once; every waiter present and future reads it
     /// instead of parking forever on a child that will never answer.
     dead: Mutex<Option<String>>,
+    /// This object's own weak handle, set once at assembly. A call's stop hook has
+    /// to outlive the call's `&self` (the control holds it), and the hook's job —
+    /// writing one frame — is `&self` work; the weak is what makes that possible
+    /// without inventing a second write path.
+    me: std::sync::OnceLock<std::sync::Weak<Shared>>,
 }
 
 /// The write side of the channel. The request channel and the reply channel are
@@ -199,6 +208,7 @@ impl Shared {
         args: Value,
         stream_id: Option<String>,
         host: Option<&HostBridge>,
+        control: Option<&crate::carrier::CallControl>,
     ) -> Result<Value> {
         // The carrier owns the frame's identity (its own counter); the typed
         // SHAPE comes from the protocol crate — including the `op` tag the
@@ -220,6 +230,22 @@ impl Shared {
                 ));
             }
         };
+        // STAGE TWO (ADR-0047): the call's stop handle addresses the frame that is
+        // about to go out. Two things follow from arming it here — the guest is told
+        // (its token, in-band out-of-band), and this wait stops waiting, which is the
+        // half that cannot depend on the guest cooperating.
+        if let Some(control) = control {
+            if let Some(shared) = self.self_weak() {
+                control.arm(std::sync::Arc::new(move || {
+                    shared
+                        .write_frame(
+                            &induction_protocol::InterruptFrame::new(frame_id).to_value(),
+                            false,
+                        )
+                        .is_ok()
+                }));
+            }
+        }
         let (tx, rx) = mpsc::channel();
         self.pending
             .lock()
@@ -233,7 +259,7 @@ impl Shared {
         }
         let written = self
             .write_frame(&frame.to_value(), false)
-            .map(|()| rx.recv());
+            .map(|()| Self::await_answer(&rx, frame_id, control));
         // The entries leave whether the frame went out, the child answered, or
         // the send failed: nothing accumulates on a channel that is done.
         self.pending
@@ -246,10 +272,38 @@ impl Shared {
             .remove(&frame_id);
         match written {
             Err(e) => Err(e),
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(anyhow!(
-                "induction carrier: the child never answered request {frame_id} (channel closed)"
-            )),
+            Ok(answer) => answer,
+        }
+    }
+
+    /// The self-handle a stop hook needs (`me`, set at assembly).
+    fn self_weak(&self) -> Option<Arc<Shared>> {
+        self.me.get().and_then(std::sync::Weak::upgrade)
+    }
+
+    /// Wait for the guest's answer, but not indefinitely when the caller has already
+    /// stopped wanting one: the stop flag is re-read every tick, and a raised flag
+    /// leaves the answer on the floor exactly as the interrupt frame tells the guest
+    /// to abandon it.
+    fn await_answer(
+        rx: &mpsc::Receiver<Result<Value>>,
+        frame_id: u64,
+        control: Option<&crate::carrier::CallControl>,
+    ) -> Result<Value> {
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(answer) => return answer,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if control.is_some_and(crate::carrier::CallControl::is_cancelled) {
+                        return Err(anyhow!("induction carrier: request {frame_id} was stopped"));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!(
+                        "induction carrier: the child never answered request {frame_id} (channel closed)"
+                    ));
+                }
+            }
         }
     }
 
@@ -486,7 +540,9 @@ impl InductionExecutor {
             bridges: Mutex::new(HashMap::new()),
             armed: Mutex::new(host.cloned().unwrap_or_default()),
             dead: Mutex::new(None),
+            me: std::sync::OnceLock::new(),
         });
+        let _ = shared.me.set(std::sync::Arc::downgrade(&shared));
         let reader = {
             let shared = shared.clone();
             std::thread::Builder::new()
@@ -496,6 +552,7 @@ impl InductionExecutor {
         };
         Self {
             shared,
+            control: None,
             child: Some(child),
             dir,
             reader,
@@ -678,8 +735,21 @@ impl Executor for InductionExecutor {
     }
 
     fn call(&mut self, handler: &str, args: &Value) -> Result<Value> {
-        self.shared
-            .exchange(FrameKind::Call, handler, args.clone(), None, None)
+        let control = self.control.clone();
+        self.shared.exchange(
+            FrameKind::Call,
+            handler,
+            args.clone(),
+            None,
+            None,
+            control.as_ref(),
+        )
+    }
+
+    /// The one carrier that can be told: a resident induction guest reads its own
+    /// frames, so a stop can reach the handler AND release this wait.
+    fn arm_interrupt(&mut self, control: &crate::carrier::CallControl) {
+        self.control = Some(control.clone());
     }
 
     /// ADR-0034 over the induction seam, unified envelope (ADR-0036): the
@@ -691,7 +761,10 @@ impl Executor for InductionExecutor {
     /// this transitional JSON document retires with CBOR).
     fn iterate(&mut self, op: StreamOp) -> Result<Value> {
         let (kind, event, args, stream_id, fresh) = decompose(&op);
-        let reply = self.shared.exchange(kind, &event, args, stream_id, None)?;
+        let control = self.control.clone();
+        let reply = self
+            .shared
+            .exchange(kind, &event, args, stream_id, None, control.as_ref())?;
         finish(reply, fresh, &event)
     }
 
@@ -772,12 +845,15 @@ fn finish(reply: Value, fresh: Option<bool>, event: &str) -> Result<Value> {
 impl super::executor::SharedExecutor for Shared {
     fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value> {
         let (kind, event, args, stream_id, fresh) = decompose(&op);
-        let reply = self.exchange(kind, &event, args, stream_id, host)?;
+        // The shared/unbounded path arms nothing (`arm_interrupt` is the serial
+        // seam's): a call that needs to be stoppable runs through the dispatch seam,
+        // not through a bare shared handle.
+        let reply = self.exchange(kind, &event, args, stream_id, host, None)?;
         finish(reply, fresh, &event)
     }
 
     fn call(&self, handler: &str, args: &Value, host: Option<&HostBridge>) -> Result<Value> {
-        self.exchange(FrameKind::Call, handler, args.clone(), None, host)
+        self.exchange(FrameKind::Call, handler, args.clone(), None, host, None)
     }
 }
 

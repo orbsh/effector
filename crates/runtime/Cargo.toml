@@ -47,6 +47,9 @@ tempfile = "3"
 okm-core = { git = "https://github.com/orbsh/okm", branch = "main", default-features = false, features = ["test-engines"] }
 okm-wire = { git = "https://github.com/orbsh/okm", branch = "main" }
 base64 = "0.22"
+# The interrupt fixture is a real guest, so the test rides the same shim a deployed
+# guest does rather than hand-writing the frame loop.
+induction-guest = { path = "../../../induction/crates/induction-guest" }
 
 [[test]]
 name = "py_introspect"
