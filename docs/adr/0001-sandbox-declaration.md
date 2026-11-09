@@ -4,8 +4,10 @@
 
 **Status:** Accepted (2026-10-14). Landed with this record: the declaration
 surface is completed for what the jail can enforce, and unenforceable claims are
-refused at startup. Still open: the proxy path for egress allowlists, the
-seccomp profile, and a mechanism (or the retirement) of `command_exec`.
+refused at startup. Scope stated 2026-11-09 (point 5): the jail covers the
+process carriers (`exec`, `induction`) — `steel` and `python` run in-process.
+Still open: the proxy path for egress allowlists, the seccomp profile, and a
+mechanism (or the retirement) of `command_exec`.
 **Date:** 2026-10-14
 
 ## Context
@@ -63,6 +65,16 @@ unenforceable claim is a startup error.**
    surface (not silently ignored, not "accepted with a warning"), and the gap
    is listed in `docs/PLAN.md` (Phase 5's sandbox bullet) rather than left to be
    rediscovered.
+5. **The jail covers the carriers that run a PROCESS — `exec` and `induction`.**
+   `steel` and `python` execute inside the node (`crates/runtime/src/carrier/
+   executor.rs:618-624` drops the sandbox argument for those arms), so
+   `fs_scope`, `deny_read` and `cwd` bind only the process carriers, and a node
+   that runs only in-process carriers has nothing to jail. This is a SCOPE
+   statement, not a queue of per-operation gaps: an embedded language has no
+   process to put in a jail. The consequence for the wire is the one that
+   matters — a `sandbox: true` surface describes the node's process carriers
+   only, and the control plane must not read it as "every operation this node
+   runs is jailed".
 
 ## Considered and rejected
 
