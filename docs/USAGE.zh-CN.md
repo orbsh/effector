@@ -165,7 +165,8 @@ Effector 发出的第一帧是 `register`；控制端必须回 `registered`。�
 | `ctx.emit` | `emit` | `event`、`data` —— 控制端在自己的 realm 解析路由；业务面 fire-and-forget，帧层仍是请求/应答（成功应答为 Null） |
 
 **远程面范围（ADR-0043 同步注记）**：线上承载上表各臂——`timer.register/cancel`、
-`queue.depth/skip_to_head`、`schema` 目前是进程内 carrier 的成员，尚无远程臂。远程摊位
+`queue.depth/skip_to_head`、`stop.poll/clear`（停止的一级，aura ADR-0047）、`schema`
+目前是进程内 carrier 的成员，尚无远程臂。远程摊位
 调用它们得到的是未绑定名（steel：加载失败；python：AttributeError）——不是静默 no-op。
 它们以 `emit` 同样的方式上线：协议 enum 臂 + 控制端 resolver + effector 绑定，一波完成。
 

@@ -369,6 +369,10 @@ fn register_ctx_stubs(engine: &mut Engine) {
         "ctx.iterate.start",
         "ctx.iterate.next",
         "ctx.iterate.dispose",
+        // Stage one of a stop (aura ADR-0047): a script asks at a boundary it
+        // already has, so the stub has to exist for the source to load.
+        "ctx.stop.poll",
+        "ctx.stop.clear",
     ];
     for name in CTX_STUBS {
         let name: &'static str = Box::leak((*name).to_string().into_boxed_str());

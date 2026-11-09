@@ -253,8 +253,8 @@ The mapping from script function to wire op:
 | `ctx.emit` | `emit` | `event`, `data` — the control plane resolves routes in its realm; fire-and-forget on the business plane, still request/response at the frame layer (the answer is Null) |
 
 **Remote-plane scope (ADR-0043 sync note)**: the wire carries the arms above —
-`timer.register/cancel`, `queue.depth/skip_to_head`, and `schema` are
-in-process-carrier members without remote arms yet. A remote booth calling
+`timer.register/cancel`, `queue.depth/skip_to_head`, `stop.poll/clear` (stage one of
+a stop, aura ADR-0047), and `schema` are in-process-carrier members without remote arms yet. A remote booth calling
 them gets an unbound name (steel: load failure; python: AttributeError) —
 not a silent no-op. They join the wire the same way `emit` did: protocol
 enum arm + control-plane resolver + effector binding, one wave.

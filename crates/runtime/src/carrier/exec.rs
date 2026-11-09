@@ -1037,6 +1037,18 @@ impl induction_host::HostOps for BridgeOps<'_> {
         table_fn(&self.bridge.functions, "queue.skip_to_head", args)
     }
 
+    /// Stage one of a stop (aura ADR-0047): the guest asks at a boundary it
+    /// already has, and the answer is the bit the realm holds for THIS
+    /// activation. Not bridged = the host cannot answer, and `table_fn` says so
+    /// rather than answering `false` (a false no is a stop that never lands).
+    fn stop_poll<'a>(&'a self, args: &'a Value) -> induction_host::OpsFuture<'a> {
+        table_fn(&self.bridge.functions, "stop.poll", args)
+    }
+
+    fn stop_clear<'a>(&'a self, args: &'a Value) -> induction_host::OpsFuture<'a> {
+        table_fn(&self.bridge.functions, "stop.clear", args)
+    }
+
     fn schema<'a>(&'a self) -> induction_host::OpsFuture<'a> {
         let f = self.bridge.functions.get("schema").cloned();
         Box::pin(async move {
