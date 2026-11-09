@@ -902,9 +902,31 @@ impl ExecOneShot {
     /// One invocation = one process = one document in, one document out
     /// (the codec is the declaration; the request SHAPE is protocol-free
     /// — `{handler, args}` with no host seam either way).
-    pub fn run(&self, handler: &str, args: &Value) -> Result<Value> {
-        let (mut child, mut stdin, mut stdout) =
+    pub fn run(
+        &self,
+        handler: &str,
+        args: &Value,
+        control: Option<&crate::carrier::CallControl>,
+    ) -> Result<Value> {
+        let (child, mut stdin, mut stdout) =
             spawn_child(&self.argv, &self.policy, self.encoding)?;
+        // THE CHILD IS THE WORK HERE (ADR-0047 stage two, the kill-shaped carrier): it
+        // has no in-band channel to be told anything, and a script mid-run would not
+        // read one. So the handle that can reach it is its pid — the strongest form of
+        // stop this stack has, and the one the roadmap already keeps as the fallback.
+        let child = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+        if let Some(control) = control {
+            let child = std::sync::Arc::clone(&child);
+            control.arm(std::sync::Arc::new(move || {
+                let mut slot = child
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match slot.as_mut() {
+                    Some(child) => child.kill().is_ok(),
+                    None => false,
+                }
+            }));
+        }
         let request = serde_json::json!({ "handler": handler, "args": args });
         // Write the whole request, then CLOSE — EOF is the script's cue
         // to run (and nushell's `open /dev/stdin` shape needs exactly
@@ -926,9 +948,23 @@ impl ExecOneShot {
         stdout
             .read_to_end(&mut out)
             .map_err(|e| anyhow!("exec carrier: read stdout: {e}"))?;
-        let status = child
-            .wait()
-            .map_err(|e| anyhow!("exec carrier: wait: {e}"))?;
+        let waited = {
+            let mut slot = child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match slot.take() {
+                Some(mut child) => child.wait(),
+                // Only the stop hook takes the child, and it takes it to kill it.
+                None => anyhow::bail!("exec carrier: interrupted — the child was killed"),
+            }
+        };
+        // The kill closes the pipe, so the read above returns like any other end of
+        // stream. This is what tells the two apart: the value the caller wants is an
+        // interruption, not a script that printed half a document.
+        if control.is_some_and(crate::carrier::CallControl::is_cancelled) {
+            anyhow::bail!("exec carrier: interrupted — the child was killed");
+        }
+        let status = waited.map_err(|e| anyhow!("exec carrier: wait: {e}"))?;
         match self.encoding {
             Encoding::Json => {
                 let out = String::from_utf8_lossy(&out);
@@ -966,6 +1002,9 @@ impl ExecOneShot {
 /// die that was never promised to live).
 pub struct OneShotExecutor {
     inner: ExecOneShot,
+    /// This call's stop handle, if the dispatch gave one. It is never stored on the
+    /// carrier for later: a one-shot executor runs ONE call and dies with it.
+    control: Option<crate::carrier::CallControl>,
 }
 
 impl OneShotExecutor {
@@ -976,6 +1015,7 @@ impl OneShotExecutor {
     ) -> Self {
         Self {
             inner: ExecOneShot::new(argv, policy, encoding),
+            control: None,
         }
     }
 }
@@ -987,7 +1027,13 @@ impl Executor for OneShotExecutor {
     }
 
     fn call(&mut self, handler: &str, args: &Value) -> Result<Value> {
-        self.inner.run(handler, args)
+        self.inner.run(handler, args, self.control.as_ref())
+    }
+
+    /// The kill-shaped arm: a one-shot call's work is a child process, and killing it
+    /// is not a courtesy but the only thing that can reach it (ADR-0047 §4).
+    fn arm_interrupt(&mut self, control: &crate::carrier::CallControl) {
+        self.control = Some(control.clone());
     }
 
     /// Unified seam (ADR-0036): a Start runs the one-shot and the
@@ -1000,7 +1046,7 @@ impl Executor for OneShotExecutor {
     fn iterate(&mut self, op: StreamOp) -> Result<Value> {
         match op {
             StreamOp::Start { handler, args, .. } => {
-                let value = self.inner.run(&handler, &args)?;
+                let value = self.inner.run(&handler, &args, self.control.as_ref())?;
                 Ok(serde_json::json!({ "done": true, "value": value }))
             }
             StreamOp::Next { .. } | StreamOp::Dispose { .. } => Err(anyhow!(

@@ -976,3 +976,43 @@ fn an_interrupt_releases_the_wait_and_reaches_the_guest() {
     );
     assert!(control.is_cancelled());
 }
+
+/// STAGE TWO, the kill-shaped carrier (ADR-0047 §4): a one-shot script has no channel
+/// to be told anything, so the only way to reach it is to kill it. The clock is the
+/// assertion — the script sleeps 30 s and the call must return in well under one.
+#[test]
+fn an_interrupt_kills_a_one_shot_child_instead_of_waiting_for_it() {
+    use effector_runtime::carrier::CallControl;
+    let s = executors();
+    let control = CallControl::default();
+    let arm = control.clone();
+    let fire = control.clone();
+    let started = std::time::Instant::now();
+    let out = s.with_executor(
+        "box/oneshot-interrupt",
+        "exec",
+        "sleep 30",
+        None,
+        &effector_runtime::sandbox::SandboxPolicy::None,
+        move |sess| {
+            sess.arm_interrupt(&arm);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                assert!(fire.interrupt(), "the kill-shaped carrier can be told");
+            });
+            sess.call("run", &json!({}))
+        },
+    );
+
+    let error = out.expect_err("a killed one-shot is an interruption, not an answer");
+    assert!(
+        format!("{error}").contains("interrupted"),
+        "the error says what happened: {error}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "killed, not waited out: {:?}",
+        started.elapsed()
+    );
+    assert!(control.is_cancelled());
+}
