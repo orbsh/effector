@@ -53,7 +53,7 @@ fn two_python_requests_run_at_once_in_one_process() {
                     &effector_runtime::sandbox::SandboxPolicy::None,
                     induction_protocol::Encoding::Json,
                     None,
-                    |shared| shared.iterate(run(code, json!({ "n": n }), &format!("s{n}")), None),
+                    |shared| shared.iterate(run(code, json!({ "n": n }), &format!("s{n}")), None, None),
                 )
                 .unwrap()
         }));
@@ -100,7 +100,7 @@ fn a_ctx_call_is_answered_by_its_own_requests_bridge() {
                     &effector_runtime::sandbox::SandboxPolicy::None,
                     induction_protocol::Encoding::Json,
                     Some(&bridge),
-                    |shared| shared.iterate(run(code, json!({}), &format!("s{tag}")), Some(&bridge)),
+                    |shared| shared.iterate(run(code, json!({}), &format!("s{tag}")), Some(&bridge), None),
                 )
                 .unwrap()
         }));

@@ -843,17 +843,28 @@ fn finish(reply: Value, fresh: Option<bool>, event: &str) -> Result<Value> {
 }
 
 impl super::executor::SharedExecutor for Shared {
-    fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value> {
+    fn iterate(
+        &self,
+        op: StreamOp,
+        host: Option<&HostBridge>,
+        control: Option<&crate::carrier::CallControl>,
+    ) -> Result<Value> {
         let (kind, event, args, stream_id, fresh) = decompose(&op);
-        // The shared/unbounded path arms nothing (`arm_interrupt` is the serial
-        // seam's): a call that needs to be stoppable runs through the dispatch seam,
-        // not through a bare shared handle.
-        let reply = self.exchange(kind, &event, args, stream_id, host, None)?;
+        // The stop handle rides the CALL here, never the carrier: one unbounded
+        // executor serves every call on this booth at once, so a handle kept beside
+        // it would stop whichever call armed last.
+        let reply = self.exchange(kind, &event, args, stream_id, host, control)?;
         finish(reply, fresh, &event)
     }
 
-    fn call(&self, handler: &str, args: &Value, host: Option<&HostBridge>) -> Result<Value> {
-        self.exchange(FrameKind::Call, handler, args.clone(), None, host, None)
+    fn call(
+        &self,
+        handler: &str,
+        args: &Value,
+        host: Option<&HostBridge>,
+        control: Option<&crate::carrier::CallControl>,
+    ) -> Result<Value> {
+        self.exchange(FrameKind::Call, handler, args.clone(), None, host, control)
     }
 }
 

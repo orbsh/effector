@@ -357,6 +357,7 @@ fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
                         args: json!({"n": 1}),
                     },
                     None,
+                    None,
                 )
             },
         )
@@ -401,6 +402,7 @@ fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
                     handler: "echo".into(),
                     args: json!({"n": 2}),
                 },
+                None,
                 None,
             )
         },

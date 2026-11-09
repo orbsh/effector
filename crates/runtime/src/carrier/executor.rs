@@ -66,12 +66,26 @@ pub trait Executor: Send {
 /// call's identity on the wire and routes the answers back.
 pub trait SharedExecutor: Send + Sync {
     /// One stream op, with the call's own bridge (the ctx frames it provokes
-    /// belong to THIS call, not to whoever called last).
-    fn iterate(&self, op: StreamOp, host: Option<&HostBridge>) -> Result<Value>;
+    /// belong to THIS call, not to whoever called last) and the call's own stop
+    /// handle. Both are per-call facts, which is why they ride the CALL and not a
+    /// field on the carrier: an unbounded executor serves many calls at once, and a
+    /// handle kept beside it would belong to whoever armed last.
+    fn iterate(
+        &self,
+        op: StreamOp,
+        host: Option<&HostBridge>,
+        control: Option<&crate::carrier::CallControl>,
+    ) -> Result<Value>;
     /// One plain handler call on the same terms — a lifecycle hook rides the
     /// resident executor too, and it must not open a second process beside the
     /// one the calls are using.
-    fn call(&self, handler: &str, args: &Value, host: Option<&HostBridge>) -> Result<Value>;
+    fn call(
+        &self,
+        handler: &str,
+        args: &Value,
+        host: Option<&HostBridge>,
+        control: Option<&crate::carrier::CallControl>,
+    ) -> Result<Value>;
 }
 
 /// One stream verb from the control plane to a resident executor
