@@ -292,7 +292,18 @@ impl Shared {
     ) -> Result<Value> {
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                Ok(answer) => return answer,
+                // The stop flag wins over an answer that arrives behind it. A guest
+                // told to abandon its work usually says so on the way out
+                // (`{"cancelled": true}` is the shim's own fixture), and that reply
+                // can land in the same tick the flag turns. Once the caller has
+                // stopped waiting, a value it never waited for is not its answer —
+                // so the flag is read on the answer path too, not only on timeout.
+                Ok(answer) => {
+                    if control.is_some_and(crate::carrier::CallControl::is_cancelled) {
+                        return Err(anyhow!("induction carrier: request {frame_id} was stopped"));
+                    }
+                    return answer;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if control.is_some_and(crate::carrier::CallControl::is_cancelled) {
                         return Err(anyhow!("induction carrier: request {frame_id} was stopped"));
