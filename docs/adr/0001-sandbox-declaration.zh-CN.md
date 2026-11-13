@@ -88,6 +88,8 @@ effector 是下发代码**唯一**的围栏层：代码在会话进程里跑，�
 配置文件现在在解析期就因未知字段失败，这比一条暗示「这项能力也许有一天会有」的拒绝更诚实，
 也更响。
 
+**`network: allow [...]` 已接线（2026-11-09）。** 本记录称为「仍开」的那条代理路径，现在有了节点自己跑的执行点：两个代理（HTTP 与 SOCKS5）骑在由声明清单构建的 `DomainFilter` 上，各自经一条 UNIX socket 桥进 jail 的网络命名空间，jail 那一侧由命令自己的 prelude 拉起。形状上有三件事值得记下来，因为每一件都是跑出来的、不是读出来的：socket 必须落在 `/tmp` 与 `/run` 之外（jail 把两者都换成空 tmpfs）；jail 里的 shell 需要 `set -m`（POSIX shell 会把后台任务的 stdin 指到 `/dev/null`，而 user namespace 里的 jail 打不开它）；桥必须由脚本自己的那个 shell 杀掉，所以那个 shell 不能 `exec` 脚本。`open` 仍然拒绝：命名空间是 unshared 建的，「不受限」不是这台节点能开出的形状。
+
 **seccomp 不是这台节点该开出的开关。** sandbox runtime 的 seccomp 面收的是 BPF 档案路径与
 `apply-seccomp` 二进制——那是部署件，不是声明。这里不携带任何东西，也不该携带，直到那些
 部署件存在。

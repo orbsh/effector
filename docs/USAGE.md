@@ -97,10 +97,16 @@ Order of operations at effector startup:
   credentials, shell configs, other users' trees). Undeclared = nothing denied.
 - `capabilities.cwd` — the working directory inside the jail. Undeclared = the
   system temp dir (the pre-declaration behavior).
-- `capabilities.network` — `"none"`, `{ "allow": ["host:port"] }`, or `"open"`.
-  **`none` is the only value this node can honor today**: egress allowlists ride
-  the sandbox runtime's proxy (not wired), and the jail denies egress outright.
-  Anything else is a **startup error**, not a silently ignored setting.
+- `capabilities.network` — `"none"` or `{ "allow": ["host", "host:port", "*.host"] }`.
+  An allowlist is honored: the node runs an HTTP and a SOCKS5 proxy, the jail
+  reaches them over UNIX sockets bridged into its namespace, and scripts find
+  `http_proxy`/`https_proxy`/`ALL_PROXY` already pointing at them — so an ordinary
+  client works unchanged and nothing outside the list resolves. What the node
+  needs for that: `sandbox: true` (no jail, no bridges), `bwrap` and `socat` on
+  PATH, and `$HOME` (the sockets live in `~/.cache/effector/`, because the jail
+  replaces `/tmp` and `/run` with empty tmpfs). `"open"` is a **startup error**
+  (an unshared namespace cannot be unrestricted) and so is an empty list (the
+  filter would read it as "allow everything").
 - There is no `command_exec` field: running a delivered script IS this node's job,
   and the jail admits `exec` by construction, so "may execute" was never a
   capability distinct from existing. It was retired rather than wired (ADR-0001's

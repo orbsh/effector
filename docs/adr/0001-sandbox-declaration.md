@@ -125,6 +125,19 @@ gone; a config that still declares it now fails parse-time on an unknown field,
 which is a louder and more accurate failure than a refusal that implies the
 capability might one day exist.
 
+**`network: allow [...]` is wired (2026-11-09).** The proxy path this record called
+"still open" now has an enforcement point the node runs itself: two proxies (HTTP
+and SOCKS5) over a `DomainFilter` built from the declared list, each bridged into
+the jail's network namespace over a UNIX socket, with the jail's side started by
+the command's own prelude. Three facts about the shape are worth recording because
+each one was discovered by running it, not by reading it: the sockets must live
+outside `/tmp` and `/run` (the jail replaces both with empty tmpfs); the in-jail
+shell needs `set -m` (a POSIX shell sends a background job's stdin to `/dev/null`,
+which a user-namespace jail cannot open); and the bridges must be killed by the
+script's own shell, so that shell does not `exec` the script. `open` stays
+refused: the namespace is created unshared, so "unrestricted" is not a shape this
+node can offer.
+
 **Seccomp is not this node's switch to offer.** The sandbox runtime's seccomp
 surface takes a BPF profile path and an `apply-seccomp` binary — deployment
 artifacts, not a declaration. Nothing is carried here, and nothing should be

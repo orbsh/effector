@@ -53,7 +53,7 @@ Effector 启动顺序：
 - `capabilities.fs_scope` —— 下发脚本可以**写**的路径。它们之外一律只读；**读**不受这个字段约束（那是 `deny_read` 的事）。
 - `capabilities.deny_read` —— 下发脚本**不许读**的路径（你的凭证、shell 配置、别人的目录）。不声明 = 什么都不拒。
 - `capabilities.cwd` —— jail 里的工作目录。不声明 = 系统临时目录（声明面出现之前的行为）。
-- `capabilities.network` —— `"none"`、`{ "allow": ["host:port"] }` 或 `"open"`。**今天只有 `none` 是这台节点兑现得起的**：出网允许清单要骑 sandbox runtime 的代理（未接），而 jail 直接拒绝出网。别的值都是**启动错误**，不是被静默忽略的设置。
+- `capabilities.network` —— `"none"` 或 `{ "allow": ["host", "host:port", "*.host"] }`。允许清单是**兑现得了**的：节点自己跑一个 HTTP 代理和一个 SOCKS5 代理，jail 通过桥进它命名空间的 UNIX socket 够到它们，脚本拿到的 `http_proxy`/`https_proxy`/`ALL_PROXY` 已经指好——所以普通客户端不用改，而清单之外的地址解析不到。兑现它需要三样东西：`sandbox: true`（没有 jail 就没有桥）、PATH 上的 `bwrap` 与 `socat`、以及 `$HOME`（socket 放在 `~/.cache/effector/`，因为 jail 把 `/tmp` 和 `/run` 都换成空 tmpfs）。`"open"` 是**启动错误**（unshared 的命名空间没法「不受限」），空清单同样是**启动错误**（过滤器会把空表读成「全放行」）。
 - 没有 `command_exec` 这个字段了：跑下发的脚本就是这台节点的本职，jail 内部的 `exec` 是构造上就有的，「能不能执行」从来不是一项独立于「节点存在」的能力。它是被**退役**的，不是被接上的（ADR-0001 的 Update）。
 - 剩下那条拒绝背后的规矩（ADR-0001）：声明出去的字段就是发布出去的能力，所以它必须指明自己的**执行点**——这台节点兑现不了的声明，在启动时失败，而不是被当作谎言注册出去。
 
