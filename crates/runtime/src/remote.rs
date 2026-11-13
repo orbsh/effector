@@ -24,6 +24,7 @@ async fn serve_connection(
     config: &EffectorConfig,
     executors: &Executors,
     code_cache: &Arc<CodeCache>,
+    policy: &crate::sandbox::SandboxPolicy,
 ) -> Result<()> {
     let pending_host: Arc<PendingHost> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -101,6 +102,7 @@ async fn serve_connection(
                 let config = config.clone();
                 let executors = executors.clone();
                 let code_cache = code_cache.clone();
+                let policy = policy.clone();
                 // One executor task per call; host calls it makes run
                 // concurrently over the same writer channel.
                 tokio::spawn(async move {
@@ -112,6 +114,7 @@ async fn serve_connection(
                         &pending_host,
                         &code_cache,
                         &control,
+                        &policy,
                     )
                     .await;
                     let _ = tx.send(Frame::Result(ToolResult {
@@ -163,6 +166,7 @@ type PendingHost = std::sync::Mutex<
 /// `link` payload form; today only inline bytes are consumed (a `link`
 /// payload is an explicit error, not a silent fetch — the effector initiates
 /// no fetch of its own).
+#[allow(clippy::too_many_arguments)]
 async fn execute_call(
     config: &EffectorConfig,
     executors: &Executors,
@@ -171,12 +175,23 @@ async fn execute_call(
     pending_host: &Arc<PendingHost>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
+    policy: &crate::sandbox::SandboxPolicy,
 ) -> Result<serde_json::Value, String> {
-    execute_call_inner(config, executors, call, tx, pending_host, code_cache, control)
-        .await
-        .map_err(|e| e.to_string())
+    execute_call_inner(
+        config,
+        executors,
+        call,
+        tx,
+        pending_host,
+        code_cache,
+        control,
+        policy,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_call_inner(
     config: &EffectorConfig,
     executors: &Executors,
@@ -185,6 +200,7 @@ async fn execute_call_inner(
     pending_host: &Arc<PendingHost>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
+    policy: &crate::sandbox::SandboxPolicy,
 ) -> Result<serde_json::Value> {
     // Content-addressed code (ADR-0027): the frame carries a reference,
     // bytes ride the data path. Resolve = per-hash cache hit, else fetch +
@@ -213,15 +229,12 @@ async fn execute_call_inner(
     let args = call.args.clone();
     let kind = call.kind;
     let stream_id = call.stream.clone().unwrap_or_default();
-    // The deployment's policy: `sandbox: true` is the remote default
-    // (unattended external code) and wraps every executor process; `false`
-    // is the trusted-domain form and passes None. The field IS the switch —
-    // the builder below only describes the wrap, it does not decide it.
-    let sandbox = if config.sandbox {
-        sandbox_policy_for(config)
-    } else {
-        crate::sandbox::SandboxPolicy::None
-    };
+    // The deployment's policy: built ONCE at boot (`run`), because the egress
+    // face it may name is a live listener — a per-call policy would have to
+    // start proxies per call. `sandbox: true` is the remote default (unattended
+    // external code) and wraps every executor process; `false` is the
+    // trusted-domain form and passes None. The field IS the switch.
+    let sandbox = policy.clone();
     // Copy the declared codec out — `call` is a reference and cannot
     // enter the move-closure (the field is Copy).
     let encoding = call.encoding;
@@ -560,6 +573,20 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
     let key = effector_protocol::read_signing_key(std::path::Path::new(&config.private_key_path))?;
     let executors = Executors::new();
     let code_cache = Arc::new(CodeCache::new());
+    // The egress face, when this node declared an allowlist. It lives for the
+    // whole run — across reconnects — because the sockets the jail connects to
+    // are the node's, not the connection's.
+    let egress = match (&config.capabilities.network, config.sandbox) {
+        (effector_config::NetworkPolicy::Allow(domains), true) => {
+            Some(crate::egress::Egress::start(domains).await?)
+        }
+        _ => None,
+    };
+    let policy = if config.sandbox {
+        sandbox_policy_for(&config, egress.as_ref().map(|e| e.face().clone()))
+    } else {
+        crate::sandbox::SandboxPolicy::None
+    };
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
         match serve_connection(
@@ -568,6 +595,7 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
             &config,
             &executors,
             &code_cache,
+            &policy,
         )
         .await
         {
@@ -582,7 +610,10 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
 /// the machine is the party that knows what it can expose, so the machine
 /// states it — nothing here is derived from a control-plane frame, and no
 /// field is left hardcoded while a declaration for it exists.
-fn sandbox_policy_for(config: &EffectorConfig) -> crate::sandbox::SandboxPolicy {
+fn sandbox_policy_for(
+    config: &EffectorConfig,
+    proxy: Option<crate::sandbox::ProxyFace>,
+) -> crate::sandbox::SandboxPolicy {
     use crate::sandbox::SandboxPolicy;
     use effector_config::NetworkPolicy;
     SandboxPolicy::Bubblewrap {
@@ -596,15 +627,14 @@ fn sandbox_policy_for(config: &EffectorConfig) -> crate::sandbox::SandboxPolicy 
             .cwd
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().display().to_string()),
-        // Allowlists ride the sandbox runtime's proxy, which this node does
-        // not configure: `validate()` refuses any non-`none` declaration at
-        // startup, so only `none` reaches here. The field is carried for the
-        // day the proxy path is wired (an empty list is what the jail already
-        // does — egress denied).
+        // The declared allowlist, carried as declared. What makes it
+        // ENFORCEABLE is `proxy`: the jail only reaches the world through the
+        // node's proxies, and with no face the namespace has no network at all.
         allowed_domains: match &config.capabilities.network {
             NetworkPolicy::Allow(domains) => domains.clone(),
             NetworkPolicy::None | NetworkPolicy::Open => Vec::new(),
         },
+        proxy,
     }
 }
 
@@ -622,14 +652,26 @@ mod tests {
         }
     }
 
-    fn wrapped(caps: CapabilitySurface) -> (Vec<String>, Vec<String>, String, Vec<String>) {
-        match sandbox_policy_for(&config(caps)) {
+    /// The four declared halves plus the egress face (None when the node has no
+    /// allowlist — the tests that build a policy without a live proxy all take
+    /// this shape).
+    fn wrapped(
+        caps: CapabilitySurface,
+    ) -> (
+        Vec<String>,
+        Vec<String>,
+        String,
+        Vec<String>,
+        Option<crate::sandbox::ProxyFace>,
+    ) {
+        match sandbox_policy_for(&config(caps), None) {
             crate::sandbox::SandboxPolicy::Bubblewrap {
                 allow_write,
                 deny_read,
                 cwd,
                 allowed_domains,
-            } => (allow_write, deny_read, cwd, allowed_domains),
+                proxy,
+            } => (allow_write, deny_read, cwd, allowed_domains, proxy),
             other => panic!("a wrapped deployment builds a bwrap policy, got {other:?}"),
         }
     }
@@ -643,13 +685,17 @@ mod tests {
             cwd: Some("/srv/work".into()),
             ..Default::default()
         };
-        let (allow_write, deny_read, cwd, allowed_domains) = wrapped(caps);
+        let (allow_write, deny_read, cwd, allowed_domains, proxy) = wrapped(caps);
         assert_eq!(allow_write, vec!["/srv/work".to_string()]);
         assert_eq!(deny_read, vec!["/home/user/.ssh".to_string()]);
         assert_eq!(cwd, "/srv/work");
         assert!(
             allowed_domains.is_empty(),
             "no allowlist → nothing to carry"
+        );
+        assert!(
+            proxy.is_none(),
+            "and no face → the namespace has no network at all"
         );
     }
 
@@ -660,22 +706,47 @@ mod tests {
             fs_scope: vec!["/srv/work".into()],
             ..Default::default()
         };
-        let (_, deny_read, cwd, _) = wrapped(caps);
+        let (_, deny_read, cwd, _, _) = wrapped(caps);
         assert!(deny_read.is_empty());
         assert_eq!(cwd, std::env::temp_dir().display().to_string());
     }
 
     #[test]
     fn a_declared_allowlist_reaches_the_policy_field() {
-        // The declaration→policy hop is what this node owns; the proxy that
-        // would consume it is the unwired half (validate refuses the claim
-        // until then, and this mapping is what a later wiring reads).
         let caps = CapabilitySurface {
             node_alias: "n1".into(),
             network: NetworkPolicy::Allow(vec!["github.com:443".into()]),
             ..Default::default()
         };
-        let (_, _, _, allowed_domains) = wrapped(caps);
+        let (_, _, _, allowed_domains, proxy) = wrapped(caps);
         assert_eq!(allowed_domains, vec!["github.com:443".to_string()]);
+        assert!(
+            proxy.is_none(),
+            "the declaration is carried; the FACE is the live `Egress`'s, and this \
+             builder without one describes a jail with no network"
+        );
+    }
+
+    #[test]
+    fn a_live_face_is_what_makes_the_allowlist_reachable() {
+        // The jail only reaches the world through `proxy`: the two sockets and the
+        // two loopback ports ride the policy, and the bwrap builder consumes them.
+        let caps = CapabilitySurface {
+            node_alias: "n1".into(),
+            network: NetworkPolicy::Allow(vec!["github.com:443".into()]),
+            ..Default::default()
+        };
+        let face = crate::sandbox::ProxyFace {
+            http_socket: "/home/u/.cache/effector/egress-1/http.sock".into(),
+            socks_socket: "/home/u/.cache/effector/egress-1/socks.sock".into(),
+            http_port: crate::egress::JAIL_HTTP_PORT,
+            socks_port: crate::egress::JAIL_SOCKS_PORT,
+        };
+        match sandbox_policy_for(&config(caps), Some(face.clone())) {
+            crate::sandbox::SandboxPolicy::Bubblewrap { proxy, .. } => {
+                assert_eq!(proxy, Some(face), "the face rides the policy verbatim");
+            }
+            other => panic!("a wrapped deployment builds a bwrap policy, got {other:?}"),
+        }
     }
 }

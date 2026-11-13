@@ -1073,6 +1073,43 @@ impl Executor for OneShotExecutor {
     }
 }
 
+/// Give the jail its OWN `/dev` and `/proc`.
+///
+/// The sandbox runtime writes `--dev /dev --proc /proc` BEFORE its `--ro-bind / /`,
+/// and bubblewrap applies mounts in order — so the host's `/dev` and `/proc` are
+/// bound over the fresh ones. Inside a user namespace the host's `/dev/null`
+/// cannot be opened by the sandboxed user (`Permission denied`), which kills every
+/// client that redirects to it: `socat …,fork` (our own egress bridges) does
+/// exactly that, so a bridged allowlist would never start. Moving the two mounts
+/// to the end restores what the flags promise, and it also keeps `/proc` from
+/// answering with the host's process table.
+pub fn own_dev_and_proc(wrapped: &str) -> String {
+    // Anything that is not the generator's own layout is left alone: this is a
+    // correction of a known shape, not a general rewriter.
+    if !wrapped.contains(" --dev /dev") || !wrapped.contains(" --proc /proc") {
+        return wrapped.to_string();
+    }
+    let moved = wrapped
+        .replacen(" --dev /dev", "", 1)
+        .replacen(" --proc /proc", "", 1);
+    match moved.find(" --chdir ") {
+        Some(at) => format!("{} --dev /dev --proc /proc{}", &moved[..at], &moved[at..]),
+        None => moved,
+    }
+}
+
+/// The shell the generated jail command runs scripts with. NixOS has no
+/// `/bin/bash`; it does have `/bin/sh`, so the fallback is the difference between
+/// a jail that starts and one that cannot.
+fn jail_shell() -> &'static str {
+    for candidate in ["/bin/bash", "/bin/sh"] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate;
+        }
+    }
+    "/bin/sh"
+}
+
 // ---------------------------------------------------- bridge adapter --
 
 /// Poll one routing future to completion from this synchronous
@@ -1243,6 +1280,7 @@ fn spawn_child(
             allow_write,
             deny_read,
             cwd,
+            proxy,
             ..
         } => {
             let quoted = argv
@@ -1258,6 +1296,16 @@ fn spawn_child(
                 },
                 ..Default::default()
             };
+            // The jail reaches the node's proxies through a prelude THIS side
+            // writes (two socat bridges on the jail's loopback plus the proxy
+            // environment); the generator is asked for no bridges of its own —
+            // the ones it writes are joined `& ;`, which no shell parses. With no
+            // face the namespace simply has no network (`--unshare-net` is
+            // unconditional).
+            let quoted = match proxy {
+                Some(face) => crate::egress::jail_prelude(face, &quoted),
+                None => quoted,
+            };
             let (wrapped, _) = sandbox_runtime::sandbox::linux::generate_bwrap_command(
                 &quoted,
                 &config,
@@ -1266,11 +1314,14 @@ fn spawn_child(
                 None,
                 0,
                 0,
-                Some("/bin/bash"),
+                // The shell the JAIL runs, resolved on this host: `/bin/bash` does
+                // not exist on NixOS (only `/bin/sh`), and a jail whose shell is a
+                // path that is not there fails before any script does.
+                Some(jail_shell()),
             )
             .map_err(|e| anyhow!("exec/induction carrier: bwrap command: {e}"))?;
             let mut c = Command::new("bash");
-            c.arg("-c").arg(wrapped);
+            c.arg("-c").arg(own_dev_and_proc(&wrapped));
             c
         }
     };

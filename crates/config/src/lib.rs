@@ -119,7 +119,9 @@ impl EffectorConfig {
     /// rather than registering it as a capability.
     ///
     /// Enforced today: `fs_scope` (the jail's write scope), `deny_read`, `cwd`,
-    /// and the wrap itself (`sandbox`).
+    /// the wrap itself (`sandbox`), and `network` as an allowlist — the node runs
+    /// the proxies and hands the jail the sockets to reach them, so a declared
+    /// list is a list the script is confined to.
     ///
     /// There is no command-execution grant to declare, and there never can be
     /// one: a node's whole job is to run a delivered script inside a jail that
@@ -128,19 +130,31 @@ impl EffectorConfig {
     /// (ADR-0001's Update) rather than wired — the honest close for a claim
     /// with no enforcement point is to stop making it.
     ///
-    /// Not wired: any `network` other than `none` (egress allowlists ride the
-    /// sandbox runtime's proxy, which nothing here configures; the jail denies
-    /// egress outright, so a declaration of access would contradict it).
+    /// Refused: `open` (the jail has no way to be open — its network namespace is
+    /// created unshared, so "unrestricted" is a promise this shape cannot keep),
+    /// and an EMPTY allowlist (the filter reads an empty list as "allow
+    /// everything", which is the opposite of what a declaration asks for).
     pub fn validate(&self) -> Result<(), String> {
         match &self.capabilities.network {
             NetworkPolicy::None => Ok(()),
-            other => Err(format!(
-                "capabilities.network = {}: this node wires no enforcement for it — egress \
-                 allowlists ride the sandbox runtime's proxy (not configured here) and the \
-                 jail denies egress outright, so the declaration would contradict the jail \
-                 — declare \"none\", or wire the allowlist path first",
-                serde_json::to_string(other).unwrap_or_else(|_| "<unprintable>".into())
-            )),
+            NetworkPolicy::Allow(domains) if domains.is_empty() => Err(
+                "capabilities.network = allow []: an empty allowlist reads as \"allow \
+                 everything\" to the egress filter — declare the hostnames, or declare \
+                 \"none\""
+                    .into(),
+            ),
+            NetworkPolicy::Allow(_) if !self.sandbox => Err(
+                "capabilities.network = allow [...]: the allowlist is reached through the \
+                 jail's bridges, and `sandbox: false` builds no jail — declare \
+                 \"none\" for a trusted-domain node"
+                    .into(),
+            ),
+            NetworkPolicy::Allow(_) => Ok(()),
+            NetworkPolicy::Open => Err(
+                "capabilities.network = open: this node's network namespace is unshared, so \
+                 an unrestricted namespace is not a shape it can offer — declare an allowlist"
+                    .into(),
+            ),
         }
     }
 }
@@ -168,16 +182,34 @@ mod tests {
 
     #[test]
     fn a_declaration_without_an_enforcement_point_is_refused() {
+        // An allowlist IS enforceable now (the node runs the proxies and the jail
+        // reaches them through its bridges), so the accepted shape is the ordinary
+        // one; what is refused is the shapes nothing can enforce.
         let mut caps = declaring();
         caps.network = NetworkPolicy::Allow(vec!["github.com:443".into()]);
-        let err = config(caps).validate().unwrap_err();
-        assert!(err.contains("network") && err.contains("proxy"), "{err}");
+        config(caps).validate().expect("a declared allowlist is a jail");
 
         let mut caps = declaring();
         caps.network = NetworkPolicy::Open;
+        let err = config(caps).validate().unwrap_err();
+        assert!(err.contains("unshared"), "{err}");
+
+        let mut caps = declaring();
+        caps.network = NetworkPolicy::Allow(Vec::new());
+        let err = config(caps).validate().unwrap_err();
         assert!(
-            config(caps).validate().is_err(),
-            "an unrestricted-egress claim has no enforcement either"
+            err.contains("empty allowlist") || err.contains("allow everything"),
+            "an empty list would read as allow-all: {err}"
+        );
+
+        let mut caps = declaring();
+        caps.network = NetworkPolicy::Allow(vec!["github.com".into()]);
+        let mut trusted = config(caps);
+        trusted.sandbox = false;
+        let err = trusted.validate().unwrap_err();
+        assert!(
+            err.contains("builds no jail"),
+            "an allowlist needs the jail's bridges: {err}"
         );
     }
 
