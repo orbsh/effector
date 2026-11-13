@@ -110,10 +110,25 @@ unenforceable claim is a startup error.**
 - `docs/USAGE.md` / `USAGE.zh-CN.md` document the two new fields and the
   fail-closed rule.
 - **Still open** (named in `docs/PLAN.md`): the proxy path that would make
-  `NetworkPolicy::Allow` enforceable, the seccomp profile, the mechanism that
-  could enforce a `command_exec` grant (or that field's retirement), and the
-  finer form of read denial (the sandbox runtime accepts patterns, this
-  declaration passes strings).
+  `NetworkPolicy::Allow` enforceable, and the finer form of read denial (the
+  sandbox runtime accepts patterns, this declaration passes strings).
+
+## Update (2026-11-09)
+
+**`command_exec` is retired, not wired.** The field named in the "still open"
+list above was a claim with no possible enforcement point: a node's job IS
+running a delivered script inside a jail that admits `exec` by construction, so
+"may execute" is not a capability distinct from existing — there was nothing for
+a policy field to carry, and the startup refusal existed only to keep the trap
+from springing. The field, its `false` default, its refusal arm and its tests are
+gone; a config that still declares it now fails parse-time on an unknown field,
+which is a louder and more accurate failure than a refusal that implies the
+capability might one day exist.
+
+**Seccomp is not this node's switch to offer.** The sandbox runtime's seccomp
+surface takes a BPF profile path and an `apply-seccomp` binary — deployment
+artifacts, not a declaration. Nothing is carried here, and nothing should be
+until those artifacts exist.
 
 ## Related records
 

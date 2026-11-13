@@ -76,7 +76,6 @@ Order of operations at effector startup:
     "fs_scope": ["/home/user/work"],
     "deny_read": ["/home/user/.ssh", "/home/user/.config"],
     "cwd": "/home/user/work",
-    "command_exec": false,
     "network": "none"
   }
 }
@@ -102,11 +101,13 @@ Order of operations at effector startup:
   **`none` is the only value this node can honor today**: egress allowlists ride
   the sandbox runtime's proxy (not wired), and the jail denies egress outright.
   Anything else is a **startup error**, not a silently ignored setting.
-- `capabilities.command_exec` — `true` is likewise a **startup error** today:
-  nothing blocks or grants exec inside the jail. Declare `false`.
-- The rule behind both refusals (ADR-0001): a declared field is a published
-  capability, so it must name its **enforcement point** — a claim this node
-  cannot honor fails the startup instead of being registered as a lie.
+- There is no `command_exec` field: running a delivered script IS this node's job,
+  and the jail admits `exec` by construction, so "may execute" was never a
+  capability distinct from existing. It was retired rather than wired (ADR-0001's
+  Update).
+- The rule behind the remaining refusal (ADR-0001): a declared field is a
+  published capability, so it must name its **enforcement point** — a claim this
+  node cannot honor fails the startup instead of being registered as a lie.
 
 Connection shape: one WS message carries exactly one frame, as JSON text tagged by
 `"type"`. The effector's reader and writer are separate tasks, so the connection is

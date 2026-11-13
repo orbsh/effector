@@ -41,7 +41,6 @@ Effector 启动顺序：
     "fs_scope": ["/home/user/work"],
     "deny_read": ["/home/user/.ssh", "/home/user/.config"],
     "cwd": "/home/user/work",
-    "command_exec": false,
     "network": "none"
   }
 }
@@ -55,8 +54,8 @@ Effector 启动顺序：
 - `capabilities.deny_read` —— 下发脚本**不许读**的路径（你的凭证、shell 配置、别人的目录）。不声明 = 什么都不拒。
 - `capabilities.cwd` —— jail 里的工作目录。不声明 = 系统临时目录（声明面出现之前的行为）。
 - `capabilities.network` —— `"none"`、`{ "allow": ["host:port"] }` 或 `"open"`。**今天只有 `none` 是这台节点兑现得起的**：出网允许清单要骑 sandbox runtime 的代理（未接），而 jail 直接拒绝出网。别的值都是**启动错误**，不是被静默忽略的设置。
-- `capabilities.command_exec` —— `true` 同样是**启动错误**：jail 内部能否 exec，既没有字段拦也没有字段放。声明 `false`。
-- 两条拒绝背后的规矩（ADR-0001）：声明出去的字段就是发布出去的能力，所以它必须指明自己的**执行点**——这台节点兑现不了的声明，在启动时失败，而不是被当作谎言注册出去。
+- 没有 `command_exec` 这个字段了：跑下发的脚本就是这台节点的本职，jail 内部的 `exec` 是构造上就有的，「能不能执行」从来不是一项独立于「节点存在」的能力。它是被**退役**的，不是被接上的（ADR-0001 的 Update）。
+- 剩下那条拒绝背后的规矩（ADR-0001）：声明出去的字段就是发布出去的能力，所以它必须指明自己的**执行点**——这台节点兑现不了的声明，在启动时失败，而不是被当作谎言注册出去。
 
 连接形态：一条 WS 消息恰好一个帧，JSON 文本，以 `"type"` 为内部 tag。Effector 的读端与写端是两个任务，所以连接是**全双工**的——一个调用执行期间帧仍可双向流动（§4.2 依赖这一点）。非文本 WS 消息被忽略。
 
