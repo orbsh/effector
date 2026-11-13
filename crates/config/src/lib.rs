@@ -52,8 +52,6 @@ pub struct CapabilitySurface {
     /// pre-declaration default, kept so an unconfigured node behaves as it
     /// did before this field existed).
     pub cwd: Option<String>,
-    /// Whether delivered scripts may execute host commands.
-    pub command_exec: bool,
     /// Network egress policy for script execution.
     pub network: NetworkPolicy,
     /// Host alias identifying this node's connection: `register` carries it,
@@ -71,7 +69,6 @@ impl Default for CapabilitySurface {
             fs_scope: Vec::new(),
             deny_read: Vec::new(),
             cwd: None,
-            command_exec: false,
             network: NetworkPolicy::None,
             node_alias: String::new(),
         }
@@ -122,20 +119,19 @@ impl EffectorConfig {
     /// rather than registering it as a capability.
     ///
     /// Enforced today: `fs_scope` (the jail's write scope), `deny_read`, `cwd`,
-    /// and the wrap itself (`sandbox`). Not wired: a command-execution GRANT,
-    /// and any `network` other than `none` (egress allowlists ride the sandbox
-    /// runtime's proxy, which nothing here configures; the jail denies egress
-    /// outright, so a declaration of access would contradict it).
+    /// and the wrap itself (`sandbox`).
+    ///
+    /// There is no command-execution grant to declare, and there never can be
+    /// one: a node's whole job is to run a delivered script inside a jail that
+    /// admits `exec` by construction, so "may execute" is not a capability
+    /// distinct from existing. The field that used to claim it was retired
+    /// (ADR-0001's Update) rather than wired — the honest close for a claim
+    /// with no enforcement point is to stop making it.
+    ///
+    /// Not wired: any `network` other than `none` (egress allowlists ride the
+    /// sandbox runtime's proxy, which nothing here configures; the jail denies
+    /// egress outright, so a declaration of access would contradict it).
     pub fn validate(&self) -> Result<(), String> {
-        if self.capabilities.command_exec {
-            return Err(
-                "capabilities.command_exec = true: nothing in this node enforces a \
-                 command-execution grant (no policy field carries it, and the jail admits \
-                 exec inside its namespace regardless) — declare false, or wire the \
-                 enforcement before claiming it"
-                    .into(),
-            );
-        }
         match &self.capabilities.network {
             NetworkPolicy::None => Ok(()),
             other => Err(format!(
@@ -172,11 +168,6 @@ mod tests {
 
     #[test]
     fn a_declaration_without_an_enforcement_point_is_refused() {
-        let mut caps = declaring();
-        caps.command_exec = true;
-        let err = config(caps).validate().unwrap_err();
-        assert!(err.contains("command_exec"), "{err}");
-
         let mut caps = declaring();
         caps.network = NetworkPolicy::Allow(vec!["github.com:443".into()]);
         let err = config(caps).validate().unwrap_err();

@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-effector-config = { path = "../config" }
 # The pipe protocol owns its frame vocabulary and its codec declaration
 # (ADR-0001 §Consequences: effector takes induction-protocol for frames and
 # the codec enum) — `ToolCall.encoding` is that type, not a second copy.
@@ -21,6 +20,9 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 anyhow = "1"
 
 [dev-dependencies]
+# The contract test asserts the node's declaration defaults; the protocol itself
+# names no config type (the ordering claim is that frames do not depend on config).
+effector-config = { path = "../config" }
 
 [lints]
 workspace = true

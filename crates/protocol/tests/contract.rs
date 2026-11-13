@@ -84,6 +84,5 @@ fn store_emit_carries_the_instruction_as_data() {
 fn capability_surface_defaults_deny() {
     let c = effector_config::CapabilitySurface::default();
     assert!(c.fs_scope.is_empty());
-    assert!(!c.command_exec);
     assert!(matches!(c.network, effector_config::NetworkPolicy::None));
 }
