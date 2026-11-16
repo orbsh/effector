@@ -2,7 +2,7 @@
 
 > **语言：** [English](0001-sandbox-declaration.md)（主文档） · [中文](0001-sandbox-declaration.zh-CN.md)
 
-**状态：** Accepted（2026-10-14）。随本记录落地：对 jail 能执行的部分，声明面补齐；
+**状态：** Accepted（2026-10-14）；容纳模型已被 [0003](0003-environment-model.zh-CN.md) 取代（2026-11-16）——按任务起的容器成为边界，本记录的声明面降为意图与审计（`Host` 类保留一份粗粒度授权）。随本记录落地：对 jail 能执行的部分，声明面补齐；
 无法执行的声明在启动时被拒绝。范围于 2026-11-09 写明（第 5 条）：jail 覆盖起进程的载体
 （`exec`、`induction`）——`steel` 与 `python` 在进程内执行。仍开：出网允许清单所需的代理路径、
 seccomp 配置，以及 `command_exec` 的执行机制（或把该字段退役）。

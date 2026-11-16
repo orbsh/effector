@@ -2,7 +2,7 @@
 
 > **Languages:** [English](0001-sandbox-declaration.md) (primary) · [中文](0001-sandbox-declaration.zh-CN.md)
 
-**Status:** Accepted (2026-10-14). Landed with this record: the declaration
+**Status:** Accepted (2026-10-14); the containment model is superseded by [0003](0003-environment-model.md) (2026-11-16), which makes a task-scoped container the boundary and leaves this record's declaration surface as intent and audit (the `Host` class keeps a coarse grant). Landed with this record: the declaration
 surface is completed for what the jail can enforce, and unenforceable claims are
 refused at startup. Scope stated 2026-11-09 (point 5): the jail covers the
 process carriers (`exec`, `induction`) — `steel` and `python` run in-process.
