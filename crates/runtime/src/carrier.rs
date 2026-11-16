@@ -218,7 +218,7 @@ pub fn introspect_encoded(
                 language,
                 source,
                 None,
-                &crate::sandbox::SandboxPolicy::None,
+                &crate::environment::Environment::Host,
                 encoding,
                 |s: &mut dyn crate::carrier::executor::Executor| {
                     s.call("interface_schema", &Value::Null)

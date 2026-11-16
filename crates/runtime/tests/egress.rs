@@ -74,7 +74,7 @@ fn server(body: &'static str) -> u16 {
 /// bwrap refuses `--ro-bind` onto a symlink destination. That failure predates
 /// this test and is about the deny list, not about egress: the test isolates it
 /// so the bridge is what is being measured.
-fn jail_command(face: &effector_runtime::sandbox::ProxyFace, cwd: &std::path::Path, script: &str) -> String {
+fn jail_command(face: &effector_runtime::environment::ProxyFace, cwd: &std::path::Path, script: &str) -> String {
     let config = sandbox_runtime::config::SandboxRuntimeConfig {
         filesystem: sandbox_runtime::config::FilesystemConfig {
             allow_write: Vec::new(),

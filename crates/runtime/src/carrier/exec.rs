@@ -493,12 +493,12 @@ impl InductionExecutor {
         Self::spawn_wrapped(
             argv,
             host,
-            &crate::sandbox::SandboxPolicy::None,
+            &crate::environment::Environment::Host,
             Encoding::Json,
         )
     }
 
-    /// Spawn under the sandbox policy (bwrap wraps argv, §header) with
+    /// Spawn under this call's environment (a jailed one wraps argv, §header) with
     /// the declared frame codec (ADR-0037 §2). The CBOR shape is the
     /// pipes channel only: the fifo adapter exists FOR nushell (nu has
     /// no CBOR codec in its stdlib — the entrance criterion routes it to
@@ -507,7 +507,7 @@ impl InductionExecutor {
     pub fn spawn_wrapped(
         argv: &[String],
         host: Option<&HostBridge>,
-        policy: &crate::sandbox::SandboxPolicy,
+        policy: &crate::environment::Environment,
         encoding: Encoding,
     ) -> Result<Self> {
         // The nushell adapter shape: `["nu", "<author.nu>"]` — the spawn
@@ -576,7 +576,7 @@ impl InductionExecutor {
     fn spawn_fifo(
         author: &Path,
         host: Option<&HostBridge>,
-        policy: &crate::sandbox::SandboxPolicy,
+        policy: &crate::environment::Environment,
     ) -> Result<Self> {
         if !author.exists() {
             anyhow::bail!(
@@ -590,9 +590,9 @@ impl InductionExecutor {
         // (bind-mounted, visible to the child).
         let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = match policy {
-            crate::sandbox::SandboxPolicy::None => std::env::temp_dir()
+            crate::environment::Environment::Host => std::env::temp_dir()
                 .join(format!("effector-induction-nu-{}-{id}", std::process::id())),
-            crate::sandbox::SandboxPolicy::Bubblewrap { cwd, .. } => {
+            crate::environment::Environment::Jailed { cwd, .. } => {
                 Path::new(cwd).join(format!("effector-induction-nu-{}-{id}", std::process::id()))
             }
         };
@@ -894,14 +894,14 @@ impl Drop for InductionExecutor {
 /// this shape bare — no loop needed — or the induction fifo via `CarrierShape::Fifo`).
 pub struct ExecOneShot {
     argv: Vec<String>,
-    policy: crate::sandbox::SandboxPolicy,
+    policy: crate::environment::Environment,
     encoding: Encoding,
 }
 
 impl ExecOneShot {
     pub fn new(
         argv: &[String],
-        policy: &crate::sandbox::SandboxPolicy,
+        policy: &crate::environment::Environment,
         encoding: Encoding,
     ) -> Self {
         Self {
@@ -1021,7 +1021,7 @@ pub struct OneShotExecutor {
 impl OneShotExecutor {
     pub fn new(
         argv: &[String],
-        policy: &crate::sandbox::SandboxPolicy,
+        policy: &crate::environment::Environment,
         encoding: Encoding,
     ) -> Self {
         Self {
@@ -1264,19 +1264,19 @@ fn table_fn<'a>(
 /// name is the protocol's own constant, not a literal kept here.
 fn spawn_child(
     argv: &[String],
-    policy: &crate::sandbox::SandboxPolicy,
+    policy: &crate::environment::Environment,
     encoding: Encoding,
 ) -> Result<(Child, ChildStdin, BufReader<std::process::ChildStdout>)> {
     let (head, rest) = argv
         .split_first()
         .ok_or_else(|| anyhow!("exec/induction carrier: empty spawn spec"))?;
     let mut cmd = match policy {
-        crate::sandbox::SandboxPolicy::None => {
+        crate::environment::Environment::Host => {
             let mut c = Command::new(head);
             c.args(rest);
             c
         }
-        crate::sandbox::SandboxPolicy::Bubblewrap {
+        crate::environment::Environment::Jailed {
             allow_write,
             deny_read,
             cwd,

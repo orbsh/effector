@@ -373,7 +373,7 @@ impl Executors {
         language: &str,
         source: &str,
         host: Option<&HostBridge>,
-        sandbox: &crate::sandbox::SandboxPolicy,
+        sandbox: &crate::environment::Environment,
         f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
     ) -> Result<Value> {
         self.with_executor_encoded(
@@ -401,7 +401,7 @@ impl Executors {
         language: &str,
         source: &str,
         host: Option<&HostBridge>,
-        sandbox: &crate::sandbox::SandboxPolicy,
+        sandbox: &crate::environment::Environment,
         encoding: induction_protocol::Encoding,
         f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
     ) -> Result<Value> {
@@ -424,7 +424,7 @@ impl Executors {
         key: &str,
         language: &str,
         source: &str,
-        sandbox: &crate::sandbox::SandboxPolicy,
+        sandbox: &crate::environment::Environment,
         encoding: induction_protocol::Encoding,
         host: Option<&HostBridge>,
         f: impl FnOnce(&dyn SharedExecutor) -> Result<Value>,
@@ -488,7 +488,7 @@ impl Executors {
         language: &str,
         source: &str,
         host: Option<&HostBridge>,
-        sandbox: &crate::sandbox::SandboxPolicy,
+        sandbox: &crate::environment::Environment,
         encoding: induction_protocol::Encoding,
         capacity: usize,
         f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
@@ -628,7 +628,7 @@ fn spawn_executor(
     language: &str,
     source: &str,
     host: Option<&HostBridge>,
-    sandbox: &crate::sandbox::SandboxPolicy,
+    sandbox: &crate::environment::Environment,
     encoding: induction_protocol::Encoding,
 ) -> Result<Box<dyn Executor>> {
     // `source` is consumed by the wasmtime arm (compile at spawn); the
@@ -647,8 +647,8 @@ fn spawn_executor(
         // over the line protocol. A `nu` head selects the two-fifo adapter
         // shape inside the carrier (the nushell PTY carrier retired — one
         // execution shape per language, the nu form is `induction` with
-        // spec `nu <author.nu>`). Under a sandbox policy the whole spawn is
-        // bwrap-wrapped (the mount policy runs before exec).
+        // spec `nu <author.nu>`). Under a jailed environment the whole spawn
+        // is bwrap-wrapped (the mount policy runs before exec).
         "induction" => {
             let argv: Vec<String> = shellish_split(source);
             Box::new(super::exec::InductionExecutor::spawn_wrapped(

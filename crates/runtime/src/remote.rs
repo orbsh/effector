@@ -24,7 +24,7 @@ async fn serve_connection(
     config: &EffectorConfig,
     executors: &Executors,
     code_cache: &Arc<CodeCache>,
-    policy: &crate::sandbox::SandboxPolicy,
+    policy: &crate::environment::Environment,
 ) -> Result<()> {
     let pending_host: Arc<PendingHost> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -175,7 +175,7 @@ async fn execute_call(
     pending_host: &Arc<PendingHost>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
-    policy: &crate::sandbox::SandboxPolicy,
+    policy: &crate::environment::Environment,
 ) -> Result<serde_json::Value, String> {
     execute_call_inner(
         config,
@@ -200,7 +200,7 @@ async fn execute_call_inner(
     pending_host: &Arc<PendingHost>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
-    policy: &crate::sandbox::SandboxPolicy,
+    policy: &crate::environment::Environment,
 ) -> Result<serde_json::Value> {
     // Content-addressed code (ADR-0027): the frame carries a reference,
     // bytes ride the data path. Resolve = per-hash cache hit, else fetch +
@@ -583,9 +583,9 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
         _ => None,
     };
     let policy = if config.sandbox {
-        sandbox_policy_for(&config, egress.as_ref().map(|e| e.face().clone()))
+        environment_for(&config, egress.as_ref().map(|e| e.face().clone()))
     } else {
-        crate::sandbox::SandboxPolicy::None
+        crate::environment::Environment::Host
     };
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
@@ -610,13 +610,13 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
 /// the machine is the party that knows what it can expose, so the machine
 /// states it — nothing here is derived from a control-plane frame, and no
 /// field is left hardcoded while a declaration for it exists.
-fn sandbox_policy_for(
+fn environment_for(
     config: &EffectorConfig,
-    proxy: Option<crate::sandbox::ProxyFace>,
-) -> crate::sandbox::SandboxPolicy {
-    use crate::sandbox::SandboxPolicy;
+    proxy: Option<crate::environment::ProxyFace>,
+) -> crate::environment::Environment {
+    use crate::environment::Environment;
     use effector_config::NetworkPolicy;
-    SandboxPolicy::Bubblewrap {
+    Environment::Jailed {
         // Write scope: everything else is read-only.
         allow_write: config.capabilities.fs_scope.clone(),
         // The read-side declaration (credentials, shell configs, …).
@@ -662,10 +662,10 @@ mod tests {
         Vec<String>,
         String,
         Vec<String>,
-        Option<crate::sandbox::ProxyFace>,
+        Option<crate::environment::ProxyFace>,
     ) {
-        match sandbox_policy_for(&config(caps), None) {
-            crate::sandbox::SandboxPolicy::Bubblewrap {
+        match environment_for(&config(caps), None) {
+            crate::environment::Environment::Jailed {
                 allow_write,
                 deny_read,
                 cwd,
@@ -736,14 +736,14 @@ mod tests {
             network: NetworkPolicy::Allow(vec!["github.com:443".into()]),
             ..Default::default()
         };
-        let face = crate::sandbox::ProxyFace {
+        let face = crate::environment::ProxyFace {
             http_socket: "/home/u/.cache/effector/egress-1/http.sock".into(),
             socks_socket: "/home/u/.cache/effector/egress-1/socks.sock".into(),
             http_port: crate::egress::JAIL_HTTP_PORT,
             socks_port: crate::egress::JAIL_SOCKS_PORT,
         };
-        match sandbox_policy_for(&config(caps), Some(face.clone())) {
-            crate::sandbox::SandboxPolicy::Bubblewrap { proxy, .. } => {
+        match environment_for(&config(caps), Some(face.clone())) {
+            crate::environment::Environment::Jailed { proxy, .. } => {
                 assert_eq!(proxy, Some(face), "the face rides the policy verbatim");
             }
             other => panic!("a wrapped deployment builds a bwrap policy, got {other:?}"),

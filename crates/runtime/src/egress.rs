@@ -20,7 +20,7 @@
 //! hostname, so a declared `host:port` contributes its host and the port is the
 //! client's business.
 
-use crate::sandbox::ProxyFace;
+use crate::environment::ProxyFace;
 use sandbox_runtime::config::NetworkConfig;
 use sandbox_runtime::proxy::{DomainFilter, HttpProxy, Socks5Proxy};
 use std::path::{Path, PathBuf};
