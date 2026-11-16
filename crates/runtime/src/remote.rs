@@ -56,14 +56,25 @@ async fn serve_connection(
     sink.send(Message::Text(serde_json::to_string(&register)?))
         .await?;
 
-    // Await acceptance before serving calls.
-    match stream.next().await {
-        Some(Ok(Message::Text(text))) => match serde_json::from_str::<Frame>(&text)? {
-            Frame::Registered => {}
-            other => anyhow::bail!("expected Registered, got {other:?}"),
-        },
-        Some(Err(e)) => return Err(e.into()),
-        _ => anyhow::bail!("control plane closed before registration"),
+    // Await acceptance before serving calls — but not forever. A plane that accepts the socket
+    // and then says nothing would leave a container node alive with nothing to do, which is the
+    // container the lease exists to end; the bound is the lease's first grace, so a host node
+    // (no lease) waits exactly as long as it always did.
+    let acceptance = async {
+        match stream.next().await {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<Frame>(&text)? {
+                Frame::Registered => Ok(()),
+                other => anyhow::bail!("expected Registered, got {other:?}"),
+            },
+            Some(Err(e)) => Err(anyhow::Error::from(e)),
+            _ => anyhow::bail!("control plane closed before registration"),
+        }
+    };
+    match config.lease.first_grace() {
+        Some(grace) => tokio::time::timeout(grace, acceptance)
+            .await
+            .map_err(|_| anyhow::anyhow!("no registered frame within {grace:?}"))??,
+        None => acceptance.await?,
     }
 
     // Bidirectional loop: a writer task drains an mpsc into the sink; the
@@ -628,9 +639,17 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
             }
             // A node that declared `exit_on_disconnect` has no work and no way to
             // be given any, so it leaves instead of reconnecting (a container node).
-            Ok(Closing::Remote) | Err(_) if config.lease.exit_on_disconnect => {
+            // Leaving is not the same as succeeding: a clean close is an Ok, and a dead
+            // link or an unanswered handshake keeps its ERROR — the launcher's exit code
+            // is the only thing an operator will look at, and it must not read "fine"
+            // for a node that never registered.
+            Ok(Closing::Remote) if config.lease.exit_on_disconnect => {
                 eprintln!("lease: the connection ended; this node does not reconnect");
                 return Ok(());
+            }
+            Err(e) if config.lease.exit_on_disconnect => {
+                eprintln!("lease: leaving instead of reconnecting: {e:#}");
+                return Err(e);
             }
             Ok(Closing::Remote) => anyhow::bail!("control plane closed the connection cleanly"),
             Err(e) => eprintln!("connection lost: {e:#}; reconnecting in {:?}", backoff),

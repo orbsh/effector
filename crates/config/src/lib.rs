@@ -133,6 +133,13 @@ impl Default for LeaseConfig {
 }
 
 impl LeaseConfig {
+    /// The first grace, before any call has run. It bounds more than idleness: a plane that
+    /// accepts the socket and never says `registered` would otherwise leave a container node
+    /// alive with nothing to do, which is the container the lease exists to end.
+    pub fn first_grace(&self) -> Option<std::time::Duration> {
+        self.grace(0)
+    }
+
     /// The grace after `reuses` calls have run on this node: base, doubled per use,
     /// capped. `None` when the lease never expires.
     pub fn grace(&self, reuses: u32) -> Option<std::time::Duration> {

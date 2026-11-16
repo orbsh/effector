@@ -423,3 +423,57 @@ async fn a_leased_node_leaves_when_the_work_stops() {
         "a leased node must not reconnect — that is the container that never ends"
     );
 }
+
+/// A plane that accepts the socket and then says nothing must not leave a leased node alive:
+/// the first grace bounds the wait for `registered` too. Without it, the container form hangs
+/// with no work and no way to be given any — the exact shape the lease exists to end.
+#[tokio::test]
+async fn a_plane_that_accepts_and_goes_silent_ends_a_leased_node() {
+    use std::time::{Duration, Instant};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let config = EffectorConfig {
+        control_plane_url: format!("ws://127.0.0.1:{port}"),
+        sandbox: false,
+        token: TOKEN.into(),
+        capabilities: CapabilitySurface {
+            node_alias: "silent-plane-node".into(),
+            carriers: vec!["steel".into()],
+            ..Default::default()
+        },
+        lease: effector_config::LeaseConfig {
+            idle_secs: 1,
+            max_idle_secs: 1,
+            exit_on_disconnect: true,
+        },
+    };
+
+    let started = Instant::now();
+    let node = tokio::spawn(remote::run(config));
+    let (stream, _) = listener.accept().await.unwrap();
+    let plane = tokio::spawn(async move {
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut _sink, mut stream) = ws.split();
+        // Read the declaration, answer nothing at all, hold the socket.
+        let _declaration = stream.next().await.unwrap().unwrap();
+        while stream.next().await.is_some() {}
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(10), node)
+        .await
+        .expect("the first grace must bound the handshake, not hang it")
+        .expect("the node task must not panic");
+    let elapsed = started.elapsed();
+    let err = outcome.expect_err("an unanswered handshake is not a success");
+    assert!(
+        err.to_string().contains("registered"),
+        "the error names what never arrived: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "it waited far past its first grace ({elapsed:?})"
+    );
+    drop(plane);
+}
