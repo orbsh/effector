@@ -184,8 +184,15 @@ async fn serve_connection(
                             // publishing anyway would be the no-op the contract forbids.
                             continue;
                         }
-                        match request_material(&tx, &pending_material, &call.call_id, &decl.kind, decl.seq)
-                            .await
+                        match request_material(
+                            &tx,
+                            &pending_material,
+                            &call.call_id,
+                            &decl.kind,
+                            decl.seq,
+                            true,
+                        )
+                        .await
                         {
                             Ok(minted) => match crate::resource::Spec::from_plane(
                                 &decl.kind,
@@ -259,13 +266,29 @@ async fn serve_connection(
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&key);
                 if let Some(waiter) = waiter {
-                    let _ = waiter.send(Minted {
+                    let _ = waiter.send(Ok(Minted {
                         url,
                         credential,
                         transport,
                         mode,
                         at,
-                    });
+                    }));
+                }
+            }
+            // The plane could not mint: the wait ends with a reason, not a deadline.
+            Frame::MaterialFailed {
+                call_id,
+                kind,
+                seq,
+                reason,
+            } => {
+                let key = material_key(&call_id, &kind, seq);
+                let waiter = pending_material
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&key);
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(Err(anyhow::anyhow!("{reason}")));
                 }
             }
             Frame::Host(HostFrame::Result(hr)) => {
@@ -301,8 +324,12 @@ struct Minted {
     at: Option<String>,
 }
 
-type PendingMaterial =
-    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Minted>>>;
+type PendingMaterial = std::sync::Mutex<
+    std::collections::HashMap<
+        String,
+        tokio::sync::oneshot::Sender<anyhow::Result<Minted>>,
+    >,
+>;
 
 fn material_key(call_id: &str, kind: &str, seq: u64) -> String {
     format!("{call_id}\u{1f}{kind}\u{1f}{seq}")
@@ -322,6 +349,7 @@ async fn request_material(
     call_id: &str,
     kind: &str,
     seq: u64,
+    write: bool,
 ) -> anyhow::Result<Minted> {
     let key = material_key(call_id, kind, seq);
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -333,6 +361,7 @@ async fn request_material(
         call_id: call_id.to_string(),
         kind: kind.to_string(),
         seq,
+        write,
     });
     if sent.is_err() {
         pending
@@ -342,7 +371,7 @@ async fn request_material(
         anyhow::bail!("resource `{kind}/{seq}`: the connection is gone");
     }
     match receiver.await {
-        Ok(material) => Ok(material),
+        Ok(material) => material,
         Err(_) => anyhow::bail!("resource `{kind}/{seq}`: the control plane never answered"),
     }
 }
@@ -408,7 +437,8 @@ async fn execute_call_inner(
     let resources_root = resources_root();
     for decl in &call.resources {
         let minted =
-            request_material(tx, pending_material, &call.call_id, &decl.kind, decl.seq).await?;
+            request_material(tx, pending_material, &call.call_id, &decl.kind, decl.seq, false)
+                .await?;
         let spec = crate::resource::Spec::from_plane(
             &decl.kind,
             decl.seq,

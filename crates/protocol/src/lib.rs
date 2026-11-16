@@ -221,7 +221,15 @@ pub enum Frame {
     /// Effector to control plane: this call needs material for one declared resource
     /// (`ensure` before the code runs, or a write handle for `sync` after it). Addressed by
     /// (`call_id`, `name`): the same name twice in one call is the same resource.
-    MaterialRequest { call_id: String, kind: String, seq: u64 },
+    MaterialRequest {
+        call_id: String,
+        kind: String,
+        seq: u64,
+        /// Which half of the contract this is: `false` is the read before the code runs, `true` the
+        /// write after it. The plane mints differently for each — a read credential that cannot
+        /// publish is the point.
+        write: bool,
+    },
     /// Control plane to effector: the material for that request. It is minted per transfer and
     /// lives in the node's memory for it — never in a log, never on disk, never in the guest's
     /// reach (ADR-0003 §8).
@@ -240,6 +248,15 @@ pub enum Frame {
         /// The version to check out, when the plane names one.
         #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
         at: Option<String>,
+    },
+    /// Control plane to effector: no material could be minted, and why. A REFUSAL IS A VALUE —
+    /// the node turns it into a failed call rather than waiting out a deadline for an answer that
+    /// is never coming.
+    MaterialFailed {
+        call_id: String,
+        kind: String,
+        seq: u64,
+        reason: String,
     },
     /// Effector to control plane: a resource was published, and this is the version it produced
     /// (git: `<branch>@<sha>`). The control plane holds the pointer to the current version, so

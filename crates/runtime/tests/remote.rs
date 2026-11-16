@@ -589,7 +589,8 @@ async fn a_declared_resource_is_ensured_then_published_with_its_reference() {
                 break;
             };
             match serde_json::from_str::<Frame>(&text).unwrap() {
-                Frame::MaterialRequest { call_id, kind, seq } => {
+                Frame::MaterialRequest { call_id, kind, seq, write } => {
+                    assert_eq!(write, materials > 0, "the read first, the write second");
                     materials += 1;
                     sink.send(Message::Text(
                         serde_json::to_string(&Frame::Material {
