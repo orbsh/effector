@@ -158,12 +158,12 @@ pub struct EffectorConfig {
     /// embedded deployments (aura) pass None instead.
     #[serde(default = "default_true")]
     pub sandbox: bool,
-    /// Where this node's ed25519 PRIVATE key lives, written by `effector keygen` (0600).
-    /// A path, never a value from the environment: an env-carried secret is readable by every
-    /// process of the user and ends up in dumps and `/proc/<pid>/environ`; a file is what the
-    /// OS can guard. The key signs the control plane's challenge — it is not a shared token,
-    /// so the control plane never holds a copy (effector ADR-0002).
-    pub private_key_path: String,
+    /// The token the control plane minted for this node's alias (ADR-0003). It rides the DIAL
+    /// — a query parameter on the mount URL — and is checked once, when the connection is
+    /// accepted; everything after that rides the connection, which is the authorization. A
+    /// node never holds a long-lived identity private key any more: a token is revocable by
+    /// re-minting, and a node that is a container is given its token at launch.
+    pub token: String,
     /// When this node leaves (ADR-0003). Defaults to never: a host node.
     #[serde(default)]
     pub lease: LeaseConfig,
@@ -194,6 +194,15 @@ impl EffectorConfig {
     /// and an EMPTY allowlist (the filter reads an empty list as "allow
     /// everything", which is the opposite of what a declaration asks for).
     pub fn validate(&self) -> Result<(), String> {
+        // A node without a token cannot be let in, and finding that out at the first dial
+        // (after spawning, after the container started) is a worse time than at load.
+        if self.token.trim().is_empty() {
+            return Err(
+                "token: empty — a node's authority is the token it dialed with; mint one on \
+                 the control plane (`/admin/nodes`) and pass it in the config or as `--token`"
+                    .into(),
+            );
+        }
         match &self.capabilities.network {
             NetworkPolicy::None => Ok(()),
             NetworkPolicy::Allow(domains) if domains.is_empty() => Err(
@@ -226,7 +235,7 @@ mod tests {
         EffectorConfig {
             control_plane_url: "ws://127.0.0.1:8787".into(),
             sandbox: true,
-            private_key_path: "/dev/null/key".into(),
+            token: "test-token".into(),
             capabilities,
             lease: LeaseConfig::default(),
         }

@@ -16,34 +16,34 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-/// A keypair on disk for one test node. `run` refuses to start without a readable key, which
-/// is the point: the key is a startup fact, not a per-call value.
-fn node_key(tag: &str) -> String {
-    let mut path = std::env::temp_dir();
-    path.push(format!("effector-test-{tag}-{}.key", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    effector_protocol::write_keypair(&path).unwrap();
-    path.to_string_lossy().into_owned()
-}
+/// The token this test node dials with. It rides the URL, and the fake plane asserts it is
+/// there — a token has to arrive by the same path the real control plane reads.
+const TOKEN: &str = "test-token";
 
 async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     let (stream, _) = listener.accept().await.unwrap();
-    let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-    let (mut sink, mut stream) = ws.split();
-
-    // The control plane speaks first, always (one wire shape in either trust posture).
-    let nonce = effector_protocol::nonce();
-    sink.send(Message::Text(
-        serde_json::to_string(&Frame::Challenge {
-            nonce: nonce.clone(),
-        })
-        .unwrap(),
-    ))
+    // The token arrives on the DIAL, so the check is here — before the socket is served, which
+    // is where the real plane does it too (ADR-0003: the connection is the authority).
+    // The `Err` arm is the handshake API's own type (a full HTTP response), so its size is not
+    // ours to choose.
+    #[allow(clippy::result_large_err)]
+    let ws = tokio_tungstenite::accept_hdr_async(
+        stream,
+        |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+         resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            let query = req.uri().query().unwrap_or_default();
+            assert!(
+                query.split('&').any(|kv| kv == format!("token={TOKEN}")),
+                "the dial carries the node's token, got query `{query}`"
+            );
+            Ok(resp)
+        },
+    )
     .await
     .unwrap();
+    let (mut sink, mut stream) = ws.split();
 
-    // Registration: the node signs the nonce with the key it claims, and the signature is
-    // checked with the SAME function the real host uses.
+    // Then one declaration: what this node is, never what it knows.
     let Message::Text(text) = stream.next().await.unwrap().unwrap() else {
         panic!("expected text frame");
     };
@@ -51,13 +51,9 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
         Frame::Register {
             node_alias,
             carriers,
-            public_key,
-            signature,
         } => {
             assert_eq!(node_alias, "test-node");
             assert!(carriers.contains(&"steel".to_string()));
-            effector_protocol::verify_register(&public_key, &nonce, &node_alias, &signature)
-                .expect("the node signs the challenge with the key it claims");
         }
         other => panic!("expected Register, got {other:?}"),
     }
@@ -127,7 +123,7 @@ async fn outbound_registration_and_task_downlink() {
     let config = EffectorConfig {
         control_plane_url: format!("ws://127.0.0.1:{port}"),
         sandbox: true,
-        private_key_path: node_key("main"),
+        token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "test-node".into(),
@@ -195,14 +191,6 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
         let (mut sink, mut stream) = ws.split();
 
-        sink.send(Message::Text(
-            serde_json::to_string(&Frame::Challenge {
-                nonce: effector_protocol::nonce(),
-            })
-            .unwrap(),
-        ))
-        .await
-        .unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         let f: Frame = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert!(matches!(f, Frame::Register { .. }));
@@ -316,7 +304,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
     let config = EffectorConfig {
         control_plane_url: format!("ws://127.0.0.1:{ws_port}"),
         sandbox: true,
-        private_key_path: node_key("link"),
+        token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "link-node".into(),
@@ -344,8 +332,10 @@ async fn an_unenforceable_declaration_fails_before_dialing() {
         // error (connection refused), so the named config error is the proof
         // that the node never dialed at all.
         control_plane_url: "ws://127.0.0.1:1".into(),
-        sandbox: true,
-        private_key_path: node_key("refusal"),
+        // No jail, so the allowlist has no enforcement point — the declaration is refused at
+        // load, which is the startup-fact rule (ADR-0001) and why nothing dials.
+        sandbox: false,
+        token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "refusing-node".into(),
@@ -356,7 +346,7 @@ async fn an_unenforceable_declaration_fails_before_dialing() {
     };
     let err = remote::run(config).await.unwrap_err().to_string();
     assert!(
-        err.contains("network") && err.contains("proxy"),
+        err.contains("network") && err.contains("jail"),
         "the refusal names the missing enforcement point: {err}"
     );
 }

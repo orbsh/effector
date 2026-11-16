@@ -1,111 +1,90 @@
-//! The effector binary: `keygen`, `register`, or (no subcommand) load config and serve.
+//! The effector binary: load config and serve, or one handshake and exit.
 //!
 //! Subcommands are CLI form only — the library keeps the one entry point it had, so an
 //! embedded deployment (aura's local mode) is unaffected by how a node operator drives this
-//! binary. A config path as the first argument still works; `keygen` and `register` are
-//! reserved words and are documented as such.
+//! binary. `--control-plane` and `--token` exist for the container form (ADR-0003), where the
+//! launcher supplies where to dial and the authority to dial with, and nothing else.
 
 use effector_config::EffectorConfig;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("keygen") => keygen(args.collect()),
-        Some("register") => register(args.collect()),
-        Some("-h" | "--help" | "help") => {
-            print!("{USAGE}");
-            Ok(())
+    let mut config_path: Option<String> = None;
+    let mut control_plane: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut once = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" | "help" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            // `effector register [config]`: one handshake, print the verdict, exit.
+            "register" if config_path.is_none() && !once => once = true,
+            "--control-plane" => {
+                control_plane = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--control-plane needs a ws:// url"))?,
+                );
+            }
+            "--token" => {
+                token = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--token needs a value"))?,
+                );
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("unknown argument `{other}` (see `effector --help`)")
+            }
+            path if config_path.is_none() => config_path = Some(path.to_string()),
+            other => anyhow::bail!("unexpected argument `{other}`"),
         }
-        other => serve(other),
+    }
+
+    let path = config_path.unwrap_or_else(|| "effector.json".into());
+    let mut config = load(&path)?;
+    // Command line beats the file: a launcher hands a node its dial target and its token, and
+    // the file carries the shape (alias, carriers) the image ships with.
+    if let Some(url) = control_plane {
+        config.control_plane_url = url;
+    }
+    if let Some(t) = token {
+        config.token = t;
+    }
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    if once {
+        runtime.block_on(async {
+            match effector_runtime::remote::register_once(&config).await {
+                Ok(()) => {
+                    println!(
+                        "accepted: the control plane let this node in as `{}`",
+                        config.capabilities.node_alias
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(anyhow::anyhow!("{e:#}")),
+            }
+        })
+    } else {
+        runtime.block_on(effector_runtime::remote::run(config))
     }
 }
 
 const USAGE: &str = "\
 effector — a node's dial-in agent
 
-  effector [config.json]              load the config and serve (default: ./effector.json)
-  effector keygen [--out <file>]      make an ed25519 keypair; prints the public key
-  effector register <config.json>     one handshake against the control plane, then exit
+  effector [config.json]                 load the config and serve (default: ./effector.json)
+  effector register [config.json]        one handshake against the control plane, then exit
+  effector [config.json] --control-plane <ws://url> --token <token>
+                                         launcher overrides (the container form, ADR-0003)
 
-The control plane challenges every connection and verifies the signature against the public
-key IT has registered for the alias; `register` is therefore how an operator learns what
-verdict their node gets without leaving it running.
+A node's authority is the TOKEN it dials with. The control plane mints one per alias, the node
+attaches it to the mount URL, and the connection that results authorizes every call that
+follows — there is no challenge, no keypair and no `keygen`. Revoking a node means minting a
+new token; a node that is a container is handed its token at launch and keeps nothing else.
 ";
-
-/// `keygen`: a private key (0600, never replaced) and the public key to register.
-fn keygen(args: Vec<String>) -> anyhow::Result<()> {
-    let mut out = None;
-    let mut it = args.into_iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--out" | "-o" => {
-                out = Some(
-                    it.next()
-                        .ok_or_else(|| anyhow::anyhow!("--out needs a path"))?,
-                )
-            }
-            other => anyhow::bail!("keygen: unknown argument `{other}`"),
-        }
-    }
-    // The default lives under XDG_CONFIG_HOME because a key is per-user state, not per-cwd
-    // state: a key next to whatever directory the operator happened to be in is a key nobody
-    // finds again.
-    let path = match out {
-        Some(p) => std::path::PathBuf::from(p),
-        None => {
-            let base = std::env::var_os("XDG_CONFIG_HOME")
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
-                })
-                .ok_or_else(|| anyhow::anyhow!("no HOME and no XDG_CONFIG_HOME: pass --out"))?;
-            base.join("effector").join("node.key")
-        }
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let public_key = effector_protocol::write_keypair(&path)
-        .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
-    println!("private key  {}", path.display());
-    println!("public key   {public_key}");
-    println!("next         register the public key for this node's alias, then `effector register <config>`");
-    Ok(())
-}
-
-/// `register`: one connection, one verdict, exit. Registration is a network FACT (the control
-/// plane's registry) — serving is runtime state, and a restart re-earns trust per connection.
-fn register(args: Vec<String>) -> anyhow::Result<()> {
-    let path = args
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| "effector.json".into());
-    let config = load(&path)?;
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
-        match effector_runtime::remote::register_once(&config).await {
-            Ok(()) => {
-                println!(
-                    "registered: the control plane accepted this node's key for `{}`",
-                    config.capabilities.node_alias
-                );
-                Ok(())
-            }
-            Err(e) => Err(anyhow::anyhow!("{e:#}")),
-        }
-    })
-}
-
-fn serve(path: Option<&str>) -> anyhow::Result<()> {
-    // Single-node simplicity: no discovery layer, the operator points the effector at its
-    // control plane.
-    let path = path
-        .map(str::to_string)
-        .unwrap_or_else(|| "effector.json".into());
-    let config = load(&path)?;
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(effector_runtime::remote::run(config))
-}
 
 fn load(path: &str) -> anyhow::Result<EffectorConfig> {
     let raw = std::fs::read_to_string(path)?;
