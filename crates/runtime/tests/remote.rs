@@ -570,12 +570,10 @@ async fn a_declared_resource_is_ensured_then_published_with_its_reference() {
                     url: format!("http://127.0.0.1:{http_port}/code"),
                     sha256: sha.clone(),
                 },
+                // The task names the resource; the PLANE says how it travels and where it lives.
                 resources: vec![ResourceDecl {
-                    name: "notes".into(),
-                    transport: "git".into(),
-                    source: bare.to_string_lossy().into_owned(),
-                    at: Some("main".into()),
-                    mode: "rw".into(),
+                    kind: "git".into(),
+                    seq: 7,
                 }],
             }))
             .unwrap(),
@@ -591,14 +589,18 @@ async fn a_declared_resource_is_ensured_then_published_with_its_reference() {
                 break;
             };
             match serde_json::from_str::<Frame>(&text).unwrap() {
-                Frame::MaterialRequest { call_id, name } => {
+                Frame::MaterialRequest { call_id, kind, seq } => {
                     materials += 1;
                     sink.send(Message::Text(
                         serde_json::to_string(&Frame::Material {
                             call_id,
-                            name,
+                            kind,
+                            seq,
                             url: bare.to_string_lossy().into_owned(),
                             credential: None,
+                            transport: "git".into(),
+                            mode: "rw".into(),
+                            at: Some("main".into()),
                         })
                         .unwrap(),
                     ))
@@ -623,7 +625,7 @@ async fn a_declared_resource_is_ensured_then_published_with_its_reference() {
     assert_eq!(materials, 2, "one material for the read, one for the write");
     let reference = published.expect("a Synced frame");
     assert!(reference.starts_with("main@"), "{reference}");
-    // The clone really happened, at the path the resource name fixes.
-    assert!(resources.join("notes").join("notes.md").exists());
+    // The clone really happened, at the path the resource identity fixes.
+    assert!(resources.join("git").join("7").join("notes.md").exists());
     node.abort();
 }

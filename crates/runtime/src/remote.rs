@@ -43,6 +43,8 @@ async fn serve_connection(
     // Material answers, routed by (call_id, resource name).
     let pending_material: Arc<PendingMaterial> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    // What the plane said each declared resource's mode is, for the publish step after the call.
+    let modes: Arc<Modes> = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let url = effector_protocol::dial_url(base_url, token);
     let (ws, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -140,6 +142,7 @@ async fn serve_connection(
                 let tx = tx.clone();
                 let pending_host = pending_host.clone();
                 let pending_material = pending_material.clone();
+                let modes = modes.clone();
                 let config = config.clone();
                 let executors = executors.clone();
                 let code_cache = code_cache.clone();
@@ -155,6 +158,7 @@ async fn serve_connection(
                         &tx,
                         &pending_host,
                         &pending_material,
+                        &modes,
                         &code_cache,
                         &control,
                         &policy,
@@ -167,28 +171,49 @@ async fn serve_connection(
                     // Then the `rw` resources go out, at completion (ADR-0003 §7). Each one asks
                     // for its own material: material is per transfer, so the write has a
                     // different one than the read that preceded it.
-                    for decl in call.resources.iter().filter(|d| d.mode == "rw") {
-                        match spec_from(decl) {
-                            Ok((spec, _)) => {
-                                match request_material(&tx, &pending_material, &call.call_id, &decl.name)
-                                    .await
-                                {
-                                    Ok((url, credential)) => {
-                                        let material = crate::resource::Material { url, credential };
-                                        match crate::resource::sync(&spec, &material, &resources_root()) {
-                                            Ok(reference) => {
-                                                let _ = tx.send(Frame::Synced {
-                                                    call_id: call.call_id.clone(),
-                                                    name: decl.name.clone(),
-                                                    reference,
-                                                });
-                                            }
-                                            Err(e) => eprintln!("resource `{}`: sync failed: {e:#}", decl.name),
+                    for decl in &call.resources {
+                        let identity = format!("{}/{}", decl.kind, decl.seq);
+                        let writable = modes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get(&identity)
+                            .copied()
+                            .unwrap_or(crate::resource::Mode::ReadOnly);
+                        if writable != crate::resource::Mode::ReadWrite {
+                            // Nothing to publish: the plane never offered a write half, and
+                            // publishing anyway would be the no-op the contract forbids.
+                            continue;
+                        }
+                        match request_material(&tx, &pending_material, &call.call_id, &decl.kind, decl.seq)
+                            .await
+                        {
+                            Ok(minted) => match crate::resource::Spec::from_plane(
+                                &decl.kind,
+                                decl.seq,
+                                &minted.transport,
+                                &minted.mode,
+                                minted.at.as_deref(),
+                            ) {
+                                Ok(spec) => {
+                                    let material = crate::resource::Material {
+                                        url: minted.url,
+                                        credential: minted.credential,
+                                    };
+                                    let root = resources_root();
+                                    match crate::resource::sync(&spec, &material, &root) {
+                                        Ok(reference) => {
+                                            let _ = tx.send(Frame::Synced {
+                                                call_id: call.call_id.clone(),
+                                                kind: decl.kind.clone(),
+                                                seq: decl.seq,
+                                                reference,
+                                            });
                                         }
+                                        Err(e) => eprintln!("resource `{identity}`: sync failed: {e:#}"),
                                     }
-                                    Err(e) => eprintln!("{e:#}"),
                                 }
-                            }
+                                Err(e) => eprintln!("resource `{identity}`: {e:#}"),
+                            },
                             Err(e) => eprintln!("{e:#}"),
                         }
                     }
@@ -217,14 +242,30 @@ async fn serve_connection(
                 let _ = tx.send(Frame::Interrupted { call_id, landed });
             }
             // The plane's answer to a `MaterialRequest`: hand it to the call that is waiting.
-            Frame::Material { call_id, name, url, credential } => {
-                let key = material_key(&call_id, &name);
+            Frame::Material {
+                call_id,
+                kind,
+                seq,
+                url,
+                credential,
+                transport,
+                mode,
+                at,
+                ..
+            } => {
+                let key = material_key(&call_id, &kind, seq);
                 let waiter = pending_material
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&key);
                 if let Some(waiter) = waiter {
-                    let _ = waiter.send((url, credential));
+                    let _ = waiter.send(Minted {
+                        url,
+                        credential,
+                        transport,
+                        mode,
+                        at,
+                    });
                 }
             }
             Frame::Host(HostFrame::Result(hr)) => {
@@ -251,12 +292,26 @@ type PendingHost = std::sync::Mutex<
 
 /// Material requests in flight: `(call_id, name)` → where the answer goes. Exactly one answer
 /// per request (the control plane mints per transfer), so an entry dies with its request.
-type PendingMaterial =
-    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<(String, Option<String>)>>>;
-
-fn material_key(call_id: &str, name: &str) -> String {
-    format!("{call_id}\u{1f}{name}")
+/// What the plane minted for one transfer: where to reach the store, how, and on what terms.
+struct Minted {
+    url: String,
+    credential: Option<String>,
+    transport: String,
+    mode: String,
+    at: Option<String>,
 }
+
+type PendingMaterial =
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Minted>>>;
+
+fn material_key(call_id: &str, kind: &str, seq: u64) -> String {
+    format!("{call_id}\u{1f}{kind}\u{1f}{seq}")
+}
+
+/// Which resources the plane said were writable. The declaration does not carry a mode (the row
+/// decides, not the task), so the node records what it was told, for the publish step after the
+/// call.
+type Modes = std::sync::Mutex<std::collections::HashMap<String, crate::resource::Mode>>;
 
 /// Ask the control plane for one transfer's material and wait for it. The node never invents a
 /// credential: it names the resource, and the plane answers with where to reach the store and how
@@ -265,9 +320,10 @@ async fn request_material(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending: &Arc<PendingMaterial>,
     call_id: &str,
-    name: &str,
-) -> anyhow::Result<(String, Option<String>)> {
-    let key = material_key(call_id, name);
+    kind: &str,
+    seq: u64,
+) -> anyhow::Result<Minted> {
+    let key = material_key(call_id, kind, seq);
     let (sender, receiver) = tokio::sync::oneshot::channel();
     pending
         .lock()
@@ -275,51 +331,20 @@ async fn request_material(
         .insert(key.clone(), sender);
     let sent = tx.send(Frame::MaterialRequest {
         call_id: call_id.to_string(),
-        name: name.to_string(),
+        kind: kind.to_string(),
+        seq,
     });
     if sent.is_err() {
         pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
-        anyhow::bail!("resource `{name}`: the connection is gone");
+        anyhow::bail!("resource `{kind}/{seq}`: the connection is gone");
     }
     match receiver.await {
         Ok(material) => Ok(material),
-        Err(_) => anyhow::bail!("resource `{name}`: the control plane never answered"),
+        Err(_) => anyhow::bail!("resource `{kind}/{seq}`: the control plane never answered"),
     }
-}
-
-/// The declaration → the node's own vocabulary. An unknown transport or mode is REFUSED, never
-/// ignored: a task that asked for `snapshot` must hear that this node cannot perform it, rather
-/// than run with its data missing.
-fn spec_from(decl: &effector_protocol::ResourceDecl) -> anyhow::Result<(crate::resource::Spec, crate::resource::Mode)> {
-    use crate::resource::{Mode, Spec, Transport};
-    let transport = match decl.transport.as_str() {
-        "git" => Transport::Git,
-        other => anyhow::bail!(
-            "resource `{}`: this node cannot perform transport `{other}`",
-            decl.name
-        ),
-    };
-    let mode = match decl.mode.as_str() {
-        "ro" => Mode::ReadOnly,
-        "rw" => Mode::ReadWrite,
-        other => anyhow::bail!(
-            "resource `{}`: `{other}` is not a mode (ro or rw)",
-            decl.name
-        ),
-    };
-    Ok((
-        Spec {
-            name: decl.name.clone(),
-            transport,
-            source: decl.source.clone(),
-            git_ref: decl.at.clone(),
-            mode,
-        },
-        mode,
-    ))
 }
 
 /// Where resources live on this node. `/work/resources` is the ADR's path; the override exists so
@@ -342,6 +367,7 @@ async fn execute_call(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
     pending_material: &Arc<PendingMaterial>,
+    modes: &Arc<Modes>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
     policy: &crate::environment::Environment,
@@ -353,6 +379,7 @@ async fn execute_call(
         tx,
         pending_host,
         pending_material,
+        modes,
         code_cache,
         control,
         policy,
@@ -369,6 +396,7 @@ async fn execute_call_inner(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
     pending_material: &Arc<PendingMaterial>,
+    modes: &Arc<Modes>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
     policy: &crate::environment::Environment,
@@ -379,10 +407,25 @@ async fn execute_call_inner(
     // cannot see.
     let resources_root = resources_root();
     for decl in &call.resources {
-        let (spec, _mode) = spec_from(decl)?;
-        let (url, credential) =
-            request_material(tx, pending_material, &call.call_id, &decl.name).await?;
-        let material = crate::resource::Material { url, credential };
+        let minted =
+            request_material(tx, pending_material, &call.call_id, &decl.kind, decl.seq).await?;
+        let spec = crate::resource::Spec::from_plane(
+            &decl.kind,
+            decl.seq,
+            &minted.transport,
+            &minted.mode,
+            minted.at.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // What the plane said about writability, remembered for the publish step.
+        modes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(spec.identity(), spec.mode);
+        let material = crate::resource::Material {
+            url: minted.url,
+            credential: minted.credential,
+        };
         crate::resource::ensure(&spec, &material, &resources_root)?;
     }
 

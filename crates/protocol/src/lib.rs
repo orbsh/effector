@@ -135,24 +135,13 @@ pub struct CodeRef {
 /// asks for it (see `Frame::MaterialRequest`), which is the whole reason this contract exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceDecl {
-    /// The resource's identity and its path: `<work>/resources/<name>`. A plain name, never a path.
-    pub name: String,
-    /// How the data travels — `git` today; `object`, `prefix`, `snapshot` arrive with their own
-    /// code. A string on the wire on purpose: the node refuses a transport it cannot perform, and
-    /// that refusal is better than a decoder error that says nothing about what to do.
-    pub transport: String,
-    /// Where the data lives, as the operator names it (a repository URL, an object key prefix).
-    pub source: String,
-    /// The version to check out, when the transport has versions.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
-    pub at: Option<String>,
-    /// `ro` or `rw`. Publishing an `ro` resource is an error, not a no-op.
-    #[serde(default = "default_ro")]
-    pub mode: String,
-}
-
-fn default_ro() -> String {
-    "ro".to_string()
+    /// The resource's TYPE — part of its identity, not a transport detail: the same dataset as
+    /// `git` and as `snapshot` are two resources.
+    pub kind: String,
+    /// Its sequence number, unique within (owner, type). The owner is NOT here: it is whoever
+    /// submitted the turn, filled in by the plane. A task that could name an owner could borrow
+    /// another's data.
+    pub seq: u64,
 }
 
 /// The Effector's answer, message-sized by discipline.
@@ -232,16 +221,25 @@ pub enum Frame {
     /// Effector to control plane: this call needs material for one declared resource
     /// (`ensure` before the code runs, or a write handle for `sync` after it). Addressed by
     /// (`call_id`, `name`): the same name twice in one call is the same resource.
-    MaterialRequest { call_id: String, name: String },
+    MaterialRequest { call_id: String, kind: String, seq: u64 },
     /// Control plane to effector: the material for that request. It is minted per transfer and
     /// lives in the node's memory for it — never in a log, never on disk, never in the guest's
     /// reach (ADR-0003 §8).
     Material {
         call_id: String,
-        name: String,
+        kind: String,
+        seq: u64,
         url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
+        /// How the data travels, as the PLANE declares it: the task does not choose the transport,
+        /// it says which resource it needs and the plane answers with how that resource travels.
+        transport: String,
+        /// `ro` or `rw`. The plane's word wins over the task's wish — it is the row's decision.
+        mode: String,
+        /// The version to check out, when the plane names one.
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
+        at: Option<String>,
     },
     /// Effector to control plane: a resource was published, and this is the version it produced
     /// (git: `<branch>@<sha>`). The control plane holds the pointer to the current version, so
@@ -249,7 +247,8 @@ pub enum Frame {
     /// advancing the pointer (ADR-0003 §7).
     Synced {
         call_id: String,
-        name: String,
+        kind: String,
+        seq: u64,
         reference: String,
     },
     /// Bidirectional: a host-function round trip (ctx bridge over the

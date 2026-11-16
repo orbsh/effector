@@ -1,11 +1,13 @@
 //! The resource contract's node half (ADR-0003 §7): `ensure` and `sync`, one transport at a time.
 //!
-//! A resource is `{ name, transport, source, ref?, mode }`. `name` fixes the path; the transport
-//! names HOW data moves, never what it is; `ensure` is idempotent (present → no-op), which is why
-//! a resource discovered mid-task costs a directory appearing rather than a restart; `sync`
-//! uploads the `rw` resources and RETURNS THE REFERENCE IT PRODUCED — a branch and commit for
-//! `git` — because that reference is both the audit trail and the undo handle: the control plane
-//! holds "the current version" as a pointer, and a bad write is undone by not advancing it.
+//! A task declares a resource by IDENTITY — `{ kind, seq }` — and the plane answers with how that
+//! resource travels and where it lives: `transport`, `url`, `ref`, `mode`. The node never learns a
+//! source from the task and never invents a credential. `kind` and `seq` fix the path; `ensure` is
+//! idempotent (present → no-op), which is why a resource discovered mid-task costs a directory
+//! appearing rather than a restart; `sync` uploads the `rw` resources and RETURNS THE REFERENCE IT
+//! PRODUCED — a branch and commit for `git` — because that reference is both the audit trail and
+//! the undo handle: the plane holds "the current version" as a pointer and a bad write is undone by
+//! not advancing it.
 //!
 //! Only `git` exists here, and that is deliberate: a transport is a value that something produces
 //! (ADR-0001). `object`/`prefix` and `snapshot` arrive with their own code and their own tests;
@@ -41,9 +43,11 @@ pub enum Mode {
 /// What a task declares about data it needs, before any credential exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
-    pub name: String,
+    /// The resource's type — part of its identity, and the second path component.
+    pub kind: String,
+    /// Its sequence within (owner, type) — the last path component.
+    pub seq: u64,
     pub transport: Transport,
-    pub source: String,
     /// The ref to check out (branch, tag, commit). `None` means the remote's default.
     pub git_ref: Option<String>,
     pub mode: Mode,
@@ -60,19 +64,54 @@ pub struct Material {
 }
 
 impl Spec {
-    /// The path this resource is fixed to: `<base>/<name>`. A name with a path separator or a
-    /// `..` is refused rather than sanitised — a resource is a name, not a path, and quietly
-    /// rewriting one would put a task's data somewhere it did not ask for.
+    /// Build the node's view from what the plane said. An unknown transport or mode is REFUSED, not
+    /// ignored: a plane that answers `snapshot` must hear that this node cannot perform it, rather
+    /// than run with the data missing.
+    pub fn from_plane(
+        kind: &str,
+        seq: u64,
+        transport: &str,
+        mode: &str,
+        at: Option<&str>,
+    ) -> Result<Self> {
+        let transport = match transport {
+            "git" => Transport::Git,
+            other => bail!("this node cannot perform transport `{other}`"),
+        };
+        let mode = match mode {
+            "ro" => Mode::ReadOnly,
+            "rw" => Mode::ReadWrite,
+            other => bail!("`{other}` is not a mode (ro or rw)"),
+        };
+        let spec = Spec {
+            kind: kind.to_string(),
+            seq,
+            transport,
+            git_ref: at.map(str::to_string),
+            mode,
+        };
+        // Validate the path now, so a bad identity fails before any network work.
+        spec.path(Path::new("/"))?;
+        Ok(spec)
+    }
+
+    /// How a resource is named in an error: `<kind>/<seq>`, the same words the task used.
+    pub fn identity(&self) -> String {
+        format!("{}/{}", self.kind, self.seq)
+    }
+
+    /// The path this resource is fixed to: `<base>/<kind>/<seq>`. Both components are checked —
+    /// a type with a separator would put the data somewhere the task did not ask for.
     pub fn path(&self, base: &Path) -> Result<PathBuf> {
-        if self.name.is_empty()
-            || self.name.contains('/')
-            || self.name.contains('\\')
-            || self.name == "."
-            || self.name == ".."
+        if self.kind.is_empty()
+            || self.kind.contains('/')
+            || self.kind.contains('\\')
+            || self.kind == "."
+            || self.kind == ".."
         {
-            bail!("resource name `{}` is not a plain name", self.name);
+            bail!("resource type `{}` is not a plain name", self.kind);
         }
-        Ok(base.join(&self.name))
+        Ok(base.join(&self.kind).join(self.seq.to_string()))
     }
 }
 
@@ -92,8 +131,8 @@ pub fn ensure(spec: &Spec, material: &Material, base: &Path) -> Result<PathBuf> 
 pub fn sync(spec: &Spec, material: &Material, base: &Path) -> Result<String> {
     if spec.mode == Mode::ReadOnly {
         bail!(
-            "resource `{}` is read-only; publishing it is an error, not a no-op",
-            spec.name
+            "resource `{}/{}` is read-only; publishing it is an error, not a no-op",
+            spec.kind, spec.seq
         );
     }
     match spec.transport {
@@ -122,7 +161,7 @@ fn ensure_git(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
         // yet is not a workspace, and git would fail before making one.
         let parent = path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("resource `{}`: {}", spec.name, parent.display()))?;
+            .with_context(|| format!("resource `{}`: {}", spec.identity(), parent.display()))?;
         run_git(spec, material, parent, &argv)?;
     }
     if let Some(reference) = &spec.git_ref {
@@ -136,8 +175,8 @@ fn ensure_git(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
 fn sync_git(spec: &Spec, material: &Material, path: &Path) -> Result<String> {
     if !path.join(".git").exists() {
         bail!(
-            "resource `{}` was never ensured, so there is nothing to publish",
-            spec.name
+            "resource `{}/{}` was never ensured, so there is nothing to publish",
+            spec.kind, spec.seq
         );
     }
     run_git(spec, material, path, &["add", "-A"])?;
@@ -156,12 +195,12 @@ fn git_stdout(spec: &Spec, material: &Material, cwd: &Path, args: &[&str]) -> Re
     let output = command
         .args(args)
         .output()
-        .with_context(|| format!("git {} (resource `{}`)", args.join(" "), spec.name))?;
+        .with_context(|| format!("git {} (resource `{}`)", args.join(" "), spec.identity()))?;
     if !output.status.success() {
         bail!(
             "git {} failed for resource `{}`: {}",
             args.join(" "),
-            spec.name,
+            spec.identity(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -173,12 +212,12 @@ fn run_git(spec: &Spec, material: &Material, cwd: &Path, args: &[&str]) -> Resul
     let output = command
         .args(args)
         .output()
-        .with_context(|| format!("git {} (resource `{}`)", args.join(" "), spec.name))?;
+        .with_context(|| format!("git {} (resource `{}`)", args.join(" "), spec.identity()))?;
     if !output.status.success() {
         bail!(
             "git {} failed for resource `{}`: {}",
             args.join(" "),
-            spec.name,
+            spec.identity(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -249,9 +288,9 @@ mod tests {
 
     fn spec(mode: Mode) -> Spec {
         Spec {
-            name: "notes".into(),
+            kind: "git".into(),
+            seq: 7,
             transport: Transport::Git,
-            source: "the-store".into(),
             git_ref: Some("main".into()),
             mode,
         }
@@ -265,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_puts_the_repository_at_its_name_and_a_second_ensure_does_not_re_clone() {
+    fn ensure_puts_the_repository_at_its_identity_and_a_second_ensure_does_not_re_clone() {
         let dir = tempfile::tempdir().unwrap();
         let (bare, sha) = bare_repo(dir.path());
         let base = dir.path().join("resources");
@@ -273,7 +312,7 @@ mod tests {
         let m = material(&bare);
 
         let path = ensure(&s, &m, &base).unwrap();
-        assert_eq!(path, base.join("notes"));
+        assert_eq!(path, base.join("git").join("7"));
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
             "first\n"
@@ -324,15 +363,27 @@ mod tests {
     }
 
     #[test]
-    fn a_name_is_a_name_not_a_path() {
+    fn a_type_is_a_name_not_a_path_and_the_identity_fixes_the_directory() {
         let base = Path::new("/work/resources");
         for bad in ["", "..", ".", "a/b", "a\\b"] {
             let mut s = spec(Mode::ReadOnly);
-            s.name = bad.into();
+            s.kind = bad.into();
             assert!(s.path(base).is_err(), "`{bad}` must be refused");
         }
-        let mut ok = spec(Mode::ReadOnly);
-        ok.name = "dataset-2024".into();
-        assert_eq!(ok.path(base).unwrap(), base.join("dataset-2024"));
+        let s = spec(Mode::ReadOnly);
+        assert_eq!(s.path(base).unwrap(), base.join("git").join("7"));
+        assert_eq!(s.identity(), "git/7");
+    }
+
+    #[test]
+    fn what_the_plane_says_wins_and_an_unknown_transport_is_refused() {
+        let spec = Spec::from_plane("git", 3, "git", "rw", Some("main")).unwrap();
+        assert_eq!(spec.mode, Mode::ReadWrite);
+        assert_eq!(spec.git_ref.as_deref(), Some("main"));
+        // A transport this node cannot perform is refused BY NAME, not ignored.
+        let err = Spec::from_plane("snap", 3, "snapshot", "ro", None).unwrap_err();
+        assert!(err.to_string().contains("snapshot"), "{err}");
+        let err = Spec::from_plane("git", 3, "git", "readwrite", None).unwrap_err();
+        assert!(err.to_string().contains("mode"), "{err}");
     }
 }
