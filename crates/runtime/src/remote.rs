@@ -18,6 +18,13 @@ use std::sync::Mutex as StdMutex;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Serve one connection until it drops. Reconnect loop lives in `run`.
+/// Why a served connection ended. The difference matters to `run`: a lease that ran
+/// out is this node's own decision to leave, a remote close is not (ADR-0003).
+enum Closing {
+    LeaseExpired,
+    Remote,
+}
+
 async fn serve_connection(
     ws_url: &str,
     key: &effector_protocol::SigningKey,
@@ -25,7 +32,7 @@ async fn serve_connection(
     executors: &Executors,
     code_cache: &Arc<CodeCache>,
     policy: &crate::environment::Environment,
-) -> Result<()> {
+) -> Result<Closing> {
     let pending_host: Arc<PendingHost> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     // Stage two of a stop (ADR-0047): one control per in-flight call, addressed by the
@@ -87,11 +94,40 @@ async fn serve_connection(
         Ok::<_, anyhow::Error>(())
     });
 
-    while let Some(msg) = stream.next().await {
+    // Calls served on THIS connection: the lease's grace grows with them
+    // (`LeaseConfig::grace`). A node that is a container leaves when the work
+    // stops, which is why the timer is the process's own and not a pool's.
+    let mut served: u32 = 0;
+    loop {
+        let next = match config.lease.grace(served) {
+            // Only idle time counts: a call in flight is work, and its task is
+            // holding the timer at bay.
+            Some(grace)
+                if calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty() =>
+            {
+                match tokio::time::timeout(grace, stream.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        eprintln!("lease: nothing arrived within {grace:?}; leaving");
+                        writer.abort();
+                        return Ok(Closing::LeaseExpired);
+                    }
+                }
+            }
+            _ => stream.next().await,
+        };
+        let Some(msg) = next else {
+            writer.abort();
+            return Ok(Closing::Remote);
+        };
         let Message::Text(text) = msg? else { continue };
         let frame: Frame = serde_json::from_str(&text)?;
         match frame {
             Frame::Call(call) => {
+                served = served.saturating_add(1);
                 let control = CallControl::default();
                 calls
                     .lock()
@@ -103,6 +139,7 @@ async fn serve_connection(
                 let executors = executors.clone();
                 let code_cache = code_cache.clone();
                 let policy = policy.clone();
+                let calls = calls.clone();
                 // One executor task per call; host calls it makes run
                 // concurrently over the same writer channel.
                 tokio::spawn(async move {
@@ -121,6 +158,13 @@ async fn serve_connection(
                         call_id: call.call_id.clone(),
                         outcome: result,
                     }));
+                    // The call is over, so its control entry goes: the map's length
+                    // is what the lease reads to decide whether work is in flight,
+                    // and a handle outliving its call would stop the next one.
+                    calls
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&call.call_id);
                 });
             }
             // The control plane stopped waiting. Two outcomes, and the difference is
@@ -150,8 +194,6 @@ async fn serve_connection(
             other => anyhow::bail!("unexpected frame from control plane: {other:?}"),
         }
     }
-    writer.abort();
-    Ok(())
 }
 
 /// Pending host calls: host_call_id -> reply path.
@@ -599,7 +641,20 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
         )
         .await
         {
-            Ok(()) => anyhow::bail!("control plane closed the connection cleanly"),
+            // The node's own decision: the lease said leave (ADR-0003). This is a
+            // clean end — in the container form the process exit IS the container
+            // ending, and nothing is saved on the way out.
+            Ok(Closing::LeaseExpired) => {
+                eprintln!("lease: this node leaves; the container ends with it");
+                return Ok(());
+            }
+            // A node that declared `exit_on_disconnect` has no work and no way to
+            // be given any, so it leaves instead of reconnecting (a container node).
+            Ok(Closing::Remote) | Err(_) if config.lease.exit_on_disconnect => {
+                eprintln!("lease: the connection ended; this node does not reconnect");
+                return Ok(());
+            }
+            Ok(Closing::Remote) => anyhow::bail!("control plane closed the connection cleanly"),
             Err(e) => eprintln!("connection lost: {e:#}; reconnecting in {:?}", backoff),
         }
         tokio::time::sleep(backoff).await;
@@ -649,6 +704,7 @@ mod tests {
             sandbox: true,
             private_key_path: "/dev/null/key".into(),
             capabilities,
+            lease: Default::default(),
         }
     }
 

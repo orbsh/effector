@@ -107,6 +107,11 @@ Order of operations at effector startup:
   replaces `/tmp` and `/run` with empty tmpfs). `"open"` is a **startup error**
   (an unshared namespace cannot be unrestricted) and so is an empty list (the
   filter would read it as "allow everything").
+- `lease` — when this node leaves (ADR-0003). Defaults to never: a node on a host
+  reconnects and stays. A node that IS a container sets `idle_secs = 15` (the grace;
+  it doubles per call served and caps at `max_idle_secs`, default 300) and
+  `exit_on_disconnect = true`, so the process leaving IS the container ending —
+  nothing is saved on the way out, because durable data crossed the boundary by then.
 - There is no `command_exec` field: running a delivered script IS this node's job,
   and the jail admits `exec` by construction, so "may execute" was never a
   capability distinct from existing. It was retired rather than wired (ADR-0001's

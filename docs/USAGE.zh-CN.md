@@ -54,6 +54,7 @@ Effector 启动顺序：
 - `capabilities.deny_read` —— 下发脚本**不许读**的路径（你的凭证、shell 配置、别人的目录）。不声明 = 什么都不拒。
 - `capabilities.cwd` —— jail 里的工作目录。不声明 = 系统临时目录（声明面出现之前的行为）。
 - `capabilities.network` —— `"none"` 或 `{ "allow": ["host", "host:port", "*.host"] }`。允许清单是**兑现得了**的：节点自己跑一个 HTTP 代理和一个 SOCKS5 代理，jail 通过桥进它命名空间的 UNIX socket 够到它们，脚本拿到的 `http_proxy`/`https_proxy`/`ALL_PROXY` 已经指好——所以普通客户端不用改，而清单之外的地址解析不到。兑现它需要三样东西：`sandbox: true`（没有 jail 就没有桥）、PATH 上的 `bwrap` 与 `socat`、以及 `$HOME`（socket 放在 `~/.cache/effector/`，因为 jail 把 `/tmp` 和 `/run` 都换成空 tmpfs）。`"open"` 是**启动错误**（unshared 的命名空间没法「不受限」），空清单同样是**启动错误**（过滤器会把空表读成「全放行」）。
+- `lease` —— 这个节点什么时候离开（ADR-0003）。默认永不：跑在宿主上的节点会重连、会留着。本身就是一个容器的节点设 `idle_secs = 15`（宽限；每服务一个调用翻倍，封顶 `max_idle_secs`，默认 300）并设 `exit_on_disconnect = true`，于是进程离开**就是**容器结束——退出时不保存任何东西，因为那时持久数据已经越过边界了。
 - 没有 `command_exec` 这个字段了：跑下发的脚本就是这台节点的本职，jail 内部的 `exec` 是构造上就有的，「能不能执行」从来不是一项独立于「节点存在」的能力。它是被**退役**的，不是被接上的（ADR-0001 的 Update）。
 - 剩下那条拒绝背后的规矩（ADR-0001）：声明出去的字段就是发布出去的能力，所以它必须指明自己的**执行点**——这台节点兑现不了的声明，在启动时失败，而不是被当作谎言注册出去。
 

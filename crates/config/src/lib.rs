@@ -92,6 +92,62 @@ fn default_true() -> bool {
     true
 }
 
+fn default_max_idle() -> u64 {
+    300
+}
+
+/// How long a node lives when nothing is happening (ADR-0003's lease).
+///
+/// A node that IS a container (ADR-0003): its lifetime is the container's, so the
+/// process leaves when the work stops and the container ends with it — no pool
+/// manager, no reaper, no `docker rm`. A node on a host leaves this at the default,
+/// where it never expires and reconnects instead.
+///
+/// The grace grows with use, because a node used more is likelier to be used again:
+/// the first idle waits `idle_secs`, each reuse doubles it, and `max_idle_secs` caps
+/// the wait — past a few minutes the wait costs more than a cold start, and a task
+/// idle that long is not latency-sensitive anyway.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaseConfig {
+    /// Seconds of idleness before the node leaves; `0` = never (a host node).
+    #[serde(default)]
+    pub idle_secs: u64,
+    /// The cap on the doubling.
+    #[serde(default = "default_max_idle")]
+    pub max_idle_secs: u64,
+    /// Leave when the connection ends instead of reconnecting. A container node
+    /// sets this: a node whose control-plane link is gone has no work and no way
+    /// to be given any.
+    #[serde(default)]
+    pub exit_on_disconnect: bool,
+}
+
+impl Default for LeaseConfig {
+    fn default() -> Self {
+        Self {
+            idle_secs: 0,
+            max_idle_secs: default_max_idle(),
+            exit_on_disconnect: false,
+        }
+    }
+}
+
+impl LeaseConfig {
+    /// The grace after `reuses` calls have run on this node: base, doubled per use,
+    /// capped. `None` when the lease never expires.
+    pub fn grace(&self, reuses: u32) -> Option<std::time::Duration> {
+        if self.idle_secs == 0 {
+            return None;
+        }
+        let doublings = reuses.saturating_sub(1).min(20);
+        let secs = self
+            .idle_secs
+            .saturating_mul(1u64 << doublings)
+            .min(self.max_idle_secs.max(self.idle_secs));
+        Some(std::time::Duration::from_secs(secs))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectorConfig {
     /// Control plane endpoint for the outbound registration connection
@@ -108,6 +164,9 @@ pub struct EffectorConfig {
     /// OS can guard. The key signs the control plane's challenge — it is not a shared token,
     /// so the control plane never holds a copy (effector ADR-0002).
     pub private_key_path: String,
+    /// When this node leaves (ADR-0003). Defaults to never: a host node.
+    #[serde(default)]
+    pub lease: LeaseConfig,
     pub capabilities: CapabilitySurface,
 }
 
@@ -169,6 +228,7 @@ mod tests {
             sandbox: true,
             private_key_path: "/dev/null/key".into(),
             capabilities,
+            lease: LeaseConfig::default(),
         }
     }
 
@@ -178,6 +238,31 @@ mod tests {
             carriers: vec!["exec".into()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_lease_doubles_per_use_and_caps() {
+        let lease = LeaseConfig {
+            idle_secs: 15,
+            max_idle_secs: 300,
+            exit_on_disconnect: true,
+        };
+        let secs = |n: u32| lease.grace(n).map(|d| d.as_secs()).unwrap_or(0);
+        assert_eq!(secs(0), 15, "a node that has served nothing waits the base");
+        assert_eq!(secs(1), 15);
+        assert_eq!(secs(2), 30);
+        assert_eq!(secs(3), 60);
+        assert_eq!(secs(4), 120);
+        assert_eq!(secs(5), 240);
+        assert_eq!(secs(6), 300, "the cap");
+        assert_eq!(secs(9), 300, "and it stays capped");
+    }
+
+    #[test]
+    fn a_host_node_never_expires() {
+        let lease = LeaseConfig::default();
+        assert!(lease.grace(1).is_none(), "no idle exit unless declared");
+        assert!(!lease.exit_on_disconnect, "a host node reconnects");
     }
 
     #[test]

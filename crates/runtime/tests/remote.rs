@@ -134,6 +134,7 @@ async fn outbound_registration_and_task_downlink() {
             network: NetworkPolicy::None,
             ..Default::default()
         },
+        lease: Default::default(),
     };
 
     // The effector serves one connection; the fake plane drops it after
@@ -327,6 +328,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             network: NetworkPolicy::None,
             ..Default::default()
         },
+        lease: Default::default(),
     };
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), remote::run(config)).await;
     server.await.unwrap();
@@ -350,6 +352,7 @@ async fn an_unenforceable_declaration_fails_before_dialing() {
             network: NetworkPolicy::Allow(vec!["github.com:443".into()]),
             ..Default::default()
         },
+        lease: Default::default(),
     };
     let err = remote::run(config).await.unwrap_err().to_string();
     assert!(
