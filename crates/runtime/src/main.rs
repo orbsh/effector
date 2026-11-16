@@ -12,6 +12,7 @@ fn main() -> anyhow::Result<()> {
     let mut config_path: Option<String> = None;
     let mut control_plane: Option<String> = None;
     let mut token: Option<String> = None;
+    let mut token_from_stdin = false;
     let mut once = false;
 
     while let Some(arg) = args.next() {
@@ -34,6 +35,11 @@ fn main() -> anyhow::Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("--token needs a value"))?,
                 );
             }
+            // A launcher hands over the token this way: `/proc/<pid>/cmdline` is readable by
+            // every process of the same uid, so argv is not a place for a secret, and the
+            // node's environment is inherited by the guest it spawns, so env is not one
+            // either. stdin belongs to the process alone.
+            "--token-stdin" => token_from_stdin = true,
             other if other.starts_with('-') => {
                 anyhow::bail!("unknown argument `{other}` (see `effector --help`)")
             }
@@ -49,8 +55,16 @@ fn main() -> anyhow::Result<()> {
     if let Some(url) = control_plane {
         config.control_plane_url = url;
     }
+    if token.is_some() && token_from_stdin {
+        anyhow::bail!("--token and --token-stdin are one choice, not two");
+    }
     if let Some(t) = token {
         config.token = t;
+    }
+    if token_from_stdin {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        config.token = take_token_line(&line).map_err(anyhow::Error::msg)?;
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -79,6 +93,10 @@ effector — a node's dial-in agent
   effector register [config.json]        one handshake against the control plane, then exit
   effector [config.json] --control-plane <ws://url> --token <token>
                                          launcher overrides (the container form, ADR-0003)
+  effector [config.json] --control-plane <ws://url> --token-stdin
+                                         the token arrives on stdin, one line — the form to use
+                                         when a launcher spawns the node: argv is world-readable
+                                         and the environment is inherited by the guest
 
 A node's authority is the TOKEN it dials with. The control plane mints one per alias, the node
 attaches it to the mount URL, and the connection that results authorizes every call that
@@ -86,7 +104,34 @@ follows — there is no challenge, no keypair and no `keygen`. Revoking a node m
 new token; a node that is a container is handed its token at launch and keeps nothing else.
 ";
 
+/// One line of stdin is the token. A launcher that had nothing to say must not look like a
+/// launcher that said nothing useful: both are a startup failure, named at the door.
+fn take_token_line(line: &str) -> Result<String, String> {
+    let token = line.trim();
+    if token.is_empty() {
+        return Err(
+            "--token-stdin: stdin closed before a token arrived (the launcher writes it, one line)"
+                .into(),
+        );
+    }
+    Ok(token.to_string())
+}
+
 fn load(path: &str) -> anyhow::Result<EffectorConfig> {
     let raw = std::fs::read_to_string(path)?;
     serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("effector config {path}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_token_line;
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn the_token_line_is_trimmed_and_empty_is_a_refusal() {
+        assert_eq!(take_token_line("abc\n").unwrap(), "abc");
+        assert_eq!(take_token_line("  abc  ").unwrap(), "abc");
+        assert!(take_token_line("\n").unwrap_err().contains("stdin closed"));
+        assert!(take_token_line("").unwrap_err().contains("stdin closed"));
+    }
 }

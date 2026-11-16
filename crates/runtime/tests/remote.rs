@@ -350,3 +350,76 @@ async fn an_unenforceable_declaration_fails_before_dialing() {
         "the refusal names the missing enforcement point: {err}"
     );
 }
+
+/// Slice 2's claim, end to end: a node that declares a lease leaves on its own when nothing
+/// calls it, `run` returns Ok (so `docker run --rm` ends the container with the process), and
+/// it does NOT dial again — a reconnect would keep a container alive forever, which is the one
+/// thing the lease exists to prevent.
+#[tokio::test]
+async fn a_leased_node_leaves_when_the_work_stops() {
+    use std::time::{Duration, Instant};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let config = EffectorConfig {
+        control_plane_url: format!("ws://127.0.0.1:{port}"),
+        sandbox: false,
+        token: TOKEN.into(),
+        capabilities: CapabilitySurface {
+            node_alias: "leased-node".into(),
+            carriers: vec!["steel".into()],
+            ..Default::default()
+        },
+        lease: effector_config::LeaseConfig {
+            idle_secs: 1,
+            max_idle_secs: 1,
+            exit_on_disconnect: false,
+        },
+    };
+
+    // The node goes first: its dial is what `accept` is waiting for.
+    let started = Instant::now();
+    let node = tokio::spawn(remote::run(config));
+    let (stream, _) = listener.accept().await.unwrap();
+
+    // The plane says hello and then goes silent: idleness is the input, nothing else.
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel::<()>();
+    let plane = tokio::spawn(async move {
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        let _declaration = stream.next().await.unwrap().unwrap();
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Registered).unwrap(),
+        ))
+        .await
+        .unwrap();
+        // Hold the socket open until the test says the node has left.
+        let _ = close_rx.await;
+        drop(sink);
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(10), node)
+        .await
+        .expect("the lease must end the node, not hang it")
+        .expect("the node task must not panic");
+    let elapsed = started.elapsed();
+    assert!(
+        outcome.is_ok(),
+        "a lease is a clean end, not an error: {outcome:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "the node left before its grace ran out ({elapsed:?})"
+    );
+
+    let _ = close_tx.send(());
+    let _ = plane.await;
+    // Nothing dialed a second time.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.accept())
+            .await
+            .is_err(),
+        "a leased node must not reconnect — that is the container that never ends"
+    );
+}

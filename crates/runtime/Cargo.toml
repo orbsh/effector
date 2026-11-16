@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The binary a node IS carries the node's name: every document says
+# `effector --control-plane <url> --token-stdin`, and a package-named binary would
+# make that sentence false (ADR-0003 decision 10, the container's PID 1).
+[[bin]]
+name = "effector"
+path = "src/main.rs"
+
 [dependencies]
 effector-protocol = { path = "../protocol" }
 effector-config = { path = "../config" }
