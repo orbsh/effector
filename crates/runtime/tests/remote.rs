@@ -75,6 +75,7 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
         encoding: induction_protocol::Encoding::Json,
         args: serde_json::json!({"n": 3}),
         code: code.clone(),
+        resources: Vec::new(),
     };
     sink.send(Message::Text(
         serde_json::to_string(&Frame::Call(call)).unwrap(),
@@ -214,6 +215,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
                 url: format!("http://127.0.0.1:{http_port}/code"),
                 sha256: sha.clone(),
             },
+        resources: Vec::new(),
         };
         sink.send(Message::Text(
             serde_json::to_string(&Frame::Call(call)).unwrap(),
@@ -248,6 +250,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
                 url: format!("http://127.0.0.1:{http_port}/code"),
                 sha256: sha.clone(),
             },
+        resources: Vec::new(),
         };
         sink.send(Message::Text(
             serde_json::to_string(&Frame::Call(call)).unwrap(),
@@ -285,6 +288,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
                 url: format!("http://127.0.0.1:{http_port}/code"),
                 sha256: "deadbeef".into(),
             },
+        resources: Vec::new(),
         };
         sink.send(Message::Text(
             serde_json::to_string(&Frame::Call(call)).unwrap(),
@@ -476,4 +480,150 @@ async fn a_plane_that_accepts_and_goes_silent_ends_a_leased_node() {
         "it waited far past its first grace ({elapsed:?})"
     );
     drop(plane);
+}
+
+/// The resource contract's loop, end to end: a call declares one `rw` git resource, the plane
+/// mints material for it when asked, the node ensures it (a real clone), and after the call the
+/// node publishes it and reports the reference it produced. That reference is the whole point:
+/// the control plane holds "the current version" as a pointer, so a bad write is undone by not
+/// advancing it (ADR-0003 §7).
+#[tokio::test]
+async fn a_declared_resource_is_ensured_then_published_with_its_reference() {
+    use effector_protocol::ResourceDecl;
+
+    // A bare repository to stand in for the store.
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&seed)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(seed.join("notes.md"), "kept\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "first"]);
+    let bare = dir.path().join("bare.git");
+    let out = std::process::Command::new("git")
+        .args(["clone", "--quiet", "--bare"])
+        .arg(&seed)
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // The node puts resources here instead of /work/resources.
+    let resources = dir.path().join("resources");
+    std::env::set_var("EFFECTOR_RESOURCES_ROOT", &resources);
+
+    let code = br#"
+(define (touch args) (hash "touched" 1))
+"#
+    .to_vec();
+    let (http_port, sha, _hits) = serve_code(code);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let config = EffectorConfig {
+        control_plane_url: format!("ws://127.0.0.1:{port}"),
+        sandbox: false,
+        token: TOKEN.into(),
+        capabilities: CapabilitySurface {
+            node_alias: "resource-node".into(),
+            carriers: vec!["steel".into()],
+            ..Default::default()
+        },
+        lease: effector_config::LeaseConfig {
+            idle_secs: 2,
+            max_idle_secs: 2,
+            exit_on_disconnect: true,
+        },
+    };
+
+    let node = tokio::spawn(remote::run(config));
+    let (stream, _) = listener.accept().await.unwrap();
+    let plane = tokio::spawn(async move {
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        let _declaration = stream.next().await.unwrap().unwrap();
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Registered).unwrap(),
+        ))
+        .await
+        .unwrap();
+        sink.send(Message::Text(
+            serde_json::to_string(&Frame::Call(ToolCall {
+                call_id: "c-res".into(),
+                kind: effector_protocol::CallKind::IterateStart,
+                stream: Some("s-res".into()),
+                executor: "toucher/k1".into(),
+                entry: "touch".into(),
+                language: "steel".into(),
+                encoding: induction_protocol::Encoding::Json,
+                args: serde_json::json!({}),
+                code: CodeRef {
+                    url: format!("http://127.0.0.1:{http_port}/code"),
+                    sha256: sha.clone(),
+                },
+                resources: vec![ResourceDecl {
+                    name: "notes".into(),
+                    transport: "git".into(),
+                    source: bare.to_string_lossy().into_owned(),
+                    at: Some("main".into()),
+                    mode: "rw".into(),
+                }],
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+        // Answer the material request for the read, then the one for the write.
+        let mut materials = 0;
+        let mut published = None;
+        loop {
+            let Some(Ok(Message::Text(text))) = stream.next().await else {
+                break;
+            };
+            match serde_json::from_str::<Frame>(&text).unwrap() {
+                Frame::MaterialRequest { call_id, name } => {
+                    materials += 1;
+                    sink.send(Message::Text(
+                        serde_json::to_string(&Frame::Material {
+                            call_id,
+                            name,
+                            url: bare.to_string_lossy().into_owned(),
+                            credential: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                Frame::Result(_) => {}
+                Frame::Synced { reference, .. } => published = Some(reference),
+                _ => {}
+            }
+            if published.is_some() {
+                break;
+            }
+        }
+        (materials, published)
+    });
+
+    let (materials, published) = tokio::time::timeout(std::time::Duration::from_secs(20), plane)
+        .await
+        .expect("the loop must finish")
+        .expect("the plane task must not panic");
+    assert_eq!(materials, 2, "one material for the read, one for the write");
+    let reference = published.expect("a Synced frame");
+    assert!(reference.starts_with("main@"), "{reference}");
+    // The clone really happened, at the path the resource name fixes.
+    assert!(resources.join("notes").join("notes.md").exists());
+    node.abort();
 }

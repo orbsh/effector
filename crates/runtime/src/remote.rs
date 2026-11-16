@@ -40,6 +40,9 @@ async fn serve_connection(
     // the call would stop the next one.
     let calls: Arc<std::sync::Mutex<std::collections::HashMap<String, CallControl>>> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    // Material answers, routed by (call_id, resource name).
+    let pending_material: Arc<PendingMaterial> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let url = effector_protocol::dial_url(base_url, token);
     let (ws, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -136,6 +139,7 @@ async fn serve_connection(
                     .insert(call.call_id.clone(), control.clone());
                 let tx = tx.clone();
                 let pending_host = pending_host.clone();
+                let pending_material = pending_material.clone();
                 let config = config.clone();
                 let executors = executors.clone();
                 let code_cache = code_cache.clone();
@@ -150,6 +154,7 @@ async fn serve_connection(
                         &call,
                         &tx,
                         &pending_host,
+                        &pending_material,
                         &code_cache,
                         &control,
                         &policy,
@@ -159,6 +164,34 @@ async fn serve_connection(
                         call_id: call.call_id.clone(),
                         outcome: result,
                     }));
+                    // Then the `rw` resources go out, at completion (ADR-0003 §7). Each one asks
+                    // for its own material: material is per transfer, so the write has a
+                    // different one than the read that preceded it.
+                    for decl in call.resources.iter().filter(|d| d.mode == "rw") {
+                        match spec_from(decl) {
+                            Ok((spec, _)) => {
+                                match request_material(&tx, &pending_material, &call.call_id, &decl.name)
+                                    .await
+                                {
+                                    Ok((url, credential)) => {
+                                        let material = crate::resource::Material { url, credential };
+                                        match crate::resource::sync(&spec, &material, &resources_root()) {
+                                            Ok(reference) => {
+                                                let _ = tx.send(Frame::Synced {
+                                                    call_id: call.call_id.clone(),
+                                                    name: decl.name.clone(),
+                                                    reference,
+                                                });
+                                            }
+                                            Err(e) => eprintln!("resource `{}`: sync failed: {e:#}", decl.name),
+                                        }
+                                    }
+                                    Err(e) => eprintln!("{e:#}"),
+                                }
+                            }
+                            Err(e) => eprintln!("{e:#}"),
+                        }
+                    }
                     // The call is over, so its control entry goes: the map's length
                     // is what the lease reads to decide whether work is in flight,
                     // and a handle outliving its call would stop the next one.
@@ -183,6 +216,17 @@ async fn serve_connection(
                 };
                 let _ = tx.send(Frame::Interrupted { call_id, landed });
             }
+            // The plane's answer to a `MaterialRequest`: hand it to the call that is waiting.
+            Frame::Material { call_id, name, url, credential } => {
+                let key = material_key(&call_id, &name);
+                let waiter = pending_material
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&key);
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send((url, credential));
+                }
+            }
             Frame::Host(HostFrame::Result(hr)) => {
                 let mut pending = pending_host
                     .lock()
@@ -205,6 +249,87 @@ type PendingHost = std::sync::Mutex<
     >,
 >;
 
+/// Material requests in flight: `(call_id, name)` → where the answer goes. Exactly one answer
+/// per request (the control plane mints per transfer), so an entry dies with its request.
+type PendingMaterial =
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<(String, Option<String>)>>>;
+
+fn material_key(call_id: &str, name: &str) -> String {
+    format!("{call_id}\u{1f}{name}")
+}
+
+/// Ask the control plane for one transfer's material and wait for it. The node never invents a
+/// credential: it names the resource, and the plane answers with where to reach the store and how
+/// (ADR-0003 §8). The answer is used for one `ensure`/`sync` and dropped.
+async fn request_material(
+    tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
+    pending: &Arc<PendingMaterial>,
+    call_id: &str,
+    name: &str,
+) -> anyhow::Result<(String, Option<String>)> {
+    let key = material_key(call_id, name);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.clone(), sender);
+    let sent = tx.send(Frame::MaterialRequest {
+        call_id: call_id.to_string(),
+        name: name.to_string(),
+    });
+    if sent.is_err() {
+        pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
+        anyhow::bail!("resource `{name}`: the connection is gone");
+    }
+    match receiver.await {
+        Ok(material) => Ok(material),
+        Err(_) => anyhow::bail!("resource `{name}`: the control plane never answered"),
+    }
+}
+
+/// The declaration → the node's own vocabulary. An unknown transport or mode is REFUSED, never
+/// ignored: a task that asked for `snapshot` must hear that this node cannot perform it, rather
+/// than run with its data missing.
+fn spec_from(decl: &effector_protocol::ResourceDecl) -> anyhow::Result<(crate::resource::Spec, crate::resource::Mode)> {
+    use crate::resource::{Mode, Spec, Transport};
+    let transport = match decl.transport.as_str() {
+        "git" => Transport::Git,
+        other => anyhow::bail!(
+            "resource `{}`: this node cannot perform transport `{other}`",
+            decl.name
+        ),
+    };
+    let mode = match decl.mode.as_str() {
+        "ro" => Mode::ReadOnly,
+        "rw" => Mode::ReadWrite,
+        other => anyhow::bail!(
+            "resource `{}`: `{other}` is not a mode (ro or rw)",
+            decl.name
+        ),
+    };
+    Ok((
+        Spec {
+            name: decl.name.clone(),
+            transport,
+            source: decl.source.clone(),
+            git_ref: decl.at.clone(),
+            mode,
+        },
+        mode,
+    ))
+}
+
+/// Where resources live on this node. `/work/resources` is the ADR's path; the override exists so
+/// a node without a writable `/work` (a test, a host node) can put them somewhere honest.
+fn resources_root() -> std::path::PathBuf {
+    std::env::var("EFFECTOR_RESOURCES_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/work/resources"))
+}
+
 /// Execute one ToolCall against the resident executors. Phase 4 adds the
 /// `link` payload form; today only inline bytes are consumed (a `link`
 /// payload is an explicit error, not a silent fetch — the effector initiates
@@ -216,6 +341,7 @@ async fn execute_call(
     call: &ToolCall,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
+    pending_material: &Arc<PendingMaterial>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
     policy: &crate::environment::Environment,
@@ -226,6 +352,7 @@ async fn execute_call(
         call,
         tx,
         pending_host,
+        pending_material,
         code_cache,
         control,
         policy,
@@ -241,10 +368,24 @@ async fn execute_call_inner(
     call: &ToolCall,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
+    pending_material: &Arc<PendingMaterial>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
     policy: &crate::environment::Environment,
 ) -> Result<serde_json::Value> {
+    // Data first, code second: a resource that is absent costs a directory appearing rather
+    // than a restart, because `ensure` is idempotent — the second call pays a fetch that has
+    // nothing to do. This happens BEFORE the code runs, so a task never starts on data it
+    // cannot see.
+    let resources_root = resources_root();
+    for decl in &call.resources {
+        let (spec, _mode) = spec_from(decl)?;
+        let (url, credential) =
+            request_material(tx, pending_material, &call.call_id, &decl.name).await?;
+        let material = crate::resource::Material { url, credential };
+        crate::resource::ensure(&spec, &material, &resources_root)?;
+    }
+
     // Content-addressed code (ADR-0027): the frame carries a reference,
     // bytes ride the data path. Resolve = per-hash cache hit, else fetch +
     // verify (mismatch = error, never silent). The cache is a discardable
