@@ -27,14 +27,14 @@ Effector 拥有运行时、常驻会话与 sandbox。控制端拥有身份、调
 Effector 启动顺序：
 
 1. 读配置文件——`argv[1]`，默认 `effector.json`。
-2. 从 `credential_env` 指名的环境变量读凭据。变量缺失是**启动失败**：进程不会拨号。
+2. 取 token：命令行 `--token`，否则配置里的 `token` 字段。token 为空是**启动失败**：进程不会拨号。
 3. 拨 `control_plane_url` 并注册。此后断线即重连（§6）。
 
 ```json
 {
   "control_plane_url": "ws://127.0.0.1:8787",
   "sandbox": true,
-  "credential_env": "PROBE_CREDENTIAL",
+  "token": "……控制面铸造的（POST /admin/nodes）……",
   "capabilities": {
     "node_alias": "home-pc",
     "carriers": ["steel", "python", "induction"],
@@ -48,7 +48,7 @@ Effector 启动顺序：
 
 - `control_plane_url` —— 只认 WebSocket。按设计没有降级通道（long-polling 被否决过；WS-only 出网就是契约）。
 - `sandbox` —— 默认 `true`，把会话进程包进 bubblewrap。远程部署必须保持开启（无人值守的外部代码）。
-- `credential_env` —— 注册凭据是**用户**凭据，它从不写进配置文件。
+- `token` —— 节点的权柄（ADR-0003）。控制面为这个别名铸造它，只留下摘要；节点把它拼到挂载 URL 上（`?token=…`），由此建立的连接就是此后每次下发的授权。它不按时间过期——吊销的办法是重新铸造一个。
 - `capabilities.node_alias` —— **别名必须设置。** 默认值是空串，以 `""` 注册的 effector 无法按名字寻址（症状出现在控制端一侧："effector not connected"）。
 - `capabilities.fs_scope` —— 下发脚本可以**写**的路径。它们之外一律只读；**读**不受这个字段约束（那是 `deny_read` 的事）。
 - `capabilities.deny_read` —— 下发脚本**不许读**的路径（你的凭证、shell 配置、别人的目录）。不声明 = 什么都不拒。
@@ -62,7 +62,7 @@ Effector 启动顺序：
 
 ## 3. 握手
 
-Effector 发出的第一帧是 `register`；控制端必须回 `registered`。在这句应答之前，Effector 不服务任何东西。
+没有挑战、也没有签名。节点拨 `ws://…/effector/<alias>?token=…`；控制面在服务这条 socket **之前**验这个 token、取它的摘要，并按 `required` 姿态问注册表这个摘要是否为该别名批准过。随后节点发出的第一帧只是形状声明，控制面回 `registered`。
 
 ```json
 { "type": "register", "node_alias": "home-pc", "credential": "tok-abc",

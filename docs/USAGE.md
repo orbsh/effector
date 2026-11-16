@@ -61,15 +61,15 @@ other's shapes.
 Order of operations at effector startup:
 
 1. Read the config file — `argv[1]`, default `effector.json`.
-2. Read the credential from the environment variable named by `credential_env`.
-   A missing variable is a **startup failure**: the process never dials.
+2. Take the token: `--token` on the command line, else the config's `token` field.
+   An empty token is a **startup failure**: the process never dials.
 3. Dial `control_plane_url` and register. Then reconnect forever on drops (§6).
 
 ```json
 {
   "control_plane_url": "ws://127.0.0.1:8787",
   "sandbox": true,
-  "credential_env": "PROBE_CREDENTIAL",
+  "token": "…minted by the control plane (POST /admin/nodes)…",
   "capabilities": {
     "node_alias": "home-pc",
     "carriers": ["steel", "python", "induction"],
@@ -85,8 +85,10 @@ Order of operations at effector startup:
   (long-polling was rejected; a WS-only egress is the contract).
 - `sandbox` — defaults to `true`; wraps executor processes in bubblewrap. Remote
   deployments must keep it on (unattended external code).
-- `credential_env` — the registration credential is the **user** credential; it
-  never lives in the config file.
+- `token` — the node's authority (ADR-0003). The control plane mints it for the
+  alias and keeps only its digest; the node attaches it to the mount URL as
+  `?token=…`, and the connection that results authorizes every call afterwards.
+  It never expires on a clock — revoking means minting a new one.
 - `capabilities.node_alias` — **the alias must be set.** The default is the empty
   string, and a effector registered as `""` cannot be addressed by name (the failure
   shows up on the control-plane side as "effector not connected").
@@ -127,11 +129,14 @@ depends on this). Non-text WS messages are ignored.
 
 ## 3. Handshake
 
-The first frame the effector sends is `register`; the control plane must answer
-`registered`. The effector waits for that answer before serving anything.
+There is no challenge and no signature. The node dials
+`ws://…/effector/<alias>?token=…`; the plane validates the token BEFORE serving the
+socket, hashes it, and (in `required` posture) asks its registry whether that digest
+is approved for the alias. The first frame the node then sends is a declaration of
+shape; the plane answers `registered`.
 
 ```json
-{ "type": "register", "node_alias": "home-pc", "credential": "tok-abc",
+{ "type": "register", "node_alias": "home-pc",
   "carriers": ["steel", "python", "induction"] }
 ```
 
