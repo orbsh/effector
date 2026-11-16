@@ -61,8 +61,10 @@ other's shapes.
 Order of operations at effector startup:
 
 1. Read the config file — `argv[1]`, default `effector.json`.
-2. Take the token: `--token` on the command line, else the config's `token` field.
-   An empty token is a **startup failure**: the process never dials.
+2. Take the token: `--token-stdin` (one line, what a launcher uses), else `--token`, else the
+   config's `token` field. An empty token is a **startup failure**: the process never dials.
+   Why stdin and not argv or env: `/proc/<pid>/cmdline` is readable by every process of the same
+   uid on the host, and the node's environment is inherited by the guest it spawns.
 3. Dial `control_plane_url` and register. Then reconnect forever on drops (§6).
 
 ```json

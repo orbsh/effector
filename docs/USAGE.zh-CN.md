@@ -27,7 +27,7 @@ Effector 拥有运行时、常驻会话与 sandbox。控制端拥有身份、调
 Effector 启动顺序：
 
 1. 读配置文件——`argv[1]`，默认 `effector.json`。
-2. 取 token：命令行 `--token`，否则配置里的 `token` 字段。token 为空是**启动失败**：进程不会拨号。
+2. 取 token：`--token-stdin`（读一行，启动器用这个），否则 `--token`，否则配置里的 `token` 字段。token 为空是**启动失败**：进程不会拨号。为什么用 stdin 而不是 argv 或环境变量：宿主上 `/proc/<pid>/cmdline` 对同 uid 的任何进程可读，而节点的环境变量会被它启动的 guest 继承。
 3. 拨 `control_plane_url` 并注册。此后断线即重连（§6）。
 
 ```json
