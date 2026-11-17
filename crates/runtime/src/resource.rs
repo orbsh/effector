@@ -157,12 +157,34 @@ fn ensure_object(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)
         .with_context(|| format!("resource `{}`: {}", spec.identity(), path.display()))?;
     let into = target.to_string_lossy().into_owned();
-    curl(
+    let code = curl(
         spec,
         material,
-        &["-fsSL", "--output", &into, &material.url],
+        &[
+            "-sSL",
+            "--output",
+            &into,
+            "--write-out",
+            "%{http_code}",
+            &material.url,
+        ],
     )?;
-    Ok(())
+    let code = code.trim();
+    if code == "200" {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(&target);
+    // A WRITABLE resource that is not there yet is an empty workspace, not a failure: the task's
+    // job is to produce the first object. A readable one that is missing is a real error — the
+    // task asked to read something the store does not have.
+    if code == "404" && spec.mode == Mode::ReadWrite {
+        return Ok(());
+    }
+    bail!(
+        "resource `{}`: the store answered {code} for {}",
+        spec.identity(),
+        material.url
+    )
 }
 
 /// Upload the blob back and return what the store says about it (its ETag): the reference that
@@ -210,13 +232,19 @@ fn sync_object(spec: &Spec, material: &Material, path: &Path) -> Result<String> 
 /// request, and curl speaks SigV4. A node that cannot perform it (no curl) fails here by name.
 fn curl(spec: &Spec, material: &Material, args: &[&str]) -> Result<String> {
     let mut command = Command::new("curl");
-    command.args(args);
+    // Both arms are idempotent (a GET writes the same bytes; a PUT stores the same object), and a
+    // store that answers 503 once while it settles is not a task failure. The retry is bounded so a
+    // store that is actually down still fails the task, with its own status in the message.
+    command.args(["--retry", "3", "--retry-delay", "1"]).args(args);
     if let Some(credential) = &material.credential {
         // `access_key:secret_key[:region]` — one string, the shape a secret row holds. The region
         // is part of the signature, and most object-store deployments either want their own or
         // ignore it, so it rides along rather than being guessed.
-        let (access_key, secret_key, region) = effector_protocol::resource::credential_parts(credential)
-            .with_context(|| format!("resource `{}`", spec.identity()))?;
+        // Flattened into one sentence on purpose: a node's failure is read by whoever is debugging
+        // the task, and `anyhow`'s outer-context-only rendering would hide the reason.
+        let (access_key, secret_key, region) =
+            effector_protocol::resource::credential_parts(credential)
+                .map_err(|e| anyhow::anyhow!("resource `{}`: {e}", spec.identity()))?;
         command
             .arg("--user")
             .arg(format!("{access_key}:{secret_key}"))
@@ -403,6 +431,10 @@ mod tests {
     /// receives — the body for a GET, an ETag for a PUT — and records that it was asked. Enough to
     /// exercise the node's whole half of an object transfer without a store.
     fn fake_store(the_body: &'static str, etag: &'static str) -> String {
+        fake_store_at("200 OK", the_body, etag)
+    }
+
+    fn fake_store_at(status: &'static str, the_body: &'static str, etag: &'static str) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -418,10 +450,17 @@ mod tests {
                     format!(
                         "HTTP/1.1 200 OK\r\nETag: \"{etag}\"\r\nContent-Length: 0\r\n\r\n"
                     )
-                } else {
+                } else if status == "200 OK" {
                     format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{the_body}",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{the_body}",
                         the_body.len()
+                    )
+                } else {
+                    // An error body is the store's XML; the node only reads the status code.
+                    let xml = "<Error><Code>NoSuchKey</Code></Error>";
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{xml}",
+                        xml.len()
                     )
                 };
                 let _ = stream.write_all(reply.as_bytes());
@@ -481,6 +520,28 @@ mod tests {
             reference, "etag-42",
             "the reference is the store's own word for what it now holds"
         );
+    }
+
+    #[test]
+    fn a_missing_object_is_an_empty_workspace_if_writable_and_an_error_if_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("resources");
+        let rw = object_spec(Mode::ReadWrite);
+        let m = Material {
+            url: fake_store_at("404 Not Found", "", ""),
+            credential: None,
+        };
+        // A task's job may be to produce the first object; an empty workspace says so, and nothing
+        // half-written is left behind for the task to trip over.
+        let path = ensure(&rw, &m, &base).expect("a writable resource that is not there yet");
+        assert!(!path.join("out.tar").exists(), "no stub file is invented");
+        assert!(path.is_dir(), "the directory is what the task writes into");
+
+        // The same answer on a READABLE resource is the truth the task asked for: it is not there.
+        let ro = object_spec(Mode::ReadOnly);
+        let dir2 = tempfile::tempdir().unwrap();
+        let err = ensure(&ro, &m, &dir2.path().join("resources")).unwrap_err().to_string();
+        assert!(err.contains("404"), "the store's own word is passed on: {err}");
     }
 
     #[test]
