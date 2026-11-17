@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The resource shapes below are a shared RULE, not just types: the plane validates a declaration at
+# the operator's door with the same function the node runs when it moves the data.
+anyhow = "1"
 # The pipe protocol owns its frame vocabulary and its codec declaration
 # (ADR-0001 §Consequences: effector takes induction-protocol for frames and
 # the codec enum) — `ToolCall.encoding` is that type, not a second copy.

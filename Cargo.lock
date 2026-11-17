@@ -758,6 +758,7 @@ dependencies = [
 name = "effector-protocol"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "effector-config",
  "induction-protocol",
  "serde",

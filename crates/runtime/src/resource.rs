@@ -77,10 +77,10 @@ impl Spec {
         // transfer that happens to be lying around.
         let transport = match kind {
             "git" => Transport::Git,
-            // One object. A `prefix` (a whole directory in a bucket) needs a listing to sync and is
-            // NOT this: it is refused by name below rather than half-moved, because "uploaded some
-            // of it" is the failure mode that loses data quietly.
-            "object" => Transport::S3,
+            // An object store over its own wire protocol. The venue's kind is `s3` — an identity,
+            // the way `rustic` and `git` are — and what arrives at this node is one blob. A source
+            // that names a prefix (a URL ending in `/`) is not one blob and is refused below.
+            "s3" => Transport::S3,
             other => bail!("this node cannot move `{other}` resources"),
         };
         let mode = match mode {
@@ -147,27 +147,10 @@ pub fn sync(spec: &Spec, material: &Material, base: &Path) -> Result<String> {
     }
 }
 
-/// The file name an object resource lands under, taken from its URL: `s3://bucket/builds/out.tar`
-/// and `https://host/builds/out.tar` both give `out.tar`. A URL with no last segment is refused —
-/// a directory is not an object, and inventing a name would put the task's data somewhere it was
-/// not told to look.
-fn object_name(url: &str) -> Result<String> {
-    if url.ends_with('/') {
-        // A URL that ends in a slash names a PREFIX, and a prefix is a different resource shape.
-        bail!("resource URL `{url}` names no object (it names a prefix)");
-    }
-    let last = url
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("resource URL `{url}` names no object"))?;
-    Ok(last.to_string())
-}
-
 /// Fetch the blob into the resource's directory. Idempotent like the git arm: present means
 /// present — the task's own edits are its own, and a second `ensure` must not overwrite them.
 fn ensure_object(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
-    let target = path.join(object_name(&material.url)?);
+    let target = path.join(effector_protocol::resource::object_name(&material.url)?);
     if target.exists() {
         return Ok(());
     }
@@ -185,7 +168,7 @@ fn ensure_object(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
 /// Upload the blob back and return what the store says about it (its ETag): the reference that
 /// makes a bad write undoable, the same role a branch@sha plays for git.
 fn sync_object(spec: &Spec, material: &Material, path: &Path) -> Result<String> {
-    let source = path.join(object_name(&material.url)?);
+    let source = path.join(effector_protocol::resource::object_name(&material.url)?);
     if !source.exists() {
         bail!(
             "resource `{}` was never ensured, so there is nothing to publish",
@@ -232,17 +215,11 @@ fn curl(spec: &Spec, material: &Material, args: &[&str]) -> Result<String> {
         // `access_key:secret_key[:region]` — one string, the shape a secret row holds. The region
         // is part of the signature, and most object-store deployments either want their own or
         // ignore it, so it rides along rather than being guessed.
-        let parts: Vec<&str> = credential.splitn(3, ':').collect();
-        if parts.len() < 2 {
-            bail!(
-                "resource `{}`: the plane minted a credential that is not `access_key:secret_key`",
-                spec.identity()
-            );
-        }
-        let region = parts.get(2).copied().unwrap_or("us-east-1");
+        let (access_key, secret_key, region) = effector_protocol::resource::credential_parts(credential)
+            .with_context(|| format!("resource `{}`", spec.identity()))?;
         command
             .arg("--user")
-            .arg(format!("{}:{}", parts[0], parts[1]))
+            .arg(format!("{access_key}:{secret_key}"))
             .arg("--aws-sigv4")
             .arg(format!("aws:amz:{region}:s3"));
     }
@@ -455,7 +432,7 @@ mod tests {
 
     fn object_spec(mode: Mode) -> Spec {
         Spec {
-            kind: "object".into(),
+            kind: "s3".into(),
             seq: 3,
             transport: Transport::S3,
             git_ref: None,
@@ -474,7 +451,7 @@ mod tests {
         };
 
         let path = ensure(&s, &m, &base).unwrap();
-        assert_eq!(path, base.join("object").join("3"));
+        assert_eq!(path, base.join("s3").join("3"));
         assert_eq!(
             std::fs::read_to_string(path.join("out.tar")).unwrap(),
             "hello",
@@ -507,17 +484,25 @@ mod tests {
     }
 
     #[test]
-    fn a_prefix_is_refused_by_name_because_a_half_moved_directory_loses_data() {
-        let err = Spec::from_plane("prefix", 1, "rw", None).unwrap_err();
-        assert!(err.to_string().contains("prefix"), "{err}");
+    fn a_kind_this_node_cannot_move_is_refused_by_name() {
+        // The venue knows five kinds; this node moves two. The refusal names the kind it was asked
+        // for, so the operator learns which one is missing rather than "a transfer failed".
+        let err = Spec::from_plane("rustic", 1, "rw", None).unwrap_err();
+        assert!(err.to_string().contains("rustic"), "{err}");
     }
 
     #[test]
     fn an_object_url_with_no_last_segment_names_no_object() {
-        let err = object_name("s3://bucket/builds/").unwrap_err();
+        let err = effector_protocol::resource::object_name("s3://bucket/builds/").unwrap_err();
         assert!(err.to_string().contains("names no object"), "{err}");
-        assert_eq!(object_name("s3://bucket/builds/out.tar").unwrap(), "out.tar");
-        assert_eq!(object_name("https://host/a/b/model.gguf").unwrap(), "model.gguf");
+        assert_eq!(
+            effector_protocol::resource::object_name("s3://bucket/builds/out.tar").unwrap(),
+            "out.tar"
+        );
+        assert_eq!(
+            effector_protocol::resource::object_name("https://host/a/b/model.gguf").unwrap(),
+            "model.gguf"
+        );
     }
 
     #[test]

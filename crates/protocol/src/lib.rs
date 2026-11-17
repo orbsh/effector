@@ -353,3 +353,44 @@ pub struct HostResult {
     pub host_call_id: String,
     pub outcome: Result<serde_json::Value, String>,
 }
+
+/// The shapes a resource declaration carries, stated once, here — because these fields are the
+/// WIRE contract (`Material.url`, `Material.credential`), and both ends must agree: the plane
+/// refuses a declaration at the operator's door with the same rule the node applies when it moves
+/// the data.
+pub mod resource {
+    use anyhow::{bail, Result};
+
+    /// The file name an object resource lands under, taken from its URL: `s3://bucket/builds/out.tar`
+    /// and `https://host/builds/out.tar` both give `out.tar`. A URL that ends in `/` names a PREFIX,
+    /// which is a different kind of resource; inventing a name would put a task's data somewhere it
+    /// was never told to look.
+    pub fn object_name(url: &str) -> Result<String> {
+        if url.ends_with('/') {
+            bail!("resource URL `{url}` names no object (it names a prefix)");
+        }
+        let last = url
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("resource URL `{url}` names no object"))?;
+        Ok(last.to_string())
+    }
+
+    /// `access_key:secret_key[:region]` — ONE string, because that is what a secret row holds.
+    /// Split once, here, so the door and the node cannot disagree about the shape.
+    pub fn credential_parts(credential: &str) -> Result<(&str, &str, &str)> {
+        let parts: Vec<&str> = credential.splitn(3, ':').collect();
+        match parts.as_slice() {
+            [access_key, secret_key] if !access_key.is_empty() && !secret_key.is_empty() => {
+                Ok((access_key, secret_key, "us-east-1"))
+            }
+            [access_key, secret_key, region]
+                if !access_key.is_empty() && !secret_key.is_empty() && !region.is_empty() =>
+            {
+                Ok((access_key, secret_key, region))
+            }
+            _ => bail!("a credential must be `access_key:secret_key[:region]`, got {credential:?}"),
+        }
+    }
+}
