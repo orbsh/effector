@@ -197,7 +197,6 @@ async fn serve_connection(
                             Ok(minted) => match crate::resource::Spec::from_plane(
                                 &decl.kind,
                                 decl.seq,
-                                &minted.transport,
                                 &minted.mode,
                                 minted.at.as_deref(),
                             ) {
@@ -255,7 +254,6 @@ async fn serve_connection(
                 seq,
                 url,
                 credential,
-                transport,
                 mode,
                 at,
                 ..
@@ -269,7 +267,6 @@ async fn serve_connection(
                     let _ = waiter.send(Ok(Minted {
                         url,
                         credential,
-                        transport,
                         mode,
                         at,
                     }));
@@ -319,7 +316,6 @@ type PendingHost = std::sync::Mutex<
 struct Minted {
     url: String,
     credential: Option<String>,
-    transport: String,
     mode: String,
     at: Option<String>,
 }
@@ -439,13 +435,8 @@ async fn execute_call_inner(
         let minted =
             request_material(tx, pending_material, &call.call_id, &decl.kind, decl.seq, false)
                 .await?;
-        let spec = crate::resource::Spec::from_plane(
-            &decl.kind,
-            decl.seq,
-            &minted.transport,
-            &minted.mode,
-            minted.at.as_deref(),
-        )
+        let spec =
+            crate::resource::Spec::from_plane(&decl.kind, decl.seq, &minted.mode, minted.at.as_deref())
         .map_err(|e| anyhow::anyhow!("{e}"))?;
         // What the plane said about writability, remembered for the publish step.
         modes

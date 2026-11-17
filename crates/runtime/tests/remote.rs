@@ -599,7 +599,6 @@ async fn a_declared_resource_is_ensured_then_published_with_its_reference() {
                             seq,
                             url: bare.to_string_lossy().into_owned(),
                             credential: None,
-                            transport: "git".into(),
                             mode: "rw".into(),
                             at: Some("main".into()),
                         })

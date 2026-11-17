@@ -67,16 +67,13 @@ impl Spec {
     /// Build the node's view from what the plane said. An unknown transport or mode is REFUSED, not
     /// ignored: a plane that answers `snapshot` must hear that this node cannot perform it, rather
     /// than run with the data missing.
-    pub fn from_plane(
-        kind: &str,
-        seq: u64,
-        transport: &str,
-        mode: &str,
-        at: Option<&str>,
-    ) -> Result<Self> {
-        let transport = match transport {
+    pub fn from_plane(kind: &str, seq: u64, mode: &str, at: Option<&str>) -> Result<Self> {
+        // The KIND decides how it travels. There is no second word for this on the wire: a node
+        // that cannot move this kind says so by name, and a kind is never silently mapped onto a
+        // transfer that happens to be lying around.
+        let transport = match kind {
             "git" => Transport::Git,
-            other => bail!("this node cannot perform transport `{other}`"),
+            other => bail!("this node cannot move `{other}` resources"),
         };
         let mode = match mode {
             "ro" => Mode::ReadOnly,
@@ -376,14 +373,15 @@ mod tests {
     }
 
     #[test]
-    fn what_the_plane_says_wins_and_an_unknown_transport_is_refused() {
-        let spec = Spec::from_plane("git", 3, "git", "rw", Some("main")).unwrap();
+    fn what_the_plane_says_wins_and_an_unknown_kind_is_refused() {
+        let spec = Spec::from_plane("git", 3, "rw", Some("main")).unwrap();
         assert_eq!(spec.mode, Mode::ReadWrite);
         assert_eq!(spec.git_ref.as_deref(), Some("main"));
-        // A transport this node cannot perform is refused BY NAME, not ignored.
-        let err = Spec::from_plane("snap", 3, "snapshot", "ro", None).unwrap_err();
-        assert!(err.to_string().contains("snapshot"), "{err}");
-        let err = Spec::from_plane("git", 3, "git", "readwrite", None).unwrap_err();
+        // A KIND this node cannot move is refused BY NAME, not ignored — the node never maps an
+        // unknown kind onto a transfer that happens to be lying around.
+        let err = Spec::from_plane("rustic", 3, "ro", None).unwrap_err();
+        assert!(err.to_string().contains("rustic"), "{err}");
+        let err = Spec::from_plane("git", 3, "readwrite", None).unwrap_err();
         assert!(err.to_string().contains("mode"), "{err}");
     }
 }

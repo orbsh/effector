@@ -240,9 +240,10 @@ pub enum Frame {
         url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
-        /// How the data travels, as the PLANE declares it: the task does not choose the transport,
-        /// it says which resource it needs and the plane answers with how that resource travels.
-        transport: String,
+        // No `transport` field: `kind` IS the identity, and the node is the one that knows how a
+        // git resource moves. A field that always equalled the kind was two words for one fact,
+        // and the day a second transport exists it will be the row's new KIND, not a parallel
+        // vocabulary here.
         /// `ro` or `rw`. The plane's word wins over the task's wish — it is the row's decision.
         mode: String,
         /// The version to check out, when the plane names one.
