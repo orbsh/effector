@@ -155,11 +155,43 @@ impl LeaseConfig {
     }
 }
 
+/// What contains this node. Mirrors `effector_protocol::NodeClass` at the config surface (the
+/// protocol crate is the wire; this one is the file), and the two are converted once, at the dial.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Class {
+    #[default]
+    Host,
+    Container,
+}
+
+impl Class {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Class::Host => "host",
+            Class::Container => "container",
+        }
+    }
+
+    /// Whether THIS machine is inside a container right now — the markers the runtimes leave.
+    fn marker_present() -> bool {
+        std::path::Path::new("/.dockerenv").exists()
+            || std::path::Path::new("/.containerenv").exists()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectorConfig {
     /// Control plane endpoint for the outbound registration connection
     /// WS only — no degraded fallback (long-polling explicitly rejected).
     pub control_plane_url: String,
+    /// What contains this node (ADR-0003 §10). `container` says the node IS a container's root
+    /// process — the launcher started `docker run --rm --init -i` — and its filesystem is the
+    /// boundary. `host` says it is a process on somebody's machine with that machine's authority.
+    /// Declared, not guessed, and CHECKED at load: a node claiming `container` without the marker
+    /// the runtime leaves is refused, because a claim nothing enforces is a lie the config tells.
+    #[serde(default)]
+    pub class: Class,
     /// Wrap executor processes in bubblewrap. Remote deployments MUST set
     /// true (unattended external code); requires bwrap on PATH. In-process
     /// embedded deployments (aura) pass None instead.
@@ -201,7 +233,29 @@ impl EffectorConfig {
     /// and an EMPTY allowlist (the filter reads an empty list as "allow
     /// everything", which is the opposite of what a declaration asks for).
     pub fn validate(&self) -> Result<(), String> {
-        // A node without a token cannot be let in, and finding that out at the first dial
+        // The class is a claim about what contains the code this node runs, and the two failure
+        // directions are both real: claiming a container the node is not in makes a host machine
+        // look safe, and running a jail INSIDE a container is a second boundary story with nothing
+        // left to bound.
+        // The contradiction is checked FIRST because it is a property of the file alone (so a test
+        // can reach it); the marker check depends on where the process happens to run.
+        if self.class == Class::Container && self.sandbox {
+            return Err(
+                "class = container with sandbox = true: the container is already the boundary; \
+                 wrapping a jail inside it is a second containment story with nothing left to \
+                 bound — set `sandbox: false`"
+                    .into(),
+            );
+        }
+        if self.class == Class::Container && !Class::marker_present() {
+            return Err(
+                "class = container: this process is not inside a container (no /.dockerenv or \
+                 /.containerenv) — the launcher starts the node with `docker run`, and a host \
+                 process cannot claim the container's boundary"
+                    .into(),
+            );
+        }
+        // A node without a token cannot be let in, and finding out at the first dial
         // (after spawning, after the container started) is a worse time than at load.
         if self.token.trim().is_empty() {
             return Err(
@@ -241,6 +295,7 @@ mod tests {
     fn config(capabilities: CapabilitySurface) -> EffectorConfig {
         EffectorConfig {
             control_plane_url: "ws://127.0.0.1:8787".into(),
+            class: Class::Host,
             sandbox: true,
             token: "test-token".into(),
             capabilities,
@@ -312,6 +367,26 @@ mod tests {
             err.contains("builds no jail"),
             "an allowlist needs the jail's bridges: {err}"
         );
+    }
+
+    #[test]
+    fn a_container_class_is_refused_where_it_would_be_a_claim_and_not_a_fact() {
+        // The claim and the boundary are checked together: a jail inside a container bounds nothing,
+        // and a host process claiming a container's boundary is the more dangerous of the two
+        // because it makes an uncontained machine look safe.
+        let mut c = config(declaring());
+        c.class = Class::Container;
+        c.sandbox = true;
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("container is already the boundary"), "{err}");
+
+        // With the contradiction out of the way, the marker decides — and this test runs outside a
+        // container, so the honest answer here is the refusal, naming what is missing.
+        c.sandbox = false;
+        match c.validate() {
+            Err(err) => assert!(err.contains("not inside a container"), "{err}"),
+            Ok(()) => { /* this test ran inside a container: the claim is checkable, so it held */ }
+        }
     }
 
     #[test]

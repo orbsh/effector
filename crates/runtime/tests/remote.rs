@@ -51,9 +51,15 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
         Frame::Register {
             node_alias,
             carriers,
+            class,
         } => {
             assert_eq!(node_alias, "test-node");
             assert!(carriers.contains(&"steel".to_string()));
+            assert_eq!(
+                class,
+                effector_protocol::NodeClass::Host,
+                "a node that does not say it is a container is treated as one that is not"
+            );
         }
         other => panic!("expected Register, got {other:?}"),
     }
@@ -66,6 +72,7 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     // Push one call: a steel counter handler. Executor identity and entry
     // name are separate: residency is keyed by `executor` alone.
     let call = ToolCall {
+        requires: None,
         call_id: "c-1".into(),
         kind: effector_protocol::CallKind::IterateStart,
         stream: Some("s-1".into()),
@@ -121,6 +128,7 @@ async fn outbound_registration_and_task_downlink() {
     let server = tokio::spawn(fake_control_plane(listener, code));
 
     let config = EffectorConfig {
+        class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{port}"),
         sandbox: true,
         token: TOKEN.into(),
@@ -202,6 +210,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
 
         // Link call with the CORRECT hash: fetch, verify, execute.
         let call = ToolCall {
+            requires: None,
             call_id: "c-link".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
@@ -236,6 +245,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         // load actually re-resolves): the per-hash cache must serve it —
         // the HTTP source stays at exactly one hit across the exchange.
         let call = ToolCall {
+            requires: None,
             call_id: "c-cached".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
@@ -273,6 +283,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
 
         // Link call with a WRONG hash: error value, never a silent accept.
         let call = ToolCall {
+            requires: None,
             call_id: "c-bad".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
@@ -302,6 +313,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
     });
 
     let config = EffectorConfig {
+        class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{ws_port}"),
         sandbox: true,
         token: TOKEN.into(),
@@ -328,6 +340,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
 #[tokio::test]
 async fn an_unenforceable_declaration_fails_before_dialing() {
     let config = EffectorConfig {
+        class: effector_config::Class::Host,
         // Nothing listens on port 1: a real dial would fail with a DIFFERENT
         // error (connection refused), so the named config error is the proof
         // that the node never dialed at all.
@@ -363,6 +376,7 @@ async fn a_leased_node_leaves_when_the_work_stops() {
     let port = listener.local_addr().unwrap().port();
 
     let config = EffectorConfig {
+        class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{port}"),
         sandbox: false,
         token: TOKEN.into(),
@@ -435,6 +449,7 @@ async fn a_plane_that_accepts_and_goes_silent_ends_a_leased_node() {
     let port = listener.local_addr().unwrap().port();
 
     let config = EffectorConfig {
+        class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{port}"),
         sandbox: false,
         token: TOKEN.into(),

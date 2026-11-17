@@ -12,6 +12,8 @@ use induction_protocol::Encoding;
 fn roundtrip_call_carries_a_code_reference() {
     let call = ToolCall {
         call_id: "c1".into(),
+        // No class requirement: this call runs wherever it is dispatched.
+        requires: None,
         kind: effector_protocol::CallKind::IterateStart,
         stream: None,
         executor: "notes/7".into(),

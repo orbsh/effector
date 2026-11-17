@@ -50,6 +50,12 @@ pub struct ToolCall {
     /// Correlates the eventual ToolResult back to the caller (Gravity's
     /// pending_calls deadline scan reuses this id).
     pub call_id: String,
+    /// What this call needs from the node that runs it, when it needs anything at all (ADR-0003
+    /// §1). `None` = no requirement: the node runs it with whatever authority it has. A call that
+    /// carries `container` is code nobody reviewed — a HOST node refuses it BY NAME rather than run
+    /// it with the machine's authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<NodeClass>,
     /// What this call asks the executor to do (ADR-0034, unified
     /// envelope ADR-0036). Every dispatch job is a stream op:
     /// `IterateStart` runs the handler as a producer (a plain handler is
@@ -164,6 +170,29 @@ pub fn dial_url(base: &str, token: &str) -> String {
     }
 }
 
+/// What a node IS, on the wire: the boundary that contains the code it runs.
+///
+/// `Host` — the node is a process on somebody's machine, and the code it runs has that machine's
+/// authority. `Container` — the node IS the container's root process (ADR-0003 §10): its filesystem
+/// is the container's, and anything it spawns is inside it. The class is a property of the DEPLOYMENT,
+/// not of a call, which is why it is declared once at the dial and a call can only REQUIRE one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeClass {
+    #[default]
+    Host,
+    Container,
+}
+
+impl NodeClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeClass::Host => "host",
+            NodeClass::Container => "container",
+        }
+    }
+}
+
 /// Transport envelope over the outbound connection (Phase 3). The control
 /// plane sends exactly one frame per WS message; the effector replies likewise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +207,10 @@ pub enum Frame {
     Register {
         node_alias: String,
         carriers: Vec<String>,
+        /// What contains this node (ADR-0003 §10). Defaults to `host`, which is the safe reading:
+        /// a node that does not say it is a container is treated as one that is not.
+        #[serde(default)]
+        class: NodeClass,
     },
     /// Control plane to effector: a `Register` was accepted.
     Registered,

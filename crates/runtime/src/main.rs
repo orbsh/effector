@@ -13,6 +13,8 @@ fn main() -> anyhow::Result<()> {
     let mut control_plane: Option<String> = None;
     let mut token: Option<String> = None;
     let mut token_from_stdin = false;
+    let mut idle_secs: Option<u64> = None;
+    let mut exit_on_disconnect = false;
     let mut once = false;
 
     while let Some(arg) = args.next() {
@@ -40,6 +42,19 @@ fn main() -> anyhow::Result<()> {
             // node's environment is inherited by the guest it spawns, so env is not one
             // either. stdin belongs to the process alone.
             "--token-stdin" => token_from_stdin = true,
+            // The grace period, for the container form: the node's lifetime IS the container's, so
+            // "how long do I wait for the task's next call" is a launch fact, not a file edit.
+            "--idle-secs" => {
+                idle_secs = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--idle-secs needs a number"))?
+                        .parse::<u64>()
+                        .map_err(|e| anyhow::anyhow!("--idle-secs: {e}"))?,
+                );
+            }
+            // A node that IS the container has no second life: when the connection ends there is
+            // nothing left to serve it, so it leaves instead of reconnecting (ADR-0003 §11).
+            "--exit-on-disconnect" => exit_on_disconnect = true,
             other if other.starts_with('-') => {
                 anyhow::bail!("unknown argument `{other}` (see `effector --help`)")
             }
@@ -65,6 +80,12 @@ fn main() -> anyhow::Result<()> {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         config.token = take_token_line(&line).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(secs) = idle_secs {
+        config.lease.idle_secs = secs;
+    }
+    if exit_on_disconnect {
+        config.lease.exit_on_disconnect = true;
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -93,7 +114,8 @@ effector — a node's dial-in agent
   effector register [config.json]        one handshake against the control plane, then exit
   effector [config.json] --control-plane <ws://url> --token <token>
                                          launcher overrides (the container form, ADR-0003)
-  effector [config.json] --control-plane <ws://url> --token-stdin
+  effector [config.json] --control-plane <ws://url> --token-stdin [--idle-secs N] \
+      [--exit-on-disconnect]
                                          the token arrives on stdin, one line — the form to use
                                          when a launcher spawns the node: argv is world-readable
                                          and the environment is inherited by the guest

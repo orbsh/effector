@@ -57,6 +57,9 @@ async fn serve_connection(
     let register = Frame::Register {
         node_alias: config.capabilities.node_alias.clone(),
         carriers: config.capabilities.carriers.clone(),
+        // What contains this node (ADR-0003 §10). A call that NEEDS a container is refused by a
+        // host node in words — see `execute_call_inner`.
+        class: node_class(config),
     };
     sink.send(Message::Text(serde_json::to_string(&register)?))
         .await?;
@@ -379,6 +382,13 @@ async fn execute_call_inner(
     policy: &crate::environment::Environment,
     adopted: &Arc<Adopted>,
 ) -> Result<serde_json::Value> {
+    // A call may REQUIRE a class (ADR-0003 §1): code nobody reviewed asks for a container, and a
+    // node that is not one refuses BY NAME. Running it anyway would be the silent acceptance the
+    // ADR forbids, and it is the one check that has to be here rather than at the plane — the node
+    // is the only party that knows what contains it.
+    if let Some(why) = class_refusal(config, call) {
+        anyhow::bail!("{why}");
+    }
     // Content-addressed code (ADR-0027): the frame carries a reference,
     // bytes ride the data path. Resolve = per-hash cache hit, else fetch +
     // verify (mismatch = error, never silent). The cache is a discardable
@@ -799,6 +809,9 @@ pub async fn register_once(config: &EffectorConfig) -> Result<()> {
     let register = Frame::Register {
         node_alias: config.capabilities.node_alias.clone(),
         carriers: config.capabilities.carriers.clone(),
+        // What contains this node (ADR-0003 §10). A call that NEEDS a container is refused by a
+        // host node in words — see `execute_call_inner`.
+        class: node_class(config),
     };
     ws.send(Message::Text(serde_json::to_string(&register)?))
         .await?;
@@ -810,6 +823,31 @@ pub async fn register_once(config: &EffectorConfig) -> Result<()> {
         },
         Some(Err(e)) => Err(e.into()),
         _ => anyhow::bail!("control plane closed without answering"),
+    }
+}
+
+/// Why this node cannot run this call, if it cannot (ADR-0003 §1). The node is the only party that
+/// knows what contains it, so this check cannot live at the plane: a plane can route, but only the
+/// process knows whether it is inside a container.
+fn class_refusal(config: &EffectorConfig, call: &ToolCall) -> Option<String> {
+    match (call.requires, config.class) {
+        (Some(effector_protocol::NodeClass::Container), effector_config::Class::Host) => Some(
+            format!(
+                "call {} requires a container, and this node is `{}` — it cannot become one on \
+                 demand; the plane routes such a call to a node started with `docker run`",
+                call.call_id,
+                config.class.as_str()
+            ),
+        ),
+        _ => None,
+    }
+}
+
+/// The node's declared class, as the wire spells it. One conversion, at the dialect boundary.
+fn node_class(config: &EffectorConfig) -> effector_protocol::NodeClass {
+    match config.class {
+        effector_config::Class::Host => effector_protocol::NodeClass::Host,
+        effector_config::Class::Container => effector_protocol::NodeClass::Container,
     }
 }
 
@@ -928,6 +966,7 @@ mod tests {
 
     fn config(capabilities: CapabilitySurface) -> EffectorConfig {
         EffectorConfig {
+            class: effector_config::Class::Host,
             control_plane_url: "ws://127.0.0.1:8787".into(),
             sandbox: true,
             token: "test-token".into(),
@@ -958,6 +997,47 @@ mod tests {
             } => (allow_write, deny_read, cwd, allowed_domains, proxy),
             other => panic!("a wrapped deployment builds a bwrap policy, got {other:?}"),
         }
+    }
+
+    fn call_requiring(class: Option<effector_protocol::NodeClass>) -> ToolCall {
+        ToolCall {
+            call_id: "c-class".into(),
+            requires: class,
+            kind: effector_protocol::CallKind::IterateStart,
+            stream: None,
+            executor: "e/1".into(),
+            entry: "run".into(),
+            language: "induction".into(),
+            encoding: induction_protocol::Encoding::Json,
+            args: serde_json::json!({}),
+            code: effector_protocol::CodeRef {
+                url: String::new(),
+                sha256: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_call_that_needs_a_container_is_refused_by_a_host_node_in_words() {
+        let host = config(CapabilitySurface::default());
+        let needs = call_requiring(Some(effector_protocol::NodeClass::Container));
+        let why = class_refusal(&host, &needs).expect("a host node cannot pretend");
+        assert!(why.contains("requires a container"), "{why}");
+        assert!(why.contains("host"), "the refusal names what this node is: {why}");
+
+        // Nothing required: the node runs it with whatever authority it has.
+        assert!(class_refusal(&host, &call_requiring(None)).is_none());
+
+        // A container node can run both — it is strictly more contained, so a `host` requirement
+        // is satisfied by a container, not the other way round.
+        let mut inside = config(CapabilitySurface::default());
+        inside.class = effector_config::Class::Container;
+        inside.sandbox = false;
+        assert!(class_refusal(&inside, &needs).is_none());
+        assert!(
+            class_refusal(&inside, &call_requiring(Some(effector_protocol::NodeClass::Host)))
+                .is_none()
+        );
     }
 
     #[test]
