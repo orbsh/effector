@@ -9,10 +9,10 @@
 //! the undo handle: the plane holds "the current version" as a pointer and a bad write is undone by
 //! not advancing it.
 //!
-//! Only `git` exists here, and that is deliberate: a transport is a value that something produces
-//! (ADR-0001). `object`/`prefix` and `snapshot` arrive with their own code and their own tests;
-//! until then `Transport::Git` is the only variant the type can express, so no configuration can
-//! claim a transport this node cannot perform.
+//! Two shapes exist here: a `git` repository and one `object` (a single blob over the S3-shaped
+//! wire protocol, signed per transfer with the credential the plane minted). `prefix` and
+//! `snapshot` are refused BY NAME until their code and tests exist — a transport is a value that
+//! something produces (ADR-0001), and half-moved data is worse than a refusal.
 //!
 //! Credentials: the material comes from the control plane per transfer and lives for that
 //! transfer. It is handed to the `git` child as an environment variable (the child is ours, it
@@ -30,6 +30,10 @@ use anyhow::{bail, Context, Result};
 pub enum Transport {
     /// Text and code: a repository, checked out at a ref, committed and pushed back.
     Git,
+    /// One blob: fetched from its URL by `ensure`, uploaded back by `sync`. The protocol is the
+    /// S3-shaped one (a signed HTTP request), which is what object stores speak — the KIND says
+    /// which shape the data has, the transport says how it moves.
+    S3,
 }
 
 /// Whether the task may write this resource. Publishing an `ro` resource is an ERROR, not a
@@ -73,6 +77,10 @@ impl Spec {
         // transfer that happens to be lying around.
         let transport = match kind {
             "git" => Transport::Git,
+            // One object. A `prefix` (a whole directory in a bucket) needs a listing to sync and is
+            // NOT this: it is refused by name below rather than half-moved, because "uploaded some
+            // of it" is the failure mode that loses data quietly.
+            "object" => Transport::S3,
             other => bail!("this node cannot move `{other}` resources"),
         };
         let mode = match mode {
@@ -119,6 +127,7 @@ pub fn ensure(spec: &Spec, material: &Material, base: &Path) -> Result<PathBuf> 
     let path = spec.path(base)?;
     match spec.transport {
         Transport::Git => ensure_git(spec, material, &path)?,
+        Transport::S3 => ensure_object(spec, material, &path)?,
     }
     Ok(path)
 }
@@ -134,7 +143,120 @@ pub fn sync(spec: &Spec, material: &Material, base: &Path) -> Result<String> {
     }
     match spec.transport {
         Transport::Git => sync_git(spec, material, &spec.path(base)?),
+        Transport::S3 => sync_object(spec, material, &spec.path(base)?),
     }
+}
+
+/// The file name an object resource lands under, taken from its URL: `s3://bucket/builds/out.tar`
+/// and `https://host/builds/out.tar` both give `out.tar`. A URL with no last segment is refused —
+/// a directory is not an object, and inventing a name would put the task's data somewhere it was
+/// not told to look.
+fn object_name(url: &str) -> Result<String> {
+    if url.ends_with('/') {
+        // A URL that ends in a slash names a PREFIX, and a prefix is a different resource shape.
+        bail!("resource URL `{url}` names no object (it names a prefix)");
+    }
+    let last = url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("resource URL `{url}` names no object"))?;
+    Ok(last.to_string())
+}
+
+/// Fetch the blob into the resource's directory. Idempotent like the git arm: present means
+/// present — the task's own edits are its own, and a second `ensure` must not overwrite them.
+fn ensure_object(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
+    let target = path.join(object_name(&material.url)?);
+    if target.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("resource `{}`: {}", spec.identity(), path.display()))?;
+    let into = target.to_string_lossy().into_owned();
+    curl(
+        spec,
+        material,
+        &["-fsSL", "--output", &into, &material.url],
+    )?;
+    Ok(())
+}
+
+/// Upload the blob back and return what the store says about it (its ETag): the reference that
+/// makes a bad write undoable, the same role a branch@sha plays for git.
+fn sync_object(spec: &Spec, material: &Material, path: &Path) -> Result<String> {
+    let source = path.join(object_name(&material.url)?);
+    if !source.exists() {
+        bail!(
+            "resource `{}` was never ensured, so there is nothing to publish",
+            spec.identity()
+        );
+    }
+    let from = source.to_string_lossy().into_owned();
+    let etag = curl(
+        spec,
+        material,
+        &[
+            "-fsSL",
+            "--request",
+            "PUT",
+            "--upload-file",
+            &from,
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%header{etag}",
+            &material.url,
+        ],
+    )?;
+    let etag = etag.trim().trim_matches('"').to_string();
+    // An object store that answers without an ETag has not told us what it stored; the URL is
+    // still a true statement about where it went, and saying so beats inventing an identifier.
+    Ok(if etag.is_empty() {
+        material.url.clone()
+    } else {
+        etag
+    })
+}
+
+/// One signed HTTP request, with the credential the PLANE minted for this transfer. The secret
+/// reaches curl through argv (as it reaches git through a URL) — it is a per-transfer value the
+/// plane chose to hand out, and it never touches a config file on this node.
+///
+/// This is also why `sync`/`ensure` do not need an SDK: S3's wire protocol is a signed HTTP
+/// request, and curl speaks SigV4. A node that cannot perform it (no curl) fails here by name.
+fn curl(spec: &Spec, material: &Material, args: &[&str]) -> Result<String> {
+    let mut command = Command::new("curl");
+    command.args(args);
+    if let Some(credential) = &material.credential {
+        // `access_key:secret_key[:region]` — one string, the shape a secret row holds. The region
+        // is part of the signature, and most object-store deployments either want their own or
+        // ignore it, so it rides along rather than being guessed.
+        let parts: Vec<&str> = credential.splitn(3, ':').collect();
+        if parts.len() < 2 {
+            bail!(
+                "resource `{}`: the plane minted a credential that is not `access_key:secret_key`",
+                spec.identity()
+            );
+        }
+        let region = parts.get(2).copied().unwrap_or("us-east-1");
+        command
+            .arg("--user")
+            .arg(format!("{}:{}", parts[0], parts[1]))
+            .arg("--aws-sigv4")
+            .arg(format!("aws:amz:{region}:s3"));
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("curl (resource `{}`)", spec.identity()))?;
+    if !output.status.success() {
+        bail!(
+            "curl failed for resource `{}`: {}",
+            spec.identity(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn ensure_git(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
@@ -298,6 +420,104 @@ mod tests {
             url: url.to_string_lossy().into_owned(),
             credential: None,
         }
+    }
+
+/// A one-request HTTP server: it answers exactly what an object store answers for the verb it
+    /// receives — the body for a GET, an ETag for a PUT — and records that it was asked. Enough to
+    /// exercise the node's whole half of an object transfer without a store.
+    fn fake_store(the_body: &'static str, etag: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut head = [0u8; 4096];
+                let n = stream.read(&mut head).unwrap_or(0);
+                let request = String::from_utf8_lossy(&head[..n]).to_string();
+                let reply = if request.starts_with("PUT") {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nETag: \"{etag}\"\r\nContent-Length: 0\r\n\r\n"
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{the_body}",
+                        the_body.len()
+                    )
+                };
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        format!("http://{addr}/builds/out.tar")
+    }
+
+    fn object_spec(mode: Mode) -> Spec {
+        Spec {
+            kind: "object".into(),
+            seq: 3,
+            transport: Transport::S3,
+            git_ref: None,
+            mode,
+        }
+    }
+
+    #[test]
+    fn an_object_lands_under_its_own_name_and_the_second_ensure_keeps_the_tasks_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("resources");
+        let s = object_spec(Mode::ReadWrite);
+        let m = Material {
+            url: fake_store("hello", "etag-1"),
+            credential: None,
+        };
+
+        let path = ensure(&s, &m, &base).unwrap();
+        assert_eq!(path, base.join("object").join("3"));
+        assert_eq!(
+            std::fs::read_to_string(path.join("out.tar")).unwrap(),
+            "hello",
+            "the blob lands under the name its URL gives it"
+        );
+
+        // A second ensure is a no-op: the task may have changed the file, and its edit is its own.
+        std::fs::write(path.join("out.tar"), "edited").unwrap();
+        ensure(&s, &m, &base).unwrap();
+        assert_eq!(std::fs::read_to_string(path.join("out.tar")).unwrap(), "edited");
+    }
+
+    #[test]
+    fn publishing_an_object_returns_what_the_store_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("resources");
+        let s = object_spec(Mode::ReadWrite);
+        let m = Material {
+            url: fake_store("hello", "etag-42"),
+            credential: None,
+        };
+        let path = ensure(&s, &m, &base).unwrap();
+        std::fs::write(path.join("out.tar"), "new bytes").unwrap();
+
+        let reference = sync(&s, &m, &base).unwrap();
+        assert_eq!(
+            reference, "etag-42",
+            "the reference is the store's own word for what it now holds"
+        );
+    }
+
+    #[test]
+    fn a_prefix_is_refused_by_name_because_a_half_moved_directory_loses_data() {
+        let err = Spec::from_plane("prefix", 1, "rw", None).unwrap_err();
+        assert!(err.to_string().contains("prefix"), "{err}");
+    }
+
+    #[test]
+    fn an_object_url_with_no_last_segment_names_no_object() {
+        let err = object_name("s3://bucket/builds/").unwrap_err();
+        assert!(err.to_string().contains("names no object"), "{err}");
+        assert_eq!(object_name("s3://bucket/builds/out.tar").unwrap(), "out.tar");
+        assert_eq!(object_name("https://host/a/b/model.gguf").unwrap(), "model.gguf");
     }
 
     #[test]
