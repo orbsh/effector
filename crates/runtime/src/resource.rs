@@ -1,18 +1,21 @@
-//! The resource contract's node half (ADR-0003 §7): `ensure` and `sync`, one transport at a time.
+//! The resource contract's node half (ADR-0003 §7, revised by ADR-0049): `ensure` and `sync`, one
+//! mechanism at a time.
 //!
-//! A task declares a resource by IDENTITY — `{ kind, seq }` — and the plane answers with how that
-//! resource travels and where it lives: `transport`, `url`, `ref`, `mode`. The node never learns a
-//! source from the task and never invents a credential. `kind` and `seq` fix the path; `ensure` is
-//! idempotent (present → no-op), which is why a resource discovered mid-task costs a directory
-//! appearing rather than a restart; `sync` uploads the `rw` resources and RETURNS THE REFERENCE IT
-//! PRODUCED — a branch and commit for `git` — because that reference is both the audit trail and
-//! the undo handle: the plane holds "the current version" as a pointer and a bad write is undone by
-//! not advancing it.
+//! A script asks for durable data while it runs (`ctx.resource`): it names a KIND and a `remote` —
+//! its own name for the thing, the way an S3 client names a key — and the node asks the plane for
+//! what reaching that kind takes. The plane answers a ROOT (already separated by tenant) plus a
+//! credential; this module joins the script's name onto the root and moves the bytes. Neither the
+//! root nor the credential is ever handed to the script.
 //!
-//! Two shapes exist here: a `git` repository and one `object` (a single blob over the S3-shaped
-//! wire protocol, signed per transfer with the credential the plane minted). `prefix` and
-//! `snapshot` are refused BY NAME until their code and tests exist — a transport is a value that
-//! something produces (ADR-0001), and half-moved data is worse than a refusal.
+//! `ensure` is idempotent (present → no-op), which is why a resource discovered mid-script costs a
+//! file or a directory appearing rather than a restart. `sync` produces a REFERENCE —
+//! `<branch>@<sha>` for git, the store's ETag for an object — and that reference goes back to the
+//! SCRIPT, not into a table: the store already keeps the history, and a pointer kept here would be
+//! a second copy of the truth that can disagree with the first one.
+//!
+//! Two mechanisms exist here: `git` and `object`. `archive` (an incremental repository) is refused
+//! BY NAME until its code and tests exist — a mechanism is something that actually moves the data,
+//! and half-moved data is worse than a refusal.
 //!
 //! Credentials: the material comes from the control plane per transfer and lives for that
 //! transfer. It is handed to the `git` child as an environment variable (the child is ours, it
@@ -24,63 +27,53 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-/// How the data travels. Named by mechanism, not by content: a trained model is an `object`, a
-/// dataset is usually a `prefix`, and both are somebody else's slice.
+/// How the data travels, named by MECHANISM rather than by the store it happens to sit in: the same
+/// bucket can hold one object or an incremental repository, and only the mechanism says which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     /// Text and code: a repository, checked out at a ref, committed and pushed back.
     Git,
-    /// One blob: fetched from its URL by `ensure`, uploaded back by `sync`. The protocol is the
-    /// S3-shaped one (a signed HTTP request), which is what object stores speak — the KIND says
-    /// which shape the data has, the transport says how it moves.
-    S3,
+    /// One blob: fetched from its address by `ensure`, uploaded back by `sync`. The protocol is the
+    /// S3-shaped one (a signed HTTP request), which is what object stores speak.
+    Object,
 }
 
-/// Whether the task may write this resource. Publishing an `ro` resource is an ERROR, not a
-/// no-op (ADR-0003 §7): a silent no-op would hide a task that thinks it saved something.
+/// Whether the task may write this kind. Publishing an `ro` grant is an ERROR, not a no-op
+/// (ADR-0003 §7): a silent no-op would hide a task that thinks it saved something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     ReadOnly,
     ReadWrite,
 }
 
-/// What a task declares about data it needs, before any credential exists.
+/// What a script asked for, reduced to what the node needs to pick a mechanism.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
-    /// The resource's type — part of its identity, and the second path component.
+    /// The mechanism's identity, as the venue names it.
     pub kind: String,
-    /// Its sequence within (owner, type) — the last path component.
-    pub seq: u64,
     pub transport: Transport,
-    /// The ref to check out (branch, tag, commit). `None` means the remote's default.
-    pub git_ref: Option<String>,
+    /// The ref to check out for `git` (branch, tag, commit). `None` means the remote's default.
+    pub at: Option<String>,
     pub mode: Mode,
 }
 
-/// What the control plane mints for one transfer: where to reach the store, and how.
+/// What the plane hands over for one kind: the root this execution may reach, and the credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Material {
-    /// The URL to use for this transfer. It may differ from `Spec::source` — a presigned URL is
-    /// the same object addressed for one request — and it is not stored anywhere.
-    pub url: String,
+    /// `<base>/<tenant>/<kind>` — the slice of the store this execution may name things inside.
+    pub base: String,
     /// A secret for this transfer (a token, a password). Never written to disk, never in argv.
     pub credential: Option<String>,
 }
 
 impl Spec {
-    /// Build the node's view from what the plane said. An unknown transport or mode is REFUSED, not
-    /// ignored: a plane that answers `snapshot` must hear that this node cannot perform it, rather
+    /// Build the node's view from what the plane said. An unknown mechanism or mode is REFUSED, not
+    /// ignored: a plane that answers `archive` must hear that this node cannot perform it, rather
     /// than run with the data missing.
-    pub fn from_plane(kind: &str, seq: u64, mode: &str, at: Option<&str>) -> Result<Self> {
-        // The KIND decides how it travels. There is no second word for this on the wire: a node
-        // that cannot move this kind says so by name, and a kind is never silently mapped onto a
-        // transfer that happens to be lying around.
+    pub fn from_plane(kind: &str, mode: &str, at: Option<&str>) -> Result<Self> {
         let transport = match kind {
             "git" => Transport::Git,
-            // An object store over its own wire protocol. The venue's kind is `s3` — an identity,
-            // the way `rustic` and `git` are — and what arrives at this node is one blob. A source
-            // that names a prefix (a URL ending in `/`) is not one blob and is refused below.
-            "s3" => Transport::S3,
+            "object" => Transport::Object,
             other => bail!("this node cannot move `{other}` resources"),
         };
         let mode = match mode {
@@ -88,119 +81,145 @@ impl Spec {
             "rw" => Mode::ReadWrite,
             other => bail!("`{other}` is not a mode (ro or rw)"),
         };
-        let spec = Spec {
+        Ok(Spec {
             kind: kind.to_string(),
-            seq,
             transport,
-            git_ref: at.map(str::to_string),
+            at: at.filter(|s| !s.is_empty()).map(str::to_string),
             mode,
-        };
-        // Validate the path now, so a bad identity fails before any network work.
-        spec.path(Path::new("/"))?;
-        Ok(spec)
+        })
     }
 
-    /// How a resource is named in an error: `<kind>/<seq>`, the same words the task used.
-    pub fn identity(&self) -> String {
-        format!("{}/{}", self.kind, self.seq)
-    }
-
-    /// The path this resource is fixed to: `<base>/<kind>/<seq>`. Both components are checked —
-    /// a type with a separator would put the data somewhere the task did not ask for.
-    pub fn path(&self, base: &Path) -> Result<PathBuf> {
-        if self.kind.is_empty()
-            || self.kind.contains('/')
-            || self.kind.contains('\\')
-            || self.kind == "."
-            || self.kind == ".."
-        {
-            bail!("resource type `{}` is not a plain name", self.kind);
-        }
-        Ok(base.join(&self.kind).join(self.seq.to_string()))
+    /// How one ask is named in an error: `<kind>:<remote>`, in the words the script used.
+    fn label(&self, remote: &str) -> String {
+        format!("{}:{remote}", self.kind)
     }
 }
 
-/// Make the resource present at its path. Idempotent: a resource already checked out is not
-/// re-cloned (that would throw away whatever the task has done inside it), and a fetch that has
-/// nothing new is a no-op.
-pub fn ensure(spec: &Spec, material: &Material, base: &Path) -> Result<PathBuf> {
-    let path = spec.path(base)?;
+/// A script's `remote` is a RELATIVE name — one or more plain segments. It cannot climb, cannot be
+/// absolute, and cannot carry a backslash: the tenant prefix is the node's to compose, and a name
+/// that could undo it would put the data somewhere nobody asked for.
+fn plain_remote(remote: &str) -> Result<()> {
+    if remote.is_empty() {
+        bail!("a resource needs a `remote` name");
+    }
+    if remote.starts_with('/') || remote.ends_with('/') {
+        bail!("`{remote}` is not a relative name (no leading or trailing `/`)");
+    }
+    if remote.contains('\\') || remote.contains('\u{1f}') {
+        bail!("`{remote}` is not a plain name");
+    }
+    for segment in remote.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            bail!("`{remote}` may not climb or carry an empty segment");
+        }
+    }
+    Ok(())
+}
+
+/// Where a name lands on this machine: the `mount` the script asked for, or `<root>/<remote>`.
+pub fn location(root: &Path, mount: Option<&Path>, remote: &str) -> Result<PathBuf> {
+    plain_remote(remote)?;
+    Ok(match mount {
+        Some(path) => path.to_path_buf(),
+        None => root.join(remote),
+    })
+}
+
+/// The address one name reaches: `<root>/<remote>`, joined once so nothing else has to think about
+/// trailing slashes.
+fn address(material: &Material, remote: &str) -> String {
+    format!("{}/{}", material.base.trim_end_matches('/'), remote)
+}
+
+/// Make the data present at its location. Idempotent: a repository already checked out is not
+/// re-cloned (that would throw away whatever the task has done inside it), and an object already
+/// fetched is not overwritten.
+pub fn ensure(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    mount: Option<&Path>,
+    root: &Path,
+) -> Result<PathBuf> {
+    let path = location(root, mount, remote)?;
     match spec.transport {
-        Transport::Git => ensure_git(spec, material, &path)?,
-        Transport::S3 => ensure_object(spec, material, &path)?,
+        Transport::Git => ensure_git(spec, material, remote, &path)?,
+        Transport::Object => ensure_object(spec, material, remote, &path)?,
     }
     Ok(path)
 }
 
-/// Publish the resource. Returns the reference this write produced — for `git`, `<branch>@<sha>`
-/// — which the caller must report: the pointer that makes a bad write undoable.
-pub fn sync(spec: &Spec, material: &Material, base: &Path) -> Result<String> {
+/// Publish. Returns the reference this write produced — `<branch>@<sha>` for git, the store's ETag
+/// for an object — which goes back to the script: it is the caller's handle on what it just wrote.
+pub fn sync(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    mount: Option<&Path>,
+    root: &Path,
+) -> Result<String> {
     if spec.mode == Mode::ReadOnly {
         bail!(
-            "resource `{}/{}` is read-only; publishing it is an error, not a no-op",
-            spec.kind, spec.seq
+            "`{}` is read-only; publishing it is an error, not a no-op",
+            spec.label(remote)
         );
     }
+    let path = location(root, mount, remote)?;
     match spec.transport {
-        Transport::Git => sync_git(spec, material, &spec.path(base)?),
-        Transport::S3 => sync_object(spec, material, &spec.path(base)?),
+        Transport::Git => sync_git(spec, material, remote, &path),
+        Transport::Object => sync_object(spec, material, remote, &path),
     }
 }
 
-/// Fetch the blob into the resource's directory. Idempotent like the git arm: present means
-/// present — the task's own edits are its own, and a second `ensure` must not overwrite them.
-fn ensure_object(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
-    let target = path.join(effector_protocol::resource::object_name(&material.url)?);
-    if target.exists() {
+/// Fetch the blob to its location. Idempotent like the git arm: present means present — the task's
+/// own bytes are its own, and a second `ensure` must not overwrite them.
+fn ensure_object(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<()> {
+    if path.exists() {
         return Ok(());
     }
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("resource `{}`: {}", spec.identity(), path.display()))?;
-    let into = target.to_string_lossy().into_owned();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("`{}`: {}", spec.label(remote), parent.display()))?;
+    }
+    let into = path.to_string_lossy().into_owned();
+    let url = address(material, remote);
     let code = curl(
         spec,
         material,
-        &[
-            "-sSL",
-            "--output",
-            &into,
-            "--write-out",
-            "%{http_code}",
-            &material.url,
-        ],
+        remote,
+        &["-sSL", "--output", &into, "--write-out", "%{http_code}", &url],
     )?;
     let code = code.trim();
     if code == "200" {
         return Ok(());
     }
-    let _ = std::fs::remove_file(&target);
-    // A WRITABLE resource that is not there yet is an empty workspace, not a failure: the task's
-    // job is to produce the first object. A readable one that is missing is a real error — the
-    // task asked to read something the store does not have.
+    let _ = std::fs::remove_file(path);
+    // A WRITABLE name that is not there yet is an empty workspace, not a failure: the task's job is
+    // to produce the first object. A readable one that is missing is a real error — the task asked
+    // to read something the store does not have.
     if code == "404" && spec.mode == Mode::ReadWrite {
         return Ok(());
     }
     bail!(
-        "resource `{}`: the store answered {code} for {}",
-        spec.identity(),
-        material.url
+        "`{}`: the store answered {code} for {url}",
+        spec.label(remote)
     )
 }
 
-/// Upload the blob back and return what the store says about it (its ETag): the reference that
-/// makes a bad write undoable, the same role a branch@sha plays for git.
-fn sync_object(spec: &Spec, material: &Material, path: &Path) -> Result<String> {
-    let source = path.join(effector_protocol::resource::object_name(&material.url)?);
-    if !source.exists() {
+/// Upload the blob and return what the store says about it (its ETag).
+fn sync_object(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<String> {
+    if !path.exists() {
         bail!(
-            "resource `{}` was never ensured, so there is nothing to publish",
-            spec.identity()
+            "`{}` was never ensured, so there is nothing to publish",
+            spec.label(remote)
         );
     }
-    let from = source.to_string_lossy().into_owned();
+    let from = path.to_string_lossy().into_owned();
+    let url = address(material, remote);
     let etag = curl(
         spec,
         material,
+        remote,
         &[
             "-fsSL",
             "--request",
@@ -211,40 +230,36 @@ fn sync_object(spec: &Spec, material: &Material, path: &Path) -> Result<String> 
             "/dev/null",
             "--write-out",
             "%header{etag}",
-            &material.url,
+            &url,
         ],
     )?;
     let etag = etag.trim().trim_matches('"').to_string();
-    // An object store that answers without an ETag has not told us what it stored; the URL is
+    // An object store that answers without an ETag has not told us what it stored; the address is
     // still a true statement about where it went, and saying so beats inventing an identifier.
-    Ok(if etag.is_empty() {
-        material.url.clone()
-    } else {
-        etag
-    })
+    Ok(if etag.is_empty() { url } else { etag })
 }
 
-/// One signed HTTP request, with the credential the PLANE minted for this transfer. The secret
-/// reaches curl through argv (as it reaches git through a URL) — it is a per-transfer value the
-/// plane chose to hand out, and it never touches a config file on this node.
+/// One signed HTTP request, with the credential the PLANE handed over for this transfer. The secret
+/// reaches curl through argv, which lives for one process and is not the guest.
 ///
 /// This is also why `sync`/`ensure` do not need an SDK: S3's wire protocol is a signed HTTP
 /// request, and curl speaks SigV4. A node that cannot perform it (no curl) fails here by name.
-fn curl(spec: &Spec, material: &Material, args: &[&str]) -> Result<String> {
+fn curl(spec: &Spec, material: &Material, remote: &str, args: &[&str]) -> Result<String> {
     let mut command = Command::new("curl");
     // Both arms are idempotent (a GET writes the same bytes; a PUT stores the same object), and a
     // store that answers 503 once while it settles is not a task failure. The retry is bounded so a
     // store that is actually down still fails the task, with its own status in the message.
     command.args(["--retry", "3", "--retry-delay", "1"]).args(args);
     if let Some(credential) = &material.credential {
-        // `access_key:secret_key[:region]` — one string, the shape a secret row holds. The region
-        // is part of the signature, and most object-store deployments either want their own or
-        // ignore it, so it rides along rather than being guessed.
+        // `access_key:secret_key[:region]` — one string, the shape a secret holds. The region is
+        // part of the signature and most object-store deployments either want their own or ignore
+        // it, so it rides along rather than being guessed.
+        //
         // Flattened into one sentence on purpose: a node's failure is read by whoever is debugging
         // the task, and `anyhow`'s outer-context-only rendering would hide the reason.
         let (access_key, secret_key, region) =
             effector_protocol::resource::credential_parts(credential)
-                .map_err(|e| anyhow::anyhow!("resource `{}`: {e}", spec.identity()))?;
+                .map_err(|e| anyhow::anyhow!("`{}`: {e}", spec.label(remote)))?;
         command
             .arg("--user")
             .arg(format!("{access_key}:{secret_key}"))
@@ -253,95 +268,120 @@ fn curl(spec: &Spec, material: &Material, args: &[&str]) -> Result<String> {
     }
     let output = command
         .output()
-        .with_context(|| format!("curl (resource `{}`)", spec.identity()))?;
+        .with_context(|| format!("curl (`{}`)", spec.label(remote)))?;
     if !output.status.success() {
         bail!(
-            "curl failed for resource `{}`: {}",
-            spec.identity(),
+            "curl failed for `{}`: {}",
+            spec.label(remote),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn ensure_git(spec: &Spec, material: &Material, path: &Path) -> Result<()> {
+fn ensure_git(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<()> {
+    let url = address(material, remote);
     if path.join(".git").exists() {
-        // Present: fetch, then put it on the ref the task declared.
-        run_git(spec, material, path, &["fetch", "--prune", "origin"])?;
+        // Present: fetch, then put it on the ref the task asked for.
+        run_git(spec, material, remote, path, &["fetch", "--prune", "origin"])?;
     } else {
         let mut argv = vec!["clone", "--quiet"];
-        if let Some(reference) = &spec.git_ref {
-            // A shallow single-branch clone is enough for an `ro` resource pinned to a ref, and
-            // it is the difference between pulling a repository and pulling its history.
+        if let Some(reference) = &spec.at {
+            // A shallow single-branch clone is enough for a pinned `ro` read, and it is the
+            // difference between pulling a repository and pulling its history.
             if spec.mode == Mode::ReadOnly {
                 argv.extend(["--depth", "1"]);
             }
             argv.extend(["--branch", reference]);
         }
-        argv.push(&material.url);
+        argv.push(&url);
         let into = path.to_string_lossy().into_owned();
         argv.push(&into);
-        // `clone` creates the directory, so it runs from the parent: a cwd that does not exist
-        // yet is not a workspace, and git would fail before making one.
+        // `clone` creates the directory, so it runs from the parent: a cwd that does not exist yet
+        // is not a workspace, and git would fail before making one.
         let parent = path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("resource `{}`: {}", spec.identity(), parent.display()))?;
-        run_git(spec, material, parent, &argv)?;
+            .with_context(|| format!("`{}`: {}", spec.label(remote), parent.display()))?;
+        run_git(spec, material, remote, parent, &argv)?;
     }
-    if let Some(reference) = &spec.git_ref {
+    if let Some(reference) = &spec.at {
         // `checkout` after a fetch (the clone case already sits on it): a ref that moved must be
         // what the task sees, and `--force` is wrong here — a task's local edits are its own.
-        let _ = run_git(spec, material, path, &["checkout", "--quiet", reference]);
+        let _ = run_git(spec, material, remote, path, &["checkout", "--quiet", reference]);
     }
     Ok(())
 }
 
-fn sync_git(spec: &Spec, material: &Material, path: &Path) -> Result<String> {
+fn sync_git(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<String> {
     if !path.join(".git").exists() {
         bail!(
-            "resource `{}/{}` was never ensured, so there is nothing to publish",
-            spec.kind, spec.seq
+            "`{}` was never ensured, so there is nothing to publish",
+            spec.label(remote)
         );
     }
-    run_git(spec, material, path, &["add", "-A"])?;
+    run_git(spec, material, remote, path, &["add", "-A"])?;
     // `commit` with nothing staged is the ordinary case (a task that changed nothing), so its
     // failure is not an error — the push below still reports the reference that now exists.
-    let _ = run_git(spec, material, path, &["commit", "--quiet", "-m", "effector: sync"]);
-    let branch = git_stdout(spec, material, path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let _ = run_git(
+        spec,
+        material,
+        remote,
+        path,
+        &["commit", "--quiet", "-m", "effector: sync"],
+    );
+    let branch = git_stdout(spec, material, remote, path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let branch = branch.trim().to_string();
-    run_git(spec, material, path, &["push", "--quiet", "origin", &format!("HEAD:{branch}")])?;
-    let sha = git_stdout(spec, material, path, &["rev-parse", "HEAD"])?;
+    run_git(
+        spec,
+        material,
+        remote,
+        path,
+        &["push", "--quiet", "origin", &format!("HEAD:{branch}")],
+    )?;
+    let sha = git_stdout(spec, material, remote, path, &["rev-parse", "HEAD"])?;
     Ok(format!("{branch}@{}", sha.trim()))
 }
 
-fn git_stdout(spec: &Spec, material: &Material, cwd: &Path, args: &[&str]) -> Result<String> {
+fn git_stdout(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    cwd: &Path,
+    args: &[&str],
+) -> Result<String> {
     let mut command = git_command(material, cwd);
     let output = command
         .args(args)
         .output()
-        .with_context(|| format!("git {} (resource `{}`)", args.join(" "), spec.identity()))?;
+        .with_context(|| format!("git {} (`{}`)", args.join(" "), spec.label(remote)))?;
     if !output.status.success() {
         bail!(
-            "git {} failed for resource `{}`: {}",
+            "git {} failed for `{}`: {}",
             args.join(" "),
-            spec.identity(),
+            spec.label(remote),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn run_git(spec: &Spec, material: &Material, cwd: &Path, args: &[&str]) -> Result<()> {
+fn run_git(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    cwd: &Path,
+    args: &[&str],
+) -> Result<()> {
     let mut command = git_command(material, cwd);
     let output = command
         .args(args)
         .output()
-        .with_context(|| format!("git {} (resource `{}`)", args.join(" "), spec.identity()))?;
+        .with_context(|| format!("git {} (`{}`)", args.join(" "), spec.label(remote)))?;
     if !output.status.success() {
         bail!(
-            "git {} failed for resource `{}`: {}",
+            "git {} failed for `{}`: {}",
             args.join(" "),
-            spec.identity(),
+            spec.label(remote),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -354,16 +394,16 @@ fn git_command(material: &Material, cwd: &Path) -> Command {
         .current_dir(cwd)
         .arg("-c")
         .arg("advice.detachedHead=false")
-        // Identity for the commit `sync` may make: it belongs to the node, not to whoever owns
-        // the machine, so a missing global git config cannot fail a task.
+        // Identity for the commit `sync` may make: it belongs to the node, not to whoever owns the
+        // machine, so a missing global git config cannot fail a task.
         .args(["-c", "user.name=effector"])
         .args(["-c", "user.email=effector@localhost"]);
     if let Some(credential) = &material.credential {
-        // The secret travels in the CHILD's environment, which lives for one git invocation —
-        // not in argv (ps), not in the node's environment (inherited by the guest), not on disk.
+        // The secret travels in the CHILD's environment, which lives for one git invocation — not
+        // in argv (ps), not in the node's environment (inherited by the guest), not on disk.
         command.env("EFFECTOR_RESOURCE_CREDENTIAL", credential).args([
             "-c",
-            "credential.helper=!f() { echo username=effector; echo \"password=$EFFECTOR_RESOURCE_CREDENTIAL\"; }; f",
+            "credential.helper=!f() { echo username=effector; echo \"password=*** }; f",
         ]);
     }
     command
@@ -413,21 +453,20 @@ mod tests {
     fn spec(mode: Mode) -> Spec {
         Spec {
             kind: "git".into(),
-            seq: 7,
             transport: Transport::Git,
-            git_ref: Some("main".into()),
+            at: Some("main".into()),
             mode,
         }
     }
 
-    fn material(url: &Path) -> Material {
+    fn material(base: &Path) -> Material {
         Material {
-            url: url.to_string_lossy().into_owned(),
+            base: base.to_string_lossy().into_owned(),
             credential: None,
         }
     }
 
-/// A one-request HTTP server: it answers exactly what an object store answers for the verb it
+    /// A one-request HTTP server: it answers exactly what an object store answers for the verb it
     /// receives — the body for a GET, an ETag for a PUT — and records that it was asked. Enough to
     /// exercise the node's whole half of an object transfer without a store.
     fn fake_store(the_body: &'static str, etag: &'static str) -> String {
@@ -447,9 +486,7 @@ mod tests {
                 let n = stream.read(&mut head).unwrap_or(0);
                 let request = String::from_utf8_lossy(&head[..n]).to_string();
                 let reply = if request.starts_with("PUT") {
-                    format!(
-                        "HTTP/1.1 200 OK\r\nETag: \"{etag}\"\r\nContent-Length: 0\r\n\r\n"
-                    )
+                    format!("HTTP/1.1 200 OK\r\nETag: \"{etag}\"\r\nContent-Length: 0\r\n\r\n")
                 } else if status == "200 OK" {
                     format!(
                         "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{the_body}",
@@ -466,56 +503,73 @@ mod tests {
                 let _ = stream.write_all(reply.as_bytes());
             }
         });
-        format!("http://{addr}/builds/out.tar")
+        format!("http://{addr}/builds")
     }
 
     fn object_spec(mode: Mode) -> Spec {
         Spec {
-            kind: "s3".into(),
-            seq: 3,
-            transport: Transport::S3,
-            git_ref: None,
+            kind: "object".into(),
+            transport: Transport::Object,
+            at: None,
             mode,
         }
     }
 
     #[test]
-    fn an_object_lands_under_its_own_name_and_the_second_ensure_keeps_the_tasks_edits() {
+    fn a_remote_is_a_relative_name_and_cannot_climb_out_of_its_slice() {
+        let root = Path::new("/work/resources");
+        for bad in ["", "/abs", "a/", "a//b", "..", "a/../../b", "a\\b", "."] {
+            assert!(location(root, None, bad).is_err(), "`{bad}` must be refused");
+        }
+        assert_eq!(
+            location(root, None, "org/repo").unwrap(),
+            root.join("org").join("repo"),
+            "nested names are ordinary: a repository, an object under a prefix"
+        );
+        assert_eq!(
+            location(root, Some(Path::new("/elsewhere/x")), "org/repo").unwrap(),
+            Path::new("/elsewhere/x"),
+            "a mount says where the bytes land, and it need not be under the root"
+        );
+    }
+
+    #[test]
+    fn an_object_lands_where_the_name_says_and_the_second_ensure_keeps_the_tasks_edits() {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("resources");
+        let root = dir.path().join("resources");
         let s = object_spec(Mode::ReadWrite);
         let m = Material {
-            url: fake_store("hello", "etag-1"),
+            base: fake_store("hello", "etag-1"),
             credential: None,
         };
 
-        let path = ensure(&s, &m, &base).unwrap();
-        assert_eq!(path, base.join("s3").join("3"));
+        let path = ensure(&s, &m, "out.tar", None, &root).unwrap();
+        assert_eq!(path, root.join("out.tar"));
         assert_eq!(
-            std::fs::read_to_string(path.join("out.tar")).unwrap(),
+            std::fs::read_to_string(&path).unwrap(),
             "hello",
-            "the blob lands under the name its URL gives it"
+            "the blob lands at the name the script gave"
         );
 
         // A second ensure is a no-op: the task may have changed the file, and its edit is its own.
-        std::fs::write(path.join("out.tar"), "edited").unwrap();
-        ensure(&s, &m, &base).unwrap();
-        assert_eq!(std::fs::read_to_string(path.join("out.tar")).unwrap(), "edited");
+        std::fs::write(&path, "edited").unwrap();
+        ensure(&s, &m, "out.tar", None, &root).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited");
     }
 
     #[test]
     fn publishing_an_object_returns_what_the_store_answered() {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("resources");
+        let root = dir.path().join("resources");
         let s = object_spec(Mode::ReadWrite);
         let m = Material {
-            url: fake_store("hello", "etag-42"),
+            base: fake_store("hello", "etag-42"),
             credential: None,
         };
-        let path = ensure(&s, &m, &base).unwrap();
-        std::fs::write(path.join("out.tar"), "new bytes").unwrap();
+        let path = ensure(&s, &m, "out.tar", None, &root).unwrap();
+        std::fs::write(&path, "new bytes").unwrap();
 
-        let reference = sync(&s, &m, &base).unwrap();
+        let reference = sync(&s, &m, "out.tar", None, &root).unwrap();
         assert_eq!(
             reference, "etag-42",
             "the reference is the store's own word for what it now holds"
@@ -525,69 +579,59 @@ mod tests {
     #[test]
     fn a_missing_object_is_an_empty_workspace_if_writable_and_an_error_if_readable() {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("resources");
+        let root = dir.path().join("resources");
         let rw = object_spec(Mode::ReadWrite);
         let m = Material {
-            url: fake_store_at("404 Not Found", "", ""),
+            base: fake_store_at("404 Not Found", "", ""),
             credential: None,
         };
         // A task's job may be to produce the first object; an empty workspace says so, and nothing
         // half-written is left behind for the task to trip over.
-        let path = ensure(&rw, &m, &base).expect("a writable resource that is not there yet");
-        assert!(!path.join("out.tar").exists(), "no stub file is invented");
-        assert!(path.is_dir(), "the directory is what the task writes into");
+        let path = ensure(&rw, &m, "out.tar", None, &root).expect("nothing there yet is fine");
+        assert!(!path.exists(), "no stub file is invented");
 
-        // The same answer on a READABLE resource is the truth the task asked for: it is not there.
+        // The same answer on a READABLE name is the truth the task asked for: it is not there.
         let ro = object_spec(Mode::ReadOnly);
         let dir2 = tempfile::tempdir().unwrap();
-        let err = ensure(&ro, &m, &dir2.path().join("resources")).unwrap_err().to_string();
+        let err = ensure(&ro, &m, "out.tar", None, &dir2.path().join("resources"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("404"), "the store's own word is passed on: {err}");
     }
 
     #[test]
-    fn a_kind_this_node_cannot_move_is_refused_by_name() {
-        // The venue knows five kinds; this node moves two. The refusal names the kind it was asked
-        // for, so the operator learns which one is missing rather than "a transfer failed".
-        let err = Spec::from_plane("rustic", 1, "rw", None).unwrap_err();
-        assert!(err.to_string().contains("rustic"), "{err}");
+    fn a_mechanism_this_node_cannot_move_is_refused_by_name() {
+        // The venue serves three; this node moves two. The refusal names the kind it was asked for,
+        // so the operator learns which one is missing rather than "a transfer failed".
+        let err = Spec::from_plane("archive", "rw", None).unwrap_err();
+        assert!(err.to_string().contains("archive"), "{err}");
     }
 
     #[test]
-    fn an_object_url_with_no_last_segment_names_no_object() {
-        let err = effector_protocol::resource::object_name("s3://bucket/builds/").unwrap_err();
-        assert!(err.to_string().contains("names no object"), "{err}");
-        assert_eq!(
-            effector_protocol::resource::object_name("s3://bucket/builds/out.tar").unwrap(),
-            "out.tar"
-        );
-        assert_eq!(
-            effector_protocol::resource::object_name("https://host/a/b/model.gguf").unwrap(),
-            "model.gguf"
-        );
-    }
-
-    #[test]
-    fn ensure_puts_the_repository_at_its_identity_and_a_second_ensure_does_not_re_clone() {
+    fn ensure_puts_the_repository_at_its_name_and_a_second_ensure_does_not_re_clone() {
         let dir = tempfile::tempdir().unwrap();
-        let (bare, sha) = bare_repo(dir.path());
-        let base = dir.path().join("resources");
+        let (_bare, sha) = bare_repo(dir.path());
+        let root = dir.path().join("resources");
         let s = spec(Mode::ReadWrite);
-        let m = material(&bare);
+        // The grant is the DIRECTORY the repositories live in; the script names which one.
+        let m = material(dir.path());
 
-        let path = ensure(&s, &m, &base).unwrap();
-        assert_eq!(path, base.join("git").join("7"));
+        let path = ensure(&s, &m, "bare.git", None, &root).unwrap();
+        assert_eq!(path, root.join("bare.git"));
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
             "first\n"
         );
         assert_eq!(
-            git_stdout(&s, &m, &path, &["rev-parse", "HEAD"]).unwrap().trim(),
+            git_stdout(&s, &m, "bare.git", &path, &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim(),
             sha
         );
 
         // A file the task made must survive the second ensure: presence is a no-op by design.
         std::fs::write(path.join("scratch.txt"), "mine\n").unwrap();
-        ensure(&s, &m, &base).unwrap();
+        ensure(&s, &m, "bare.git", None, &root).unwrap();
         assert!(path.join("scratch.txt").exists());
     }
 
@@ -595,13 +639,13 @@ mod tests {
     fn sync_publishes_and_returns_the_reference_it_produced() {
         let dir = tempfile::tempdir().unwrap();
         let (bare, first) = bare_repo(dir.path());
-        let base = dir.path().join("resources");
+        let root = dir.path().join("resources");
         let s = spec(Mode::ReadWrite);
-        let m = material(&bare);
+        let m = material(dir.path());
 
-        let path = ensure(&s, &m, &base).unwrap();
+        let path = ensure(&s, &m, "bare.git", None, &root).unwrap();
         std::fs::write(path.join("README.md"), "second\n").unwrap();
-        let reference = sync(&s, &m, &base).unwrap();
+        let reference = sync(&s, &m, "bare.git", None, &root).unwrap();
 
         let (branch, sha) = reference.split_once('@').expect("branch@sha");
         assert_eq!(branch, "main");
@@ -618,36 +662,45 @@ mod tests {
     }
 
     #[test]
-    fn publishing_a_read_only_resource_is_an_error_not_a_no_op() {
+    fn publishing_against_a_read_only_grant_is_an_error_not_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("resources");
-        let err = sync(&spec(Mode::ReadOnly), &material(dir.path()), &base).unwrap_err();
+        let root = dir.path().join("resources");
+        let err = sync(
+            &spec(Mode::ReadOnly),
+            &material(dir.path()),
+            "bare.git",
+            None,
+            &root,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("read-only"), "{err}");
     }
 
     #[test]
-    fn a_type_is_a_name_not_a_path_and_the_identity_fixes_the_directory() {
-        let base = Path::new("/work/resources");
-        for bad in ["", "..", ".", "a/b", "a\\b"] {
-            let mut s = spec(Mode::ReadOnly);
-            s.kind = bad.into();
-            assert!(s.path(base).is_err(), "`{bad}` must be refused");
-        }
-        let s = spec(Mode::ReadOnly);
-        assert_eq!(s.path(base).unwrap(), base.join("git").join("7"));
-        assert_eq!(s.identity(), "git/7");
+    fn what_the_plane_says_wins_and_an_unknown_mechanism_is_refused() {
+        let spec = Spec::from_plane("git", "rw", Some("main")).unwrap();
+        assert_eq!(spec.mode, Mode::ReadWrite);
+        assert_eq!(spec.at.as_deref(), Some("main"));
+        let err = Spec::from_plane("git", "readwrite", None).unwrap_err();
+        assert!(err.to_string().contains("mode"), "{err}");
     }
 
     #[test]
-    fn what_the_plane_says_wins_and_an_unknown_kind_is_refused() {
-        let spec = Spec::from_plane("git", 3, "rw", Some("main")).unwrap();
-        assert_eq!(spec.mode, Mode::ReadWrite);
-        assert_eq!(spec.git_ref.as_deref(), Some("main"));
-        // A KIND this node cannot move is refused BY NAME, not ignored — the node never maps an
-        // unknown kind onto a transfer that happens to be lying around.
-        let err = Spec::from_plane("rustic", 3, "ro", None).unwrap_err();
-        assert!(err.to_string().contains("rustic"), "{err}");
-        let err = Spec::from_plane("git", 3, "readwrite", None).unwrap_err();
-        assert!(err.to_string().contains("mode"), "{err}");
+    fn a_mount_outside_the_root_is_where_the_bytes_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("resources");
+        let mount = dir.path().join("scratch").join("model");
+        let s = object_spec(Mode::ReadWrite);
+        let m = Material {
+            base: fake_store("weights", "etag-9"),
+            credential: None,
+        };
+        let path = ensure(&s, &m, "anything", Some(&mount), &root).unwrap();
+        assert_eq!(path, mount);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "weights");
+        assert!(
+            !root.exists(),
+            "nothing is invented under the root when the script chose a mount"
+        );
     }
 }

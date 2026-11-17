@@ -162,6 +162,7 @@ Effector 启动顺序：
 | `ctx.iterate.next` | `iterate_next` | `stream_id` |
 | `ctx.iterate.dispose` | `iterate_dispose` | `stream_id` |
 | `ctx.store` | `store_emit` | `instruction` —— 一条 okm Collection 指令，作为数据承载（脚本写出的 `{"collection": …, "op": …, …}` 原样；控制端按该类型自己的存储计划执行） |
+| `ctx.resource` | —（本地） | `{op: "get"\|"publish", kind, remote, mount?}` —— 由**节点**向平面要一次传输的材质，并自己搬字节，因此线上没有对应的 host op。脚本收到的是一个位置：`get` 给路径，`publish` 给 store 铸出的引用。这次传输花掉的那份凭证不会进入 guest |
 | `ctx.emit` | `emit` | `event`、`data` —— 控制端在自己的 realm 解析路由；业务面 fire-and-forget，帧层仍是请求/应答（成功应答为 Null） |
 
 **远程面范围（ADR-0043 同步注记）**：线上承载上表各臂——`timer.register/cancel`、

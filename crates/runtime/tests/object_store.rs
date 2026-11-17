@@ -34,32 +34,34 @@ fn an_object_goes_up_and_comes_back() {
     );
     let region = env("S3_REGION").unwrap_or_else(|| "us-east-1".into());
 
-    // The key is unique per run so two runs (or two machines) do not fight over one object.
-    let key = format!("effector-test/{}.txt", std::process::id());
-    let url = format!("{}/{}/{}", endpoint.trim_end_matches('/'), bucket, key);
+    // The name is unique per run so two runs (or two machines) do not fight over one object. The
+    // GRANT is the bucket; the script's name is what it puts inside it.
+    let remote = format!("effector-test/{}.txt", std::process::id());
+    let base = format!("{}/{}", endpoint.trim_end_matches('/'), bucket);
+    let url = format!("{base}/{remote}");
     let spec = Spec {
-        kind: "s3".into(),
-        seq: 1,
-        transport: Transport::S3,
-        git_ref: None,
+        kind: "object".into(),
+        transport: Transport::Object,
+        at: None,
         mode: Mode::ReadWrite,
     };
     let material = Material {
-        url: url.clone(),
+        base: base.clone(),
         credential: Some(format!("{access_key}:{secret_key}:{region}")),
     };
 
     let dir = tempfile::tempdir().unwrap();
-    let base: &Path = dir.path();
+    let root: &Path = dir.path();
 
     // A write half: ensure (nothing there yet — the store answers 404 as an empty body), write,
     // publish. The reference is the store's own word for what it now holds.
     // Nothing is there yet, and this is a WRITABLE resource: the empty workspace is the correct
     // answer, and producing the first object is this half's job.
-    let path = resource::ensure(&spec, &material, base).expect("an empty workspace, not a failure");
-    let name = key.rsplit('/').next().unwrap();
-    std::fs::write(path.join(name), b"effector was here").unwrap();
-    let reference = resource::sync(&spec, &material, base).expect("the object is published");
+    let path = resource::ensure(&spec, &material, &remote, None, root)
+        .expect("an empty workspace, not a failure");
+    std::fs::write(&path, b"effector was here").unwrap();
+    let reference =
+        resource::sync(&spec, &material, &remote, None, root).expect("the object is published");
     assert!(!reference.is_empty(), "a publish answers with what it stored");
     eprintln!("published {url} -> {reference}");
 
@@ -69,20 +71,23 @@ fn an_object_goes_up_and_comes_back() {
         mode: Mode::ReadOnly,
         ..spec
     };
-    let read_path = resource::ensure(&read_spec, &material, other.path()).expect("fetched");
+    let read_path =
+        resource::ensure(&read_spec, &material, &remote, None, other.path()).expect("fetched");
     assert_eq!(
-        std::fs::read(read_path.join(name)).unwrap(),
+        std::fs::read(read_path).unwrap(),
         b"effector was here",
         "the bytes that come down are the bytes that went up"
     );
 
     // A credential that is not `access_key:secret_key[:region]` is refused before any request.
     let bad = Material {
-        url: url.clone(),
+        base: base.clone(),
         credential: Some("not-a-pair".into()),
     };
     let third = tempfile::tempdir().unwrap();
-    let err = resource::ensure(&read_spec, &bad, third.path()).unwrap_err().to_string();
+    let err = resource::ensure(&read_spec, &bad, &remote, None, third.path())
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("access_key:secret_key"), "{err}");
 
     // The object is LEFT IN PLACE on purpose: what a test uploaded is the thing somebody wants to

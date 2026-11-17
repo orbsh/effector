@@ -269,6 +269,7 @@ The mapping from script function to wire op:
 | `ctx.iterate.next` | `iterate_next` | `stream_id` |
 | `ctx.iterate.dispose` | `iterate_dispose` | `stream_id` |
 | `ctx.store` | `store_emit` | `instruction` — one okm Collection instruction, carried as data (`{"collection": …, "op": …, …}` as the script wrote it; the control plane executes it against the type's own storage plan) |
+| `ctx.resource` | — (local) | `{op: "get"\|"publish", kind, remote, mount?}` — the NODE asks the plane for one transfer's material and moves the bytes itself, so no host op rides the wire. The script receives a locator: a path for `get`, the reference the store minted for `publish`. The credential the transfer spent never crosses into the guest |
 | `ctx.emit` | `emit` | `event`, `data` — the control plane resolves routes in its realm; fire-and-forget on the business plane, still request/response at the frame layer (the answer is Null) |
 
 **Remote-plane scope (ADR-0043 sync note)**: the wire carries the arms above —

@@ -360,6 +360,9 @@ fn register_ctx_stubs(engine: &mut Engine) {
     const CTX_STUBS: &[&str] = &[
         "ctx.invoke",
         "ctx.store",
+        // Durable data by name (ADR-0003 §7): the script asks, the node transfers, and the answer is
+        // a locator. The stub exists so a source that uses it LOADS during introspection.
+        "ctx.resource",
         "ctx.schema",
         "ctx.emit",
         "ctx.queue.depth",

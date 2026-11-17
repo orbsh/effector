@@ -196,35 +196,30 @@ async fn serve_connection(
             Frame::Material {
                 call_id,
                 kind,
-                seq,
-                url,
+                base,
                 credential,
                 mode,
-                at,
-                ..
             } => {
-                let key = material_key(&call_id, &kind, seq);
+                let key = material_key(&call_id, &kind);
                 let waiter = pending_material
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&key);
                 if let Some(waiter) = waiter {
                     let _ = waiter.send(Ok(Minted {
-                        url,
+                        base,
                         credential,
                         mode,
-                        at,
                     }));
                 }
             }
-            // The plane could not mint: the wait ends with a reason, not a deadline.
+            // The plane could not answer: the wait ends with a reason, not a deadline.
             Frame::MaterialFailed {
                 call_id,
                 kind,
-                seq,
                 reason,
             } => {
-                let key = material_key(&call_id, &kind, seq);
+                let key = material_key(&call_id, &kind);
                 let waiter = pending_material
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -259,10 +254,10 @@ type PendingHost = std::sync::Mutex<
 /// per request (the control plane mints per transfer), so an entry dies with its request.
 /// What the plane minted for one transfer: where to reach the store, how, and on what terms.
 struct Minted {
-    url: String,
+    /// `<base>/<tenant>/<kind>`: the slice this execution may name things inside.
+    base: String,
     credential: Option<String>,
     mode: String,
-    at: Option<String>,
 }
 
 type PendingMaterial = std::sync::Mutex<
@@ -278,13 +273,11 @@ type PendingMaterial = std::sync::Mutex<
 /// the lifetime is the process's, not a call's.
 type Adopted = std::sync::Mutex<std::collections::BTreeSet<String>>;
 
-fn material_key(call_id: &str, kind: &str, seq: u64) -> String {
-    format!("{call_id}\u{1f}{kind}\u{1f}{seq}")
+/// One ask per (call, kind): which NAME the script wants is never part of the key, because the plane
+/// only ever hears the kind.
+fn material_key(call_id: &str, kind: &str) -> String {
+    format!("{call_id}\u{1f}{kind}")
 }
-
-/// Which resources the plane said were writable. The declaration does not carry a mode (the row
-/// decides, not the task), so the node records what it was told, for the publish step after the
-/// call.
 
 /// Ask the control plane for one transfer's material and wait for it. The node never invents a
 /// credential: it names the resource, and the plane answers with where to reach the store and how
@@ -294,10 +287,9 @@ fn ask_material(
     pending: &Arc<PendingMaterial>,
     call_id: &str,
     kind: &str,
-    seq: u64,
     write: bool,
 ) -> anyhow::Result<tokio::sync::oneshot::Receiver<anyhow::Result<Minted>>> {
-    let key = material_key(call_id, kind, seq);
+    let key = material_key(call_id, kind);
     let (sender, receiver) = tokio::sync::oneshot::channel();
     pending
         .lock()
@@ -306,7 +298,6 @@ fn ask_material(
     let sent = tx.send(Frame::MaterialRequest {
         call_id: call_id.to_string(),
         kind: kind.to_string(),
-        seq,
         write,
     });
     if sent.is_err() {
@@ -314,7 +305,7 @@ fn ask_material(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
-        anyhow::bail!("resource `{kind}/{seq}`: the connection is gone");
+        anyhow::bail!("resource `{kind}`: the connection is gone");
     }
     Ok(receiver)
 }
@@ -326,12 +317,11 @@ fn ask_material_blocking(
     pending: &Arc<PendingMaterial>,
     call_id: &str,
     kind: &str,
-    seq: u64,
     write: bool,
 ) -> anyhow::Result<Minted> {
-    match ask_material(tx, pending, call_id, kind, seq, write)?.blocking_recv() {
+    match ask_material(tx, pending, call_id, kind, write)?.blocking_recv() {
         Ok(material) => material,
-        Err(_) => anyhow::bail!("resource `{kind}/{seq}`: the control plane never answered"),
+        Err(_) => anyhow::bail!("resource `{kind}`: the control plane never answered"),
     }
 }
 
@@ -653,11 +643,11 @@ fn build_host_bridge(
                 other => other.clone(),
             };
             let text = |k: &str| m.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
-            let (Some(op), Some(kind)) = (text("op"), text("kind")) else {
-                anyhow::bail!("a resource op names both `op` (`get` or `publish`) and `kind`");
-            };
-            let Some(seq) = m.get("seq").and_then(serde_json::Value::as_u64) else {
-                anyhow::bail!("a resource op names `seq` — the number inside (owner, kind)");
+            let (Some(op), Some(kind), Some(remote)) = (text("op"), text("kind"), text("remote"))
+            else {
+                anyhow::bail!(
+                    "a resource op names `op` (`get` or `publish`), `kind` and `remote`"
+                );
             };
             let write = match op.as_str() {
                 "get" => false,
@@ -666,23 +656,24 @@ fn build_host_bridge(
                     "`{other}` is not a resource op; a resource is `get` or `publish`"
                 ),
             };
-            let minted = ask_material_blocking(&tx, &pending, &call_id, &kind, seq, write)?;
-            let spec =
-                crate::resource::Spec::from_plane(&kind, seq, &minted.mode, minted.at.as_deref())?;
+            let mount = text("mount").map(std::path::PathBuf::from);
+            let reach = ask_material_blocking(&tx, &pending, &call_id, &kind, write)?;
+            let spec = crate::resource::Spec::from_plane(&kind, &reach.mode, text("ref").as_deref())?;
             let material = crate::resource::Material {
-                url: minted.url,
-                credential: minted.credential,
+                base: reach.base,
+                credential: reach.credential,
             };
             let root = resources_root();
-            let path = crate::resource::ensure(&spec, &material, &root)?;
+            let path = crate::resource::ensure(&spec, &material, &remote, mount.as_deref(), &root)?;
             adopted
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(spec.identity());
+                .insert(format!("{kind}/{remote}"));
             if !write {
                 return Ok(serde_json::json!(path.to_string_lossy()));
             }
-            let reference = crate::resource::sync(&spec, &material, &root)?;
+            let reference =
+                crate::resource::sync(&spec, &material, &remote, mount.as_deref(), &root)?;
             Ok(serde_json::json!(reference))
         });
         bridge.functions.insert("resource".to_string(), f);

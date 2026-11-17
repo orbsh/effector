@@ -199,16 +199,15 @@ pub enum Frame {
     /// mid-call) — the operation continues and its result is discarded, which the
     /// control plane must not read as "it stopped".
     Interrupted { call_id: String, landed: bool },
-    /// Effector to control plane: this call needs material for one declared resource
-    /// (`ensure` before the code runs, or a write handle for `sync` after it). Addressed by
-    /// (`call_id`, `name`): the same name twice in one call is the same resource.
+    /// Effector to control plane: the script asked for durable data of one kind (`ctx.resource`)
+    /// and the node needs what it takes to reach it. Addressed by (`call_id`, `kind`) — WHICH name
+    /// the script wants is the node's business, because it is the node that joins that name onto the
+    /// root it is given here.
     MaterialRequest {
         call_id: String,
         kind: String,
-        seq: u64,
-        /// Which half of the contract this is: `false` is the read before the code runs, `true` the
-        /// write after it. The plane mints differently for each — a read credential that cannot
-        /// publish is the point.
+        /// Which half of the contract this is: `false` fetches, `true` publishes. The plane answers
+        /// differently for each — a grant that is `ro` has no write half at all.
         write: bool,
     },
     /// Control plane to effector: the material for that request. It is minted per transfer and
@@ -217,8 +216,9 @@ pub enum Frame {
     Material {
         call_id: String,
         kind: String,
-        seq: u64,
-        url: String,
+        /// The root this execution may reach, already separated by tenant
+        /// (`<base>/<tenant>/<kind>`). The node appends the script's own name to it.
+        base: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
         // No `transport` field: `kind` IS the identity, and the node is the one that knows how a
@@ -226,10 +226,9 @@ pub enum Frame {
         // and the day a second transport exists it will be the row's new KIND, not a parallel
         // vocabulary here.
         /// `ro` or `rw`. The plane's word wins over the task's wish — it is the row's decision.
+        /// No `ref` field: which branch or version to check out is the SCRIPT's to name, and it
+        /// rides the ask; a grant describes a place, not a revision of what is in it.
         mode: String,
-        /// The version to check out, when the plane names one.
-        #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
-        at: Option<String>,
     },
     /// Control plane to effector: no material could be minted, and why. A REFUSAL IS A VALUE —
     /// the node turns it into a failed call rather than waiting out a deadline for an answer that
@@ -237,18 +236,7 @@ pub enum Frame {
     MaterialFailed {
         call_id: String,
         kind: String,
-        seq: u64,
         reason: String,
-    },
-    /// Effector to control plane: a resource was published, and this is the version it produced
-    /// (git: `<branch>@<sha>`). The control plane holds the pointer to the current version, so
-    /// this reference is both the audit trail and the undo handle: a bad write is undone by not
-    /// advancing the pointer (ADR-0003 §7).
-    Synced {
-        call_id: String,
-        kind: String,
-        seq: u64,
-        reference: String,
     },
     /// Bidirectional: a host-function round trip (ctx bridge over the
     /// wire). Effector -> control plane = Call, control plane -> effector =
