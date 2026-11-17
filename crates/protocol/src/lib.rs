@@ -50,12 +50,12 @@ pub struct ToolCall {
     /// Correlates the eventual ToolResult back to the caller (Gravity's
     /// pending_calls deadline scan reuses this id).
     pub call_id: String,
-    /// What this call needs from the node that runs it, when it needs anything at all (ADR-0003
-    /// §1). `None` = no requirement: the node runs it with whatever authority it has. A call that
-    /// carries `container` is code nobody reviewed — a HOST node refuses it BY NAME rather than run
-    /// it with the machine's authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requires: Option<NodeClass>,
+    /// What this call needs from the node that runs it (ADR-0003 §1). **The default is the
+    /// CONTAINER**: code nobody reviewed runs separated, and running it on bare metal is the
+    /// exception a caller has to ask for — `host` never arrives by omission. A `host` node refuses
+    /// a call it cannot contain, BY NAME, rather than run it with the machine's authority.
+    #[serde(default = "container_class")]
+    pub requires: NodeClass,
     /// What this call asks the executor to do (ADR-0034, unified
     /// envelope ADR-0036). Every dispatch job is a stream op:
     /// `IterateStart` runs the handler as a producer (a plain handler is
@@ -179,9 +179,18 @@ pub fn dial_url(base: &str, token: &str) -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeClass {
+    /// The node is a process on somebody's machine. The DEFAULT for a NODE (that is what an
+    /// undeclared node is), and the EXCEPTION for a call.
     #[default]
     Host,
     Container,
+}
+
+/// The default a CALL gets: separated, unless it says otherwise. A free function because serde's
+/// `default` takes a path, and this is the policy point — one line to read when the question is
+/// "what happens when a caller says nothing".
+pub fn container_class() -> NodeClass {
+    NodeClass::Container
 }
 
 impl NodeClass {

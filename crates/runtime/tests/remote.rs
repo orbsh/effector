@@ -72,7 +72,7 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
     // Push one call: a steel counter handler. Executor identity and entry
     // name are separate: residency is keyed by `executor` alone.
     let call = ToolCall {
-        requires: None,
+        requires: effector_protocol::NodeClass::Host,
         call_id: "c-1".into(),
         kind: effector_protocol::CallKind::IterateStart,
         stream: Some("s-1".into()),
@@ -210,7 +210,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
 
         // Link call with the CORRECT hash: fetch, verify, execute.
         let call = ToolCall {
-            requires: None,
+            requires: effector_protocol::NodeClass::Host,
             call_id: "c-link".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
@@ -245,7 +245,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
         // load actually re-resolves): the per-hash cache must serve it —
         // the HTTP source stays at exactly one hit across the exchange.
         let call = ToolCall {
-            requires: None,
+            requires: effector_protocol::NodeClass::Host,
             call_id: "c-cached".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),
@@ -283,7 +283,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
 
         // Link call with a WRONG hash: error value, never a silent accept.
         let call = ToolCall {
-            requires: None,
+            requires: effector_protocol::NodeClass::Host,
             call_id: "c-bad".into(),
             kind: effector_protocol::CallKind::IterateStart,
             stream: Some("s-1".into()),

@@ -831,10 +831,11 @@ pub async fn register_once(config: &EffectorConfig) -> Result<()> {
 /// process knows whether it is inside a container.
 fn class_refusal(config: &EffectorConfig, call: &ToolCall) -> Option<String> {
     match (call.requires, config.class) {
-        (Some(effector_protocol::NodeClass::Container), effector_config::Class::Host) => Some(
+        (effector_protocol::NodeClass::Container, effector_config::Class::Host) => Some(
             format!(
                 "call {} requires a container, and this node is `{}` — it cannot become one on \
-                 demand; the plane routes such a call to a node started with `docker run`",
+                 demand. Bare metal is the exception a caller asks for; this call did not, and \
+                 the plane routes container calls to a node started with `docker run`",
                 call.call_id,
                 config.class.as_str()
             ),
@@ -999,7 +1000,7 @@ mod tests {
         }
     }
 
-    fn call_requiring(class: Option<effector_protocol::NodeClass>) -> ToolCall {
+    fn call_requiring(class: effector_protocol::NodeClass) -> ToolCall {
         ToolCall {
             call_id: "c-class".into(),
             requires: class,
@@ -1020,13 +1021,28 @@ mod tests {
     #[test]
     fn a_call_that_needs_a_container_is_refused_by_a_host_node_in_words() {
         let host = config(CapabilitySurface::default());
-        let needs = call_requiring(Some(effector_protocol::NodeClass::Container));
+        let needs = call_requiring(effector_protocol::NodeClass::Container);
         let why = class_refusal(&host, &needs).expect("a host node cannot pretend");
         assert!(why.contains("requires a container"), "{why}");
         assert!(why.contains("host"), "the refusal names what this node is: {why}");
 
-        // Nothing required: the node runs it with whatever authority it has.
-        assert!(class_refusal(&host, &call_requiring(None)).is_none());
+        // THE DEFAULT IS THE CONTAINER: a call that says nothing about the class still requires
+        // one, so silence is never a way onto bare metal.
+        let silent: ToolCall = serde_json::from_value(serde_json::json!({
+            "call_id": "c-silent",
+            "executor": "e/1",
+            "entry": "run",
+            "language": "induction",
+            "encoding": "json",
+            "args": {},
+            "code": { "url": "", "sha256": "" },
+        }))
+        .expect("a call with no class field decodes");
+        assert_eq!(silent.requires, effector_protocol::NodeClass::Container);
+        assert!(class_refusal(&host, &silent).is_some(), "silence still refuses");
+
+        // Bare metal is the exception a caller WRITES DOWN.
+        assert!(class_refusal(&host, &call_requiring(effector_protocol::NodeClass::Host)).is_none());
 
         // A container node can run both — it is strictly more contained, so a `host` requirement
         // is satisfied by a container, not the other way round.
@@ -1034,10 +1050,7 @@ mod tests {
         inside.class = effector_config::Class::Container;
         inside.sandbox = false;
         assert!(class_refusal(&inside, &needs).is_none());
-        assert!(
-            class_refusal(&inside, &call_requiring(Some(effector_protocol::NodeClass::Host)))
-                .is_none()
-        );
+        assert!(class_refusal(&inside, &call_requiring(effector_protocol::NodeClass::Host)).is_none());
     }
 
     #[test]
