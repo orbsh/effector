@@ -35,7 +35,6 @@ def remove(args):
             "python",
             src,
             None::<&HostBridge>,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call(
                     "add_to_cart",
@@ -61,7 +60,6 @@ fn steel_event_name_addressing() {
             "steel",
             src,
             None::<&HostBridge>,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("add_to_cart", &serde_json::json!({"item": "book"}))
             },
@@ -102,7 +100,6 @@ def bump(args):
             "python",
             py_src,
             host,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("bump", &serde_json::json!({"by": 1}))
             },
@@ -115,7 +112,6 @@ def bump(args):
             "python",
             py_src,
             host,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("bump", &serde_json::json!({"by": 1}))
             },
@@ -129,7 +125,6 @@ def bump(args):
             "steel",
             steel_src,
             host,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("bump", &serde_json::json!({"by": 5}))
             },
@@ -142,7 +137,6 @@ def bump(args):
             "steel",
             steel_src,
             host,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("bump", &serde_json::json!({"by": 5}))
             },
@@ -157,7 +151,6 @@ def bump(args):
             "python",
             py_src,
             host,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("bump", &serde_json::json!({"by": 100}))
             },
@@ -173,7 +166,6 @@ def bump(args):
             "python",
             py_src,
             host,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("bump", &serde_json::json!({"by": 1}))
             },

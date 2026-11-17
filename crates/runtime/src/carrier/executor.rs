@@ -373,7 +373,6 @@ impl Executors {
         language: &str,
         source: &str,
         host: Option<&HostBridge>,
-        sandbox: &crate::environment::Environment,
         f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
     ) -> Result<Value> {
         self.with_executor_encoded(
@@ -381,7 +380,6 @@ impl Executors {
             language,
             source,
             host,
-            sandbox,
             induction_protocol::Encoding::Json,
             f,
         )
@@ -401,13 +399,12 @@ impl Executors {
         language: &str,
         source: &str,
         host: Option<&HostBridge>,
-        sandbox: &crate::environment::Environment,
         encoding: induction_protocol::Encoding,
         f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
     ) -> Result<Value> {
         // The serial form: one slot, calls in arrival order. Every caller that
         // has not declared otherwise keeps exactly this behaviour.
-        self.with_slot_encoded(key, language, source, host, sandbox, encoding, 1, f)
+        self.with_slot_encoded(key, language, source, host, encoding, 1, f)
     }
 
     /// The UNBOUNDED form (`Concurrency::Unbounded`): one resident executor, no
@@ -424,7 +421,6 @@ impl Executors {
         key: &str,
         language: &str,
         source: &str,
-        sandbox: &crate::environment::Environment,
         encoding: induction_protocol::Encoding,
         host: Option<&HostBridge>,
         f: impl FnOnce(&dyn SharedExecutor) -> Result<Value>,
@@ -448,7 +444,7 @@ impl Executors {
                 None => {
                     // Cold start under the handle lock: a second call never sees a
                     // half-loaded executor, and the spawn happens once.
-                    let mut executor = spawn_executor(language, source, host, sandbox, encoding)?;
+                    let mut executor = spawn_executor(language, source, host, encoding)?;
                     executor.load(source)?;
                     executor.set_host(host);
                     let shared = executor.shared().ok_or_else(|| {
@@ -488,7 +484,6 @@ impl Executors {
         language: &str,
         source: &str,
         host: Option<&HostBridge>,
-        sandbox: &crate::environment::Environment,
         encoding: induction_protocol::Encoding,
         capacity: usize,
         f: impl FnOnce(&mut dyn Executor) -> Result<Value>,
@@ -536,7 +531,7 @@ impl Executors {
                 // Cold start (or after eviction): spawn + load BEFORE the slot is
                 // published, so a spawn error surfaces as an error and a failed
                 // entry is never cached.
-                let mut executor = spawn_executor(language, source, host, sandbox, encoding)?;
+                let mut executor = spawn_executor(language, source, host, encoding)?;
                 executor.load(source)?;
                 Ok(executor)
             },
@@ -628,14 +623,13 @@ fn spawn_executor(
     language: &str,
     source: &str,
     host: Option<&HostBridge>,
-    sandbox: &crate::environment::Environment,
     encoding: induction_protocol::Encoding,
 ) -> Result<Box<dyn Executor>> {
     // `source` is consumed by the wasmtime arm (compile at spawn); the
     // other arms ignore it (the spawn spec is argv) or one or both.
     // `encoding` is consumed by the process carriers only (induction/exec —
     // ADR-0037 §2); the embedded carriers have no channel.
-    let _ = (language, source, host, sandbox, encoding);
+    let _ = (language, source, host, encoding);
     Ok(match language {
         #[cfg(feature = "steel")]
         "steel" => Box::new(super::steel::SteelExecutor::new(host)?),
@@ -647,12 +641,12 @@ fn spawn_executor(
         // over the line protocol. A `nu` head selects the two-fifo adapter
         // shape inside the carrier (the nushell PTY carrier retired — one
         // execution shape per language, the nu form is `induction` with
-        // spec `nu <author.nu>`). Under a jailed environment the whole spawn
-        // is bwrap-wrapped (the mount policy runs before exec).
+        // spec `nu <author.nu>`). Nothing wraps the spawn: the node's class is
+        // what contains the process (ADR-0003 §1).
         "induction" => {
             let argv: Vec<String> = shellish_split(source);
-            Box::new(super::exec::InductionExecutor::spawn_wrapped(
-                &argv, host, sandbox, encoding,
+            Box::new(super::exec::InductionExecutor::spawn_encoded(
+                &argv, host, encoding,
             )?)
         }
         // exec (ADR-0035 — the bare cgi shape, NO protocol): one process
@@ -663,7 +657,7 @@ fn spawn_executor(
         // residency to sweep. The SKILL shape (user ruling 2026-09-28).
         "exec" => {
             let argv: Vec<String> = shellish_split(source);
-            Box::new(super::exec::OneShotExecutor::new(&argv, sandbox, encoding))
+            Box::new(super::exec::OneShotExecutor::new(&argv, encoding))
         }
         // Wasm compiles AT SPAWN (from_source) — its `load` is a no-op;
         // other carriers load lazily inside `load`. Same executor shape.

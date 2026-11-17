@@ -8,7 +8,7 @@
     clippy::panic_in_result_fn
 )]
 
-use effector_config::{CapabilitySurface, EffectorConfig, NetworkPolicy};
+use effector_config::{CapabilitySurface, EffectorConfig};
 use effector_protocol::{CodeRef, Frame, ToolCall, ToolResult};
 use effector_runtime::remote;
 use futures_util::{SinkExt, StreamExt};
@@ -130,13 +130,10 @@ async fn outbound_registration_and_task_downlink() {
     let config = EffectorConfig {
         class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{port}"),
-        sandbox: true,
-        token: TOKEN.into(),
+                token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "test-node".into(),
-            network: NetworkPolicy::None,
-            ..Default::default()
         },
         lease: Default::default(),
     };
@@ -315,8 +312,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
     let config = EffectorConfig {
         class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{ws_port}"),
-        sandbox: true,
-        token: TOKEN.into(),
+                token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "link-node".into(),
@@ -325,8 +321,6 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             // non-`none` value is a startup error now — effector ADR-0001 —
             // so this test, which is about content-addressed code and not
             // about the network, declares the enforceable thing.
-            network: NetworkPolicy::None,
-            ..Default::default()
         },
         lease: Default::default(),
     };
@@ -338,30 +332,30 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
 /// dials — the control plane never receives a capability that would not hold.
 /// The config crate pins the message; this pins that `run` consults it.
 #[tokio::test]
-async fn an_unenforceable_declaration_fails_before_dialing() {
-    let config = EffectorConfig {
+async fn a_claim_the_machine_cannot_back_fails_before_dialing() {
+    // `class: container` is the one claim left with an enforcement point (ADR-0003 §1), and the
+    // point is a fact about where the process runs. This test runs outside a container, so the
+    // claim is refused at load — before anything dials.
+    //
+    // Nothing listens on port 1: a real dial would fail with a DIFFERENT error (connection
+    // refused), so the named config error is the proof that the node never dialed at all.
+    let mut config = EffectorConfig {
         class: effector_config::Class::Host,
-        // Nothing listens on port 1: a real dial would fail with a DIFFERENT
-        // error (connection refused), so the named config error is the proof
-        // that the node never dialed at all.
         control_plane_url: "ws://127.0.0.1:1".into(),
-        // No jail, so the allowlist has no enforcement point — the declaration is refused at
-        // load, which is the startup-fact rule (ADR-0001) and why nothing dials.
-        sandbox: false,
         token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "refusing-node".into(),
-            network: NetworkPolicy::Allow(vec!["github.com:443".into()]),
-            ..Default::default()
         },
         lease: Default::default(),
     };
-    let err = remote::run(config).await.unwrap_err().to_string();
-    assert!(
-        err.contains("network") && err.contains("jail"),
-        "the refusal names the missing enforcement point: {err}"
-    );
+    config.class = effector_config::Class::Container;
+    match remote::run(config).await {
+        // Inside a container the claim is checkable and holds: nothing to assert about the message.
+        Err(e) if e.to_string().contains("not inside a container") => {}
+        Err(e) => panic!("the refusal names the missing fact: {e}"),
+        Ok(()) => {}
+    }
 }
 
 /// Slice 2's claim, end to end: a node that declares a lease leaves on its own when nothing
@@ -378,12 +372,10 @@ async fn a_leased_node_leaves_when_the_work_stops() {
     let config = EffectorConfig {
         class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{port}"),
-        sandbox: false,
         token: TOKEN.into(),
         capabilities: CapabilitySurface {
             node_alias: "leased-node".into(),
             carriers: vec!["steel".into()],
-            ..Default::default()
         },
         lease: effector_config::LeaseConfig {
             idle_secs: 1,
@@ -451,12 +443,10 @@ async fn a_plane_that_accepts_and_goes_silent_ends_a_leased_node() {
     let config = EffectorConfig {
         class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{port}"),
-        sandbox: false,
         token: TOKEN.into(),
         capabilities: CapabilitySurface {
             node_alias: "silent-plane-node".into(),
             carriers: vec!["steel".into()],
-            ..Default::default()
         },
         lease: effector_config::LeaseConfig {
             idle_secs: 1,

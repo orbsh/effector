@@ -19,7 +19,7 @@ effector-config = { path = "../config" }
 # the carrier's frame types move onto this crate too, as their own step.
 induction-protocol = { path = "../../../induction/crates/induction-protocol" }
 # the arm ROUTING core (route_frame): one dispatcher shared with mudra —
-# the CHANNEL half (dual codec, fifo batch-EOF, bwrap, reaping) stays here,
+# the CHANNEL half (dual codec, fifo batch-EOF, reaping) stays here,
 # it is the carrier's own job (sync bridge, spawn_blocking model)
 induction-host = { path = "../../../induction/crates/induction-host" }
 serde = { workspace = true }
@@ -29,7 +29,6 @@ libc = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 tokio-tungstenite = "0.24"
 ureq = "2"
-sandbox-runtime = { git = "https://github.com/wangyedev/sandbox-runtime-rs" }
 sha2 = "0.10"
 hex = "0.4"
 futures-util = "0.3"

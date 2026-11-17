@@ -28,7 +28,7 @@
 //! is a thread for exactly that reason. A booth that cannot be re-entered says
 //! so in its declaration and the realm never hands it two calls at once. The source string IS the argv (whitespace-split — the
 //! spawn spec; remote content-addressed binaries are a recorded
-//! residual). bwrap policy wraps the spawn (mount policy before exec,
+//! residual). The node's class is what contains the process, not the spawn:
 //! the child's capability surface = the channels + jail).
 //!
 //! The dispatch contract (user ruling 2026-09-29): the event frame
@@ -488,26 +488,19 @@ impl InductionExecutor {
         self.shared.clone()
     }
 
-    /// Spawn and keep (no sandbox, JSON-lines).
+    /// Spawn and keep (JSON-lines).
     pub fn spawn(argv: &[String], host: Option<&HostBridge>) -> Result<Self> {
-        Self::spawn_wrapped(
-            argv,
-            host,
-            &crate::environment::Environment::Host,
-            Encoding::Json,
-        )
+        Self::spawn_encoded(argv, host, Encoding::Json)
     }
 
-    /// Spawn under this call's environment (a jailed one wraps argv, §header) with
-    /// the declared frame codec (ADR-0037 §2). The CBOR shape is the
+    /// Spawn with the declared frame codec (ADR-0037 §2). The CBOR shape is the
     /// pipes channel only: the fifo adapter exists FOR nushell (nu has
     /// no CBOR codec in its stdlib — the entrance criterion routes it to
     /// JSON), so `nu` specs are asserted Json (a CBOR-declared nu booth
     /// is a declaration error, not a silent downgrade).
-    pub fn spawn_wrapped(
+    pub fn spawn_encoded(
         argv: &[String],
         host: Option<&HostBridge>,
-        policy: &crate::environment::Environment,
         encoding: Encoding,
     ) -> Result<Self> {
         // The nushell adapter shape: `["nu", "<author.nu>"]` — the spawn
@@ -520,9 +513,9 @@ impl InductionExecutor {
                 encoding == Encoding::Json,
                 "induction/nu adapter: nushell speaks JSON-lines only (no CBOR codec in its stdlib) — declare encoding json"
             );
-            return Self::spawn_fifo(Path::new(author), host, policy);
+            return Self::spawn_fifo(Path::new(author), host);
         }
-        let (child, stdin, reader) = spawn_child(argv, policy, encoding)?;
+        let (child, stdin, reader) = spawn_child(argv, encoding)?;
         Ok(Self::from_parts(
             child,
             Out::Pipes(stdin),
@@ -573,29 +566,21 @@ impl InductionExecutor {
     /// The fifo-backed spawn (nushell): executor dir + two fifos, child =
     /// `nu --no-config-file <author> <req> <rep>` with stdout piped (the
     /// result frames); stderr inherits — diagnostics, never frames.
-    fn spawn_fifo(
-        author: &Path,
-        host: Option<&HostBridge>,
-        policy: &crate::environment::Environment,
-    ) -> Result<Self> {
+    fn spawn_fifo(author: &Path, host: Option<&HostBridge>) -> Result<Self> {
         if !author.exists() {
             anyhow::bail!(
                 "induction/nu adapter: author script {} not found",
                 author.display()
             );
         }
-        // Sandbox dirs follow the PTY carrier's precedent: under a
-        // Bubblewrap policy /tmp is tmpfs-mounted (files written outside
-        // vanish), so the executor dir lives under the policy's cwd
-        // (bind-mounted, visible to the child).
+        // The executor dir lives in the temp dir: nothing wraps this process, so a plain temp path
+        // is visible to the child by construction (the old jail could not see it, which is the only
+        // reason this used to follow a policy cwd).
         let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = match policy {
-            crate::environment::Environment::Host => std::env::temp_dir()
-                .join(format!("effector-induction-nu-{}-{id}", std::process::id())),
-            crate::environment::Environment::Jailed { cwd, .. } => {
-                Path::new(cwd).join(format!("effector-induction-nu-{}-{id}", std::process::id()))
-            }
-        };
+        let dir = std::env::temp_dir().join(format!(
+            "effector-induction-nu-{}-{id}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir)?;
         let req = dir.join("req");
         let rep = dir.join("rep");
@@ -620,7 +605,6 @@ impl InductionExecutor {
                 req.display().to_string(),
                 rep.display().to_string(),
             ],
-            policy,
             Encoding::Json,
         )?;
         // The fifos replaced stdin as the channels; drop the pipe writer
@@ -894,19 +878,13 @@ impl Drop for InductionExecutor {
 /// this shape bare — no loop needed — or the induction fifo via `CarrierShape::Fifo`).
 pub struct ExecOneShot {
     argv: Vec<String>,
-    policy: crate::environment::Environment,
     encoding: Encoding,
 }
 
 impl ExecOneShot {
-    pub fn new(
-        argv: &[String],
-        policy: &crate::environment::Environment,
-        encoding: Encoding,
-    ) -> Self {
+    pub fn new(argv: &[String], encoding: Encoding) -> Self {
         Self {
             argv: argv.to_vec(),
-            policy: policy.clone(),
             encoding,
         }
     }
@@ -920,7 +898,7 @@ impl ExecOneShot {
         control: Option<&crate::carrier::CallControl>,
     ) -> Result<Value> {
         let (child, mut stdin, mut stdout) =
-            spawn_child(&self.argv, &self.policy, self.encoding)?;
+            spawn_child(&self.argv, self.encoding)?;
         // THE CHILD IS THE WORK HERE (ADR-0047 stage two, the kill-shaped carrier): it
         // has no in-band channel to be told anything, and a script mid-run would not
         // read one. So the handle that can reach it is its pid — the strongest form of
@@ -1019,13 +997,9 @@ pub struct OneShotExecutor {
 }
 
 impl OneShotExecutor {
-    pub fn new(
-        argv: &[String],
-        policy: &crate::environment::Environment,
-        encoding: Encoding,
-    ) -> Self {
+    pub fn new(argv: &[String], encoding: Encoding) -> Self {
         Self {
-            inner: ExecOneShot::new(argv, policy, encoding),
+            inner: ExecOneShot::new(argv, encoding),
             control: None,
         }
     }
@@ -1071,43 +1045,6 @@ impl Executor for OneShotExecutor {
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }
-}
-
-/// Give the jail its OWN `/dev` and `/proc`.
-///
-/// The sandbox runtime writes `--dev /dev --proc /proc` BEFORE its `--ro-bind / /`,
-/// and bubblewrap applies mounts in order — so the host's `/dev` and `/proc` are
-/// bound over the fresh ones. Inside a user namespace the host's `/dev/null`
-/// cannot be opened by the sandboxed user (`Permission denied`), which kills every
-/// client that redirects to it: `socat …,fork` (our own egress bridges) does
-/// exactly that, so a bridged allowlist would never start. Moving the two mounts
-/// to the end restores what the flags promise, and it also keeps `/proc` from
-/// answering with the host's process table.
-pub fn own_dev_and_proc(wrapped: &str) -> String {
-    // Anything that is not the generator's own layout is left alone: this is a
-    // correction of a known shape, not a general rewriter.
-    if !wrapped.contains(" --dev /dev") || !wrapped.contains(" --proc /proc") {
-        return wrapped.to_string();
-    }
-    let moved = wrapped
-        .replacen(" --dev /dev", "", 1)
-        .replacen(" --proc /proc", "", 1);
-    match moved.find(" --chdir ") {
-        Some(at) => format!("{} --dev /dev --proc /proc{}", &moved[..at], &moved[at..]),
-        None => moved,
-    }
-}
-
-/// The shell the generated jail command runs scripts with. NixOS has no
-/// `/bin/bash`; it does have `/bin/sh`, so the fallback is the difference between
-/// a jail that starts and one that cannot.
-fn jail_shell() -> &'static str {
-    for candidate in ["/bin/bash", "/bin/sh"] {
-        if std::path::Path::new(candidate).exists() {
-            return candidate;
-        }
-    }
-    "/bin/sh"
 }
 
 // ---------------------------------------------------- bridge adapter --
@@ -1266,7 +1203,7 @@ fn table_fn<'a>(
 
 // -------------------------------------------------------------- spawn --
 
-/// Fork/exec argv[0] (or the bwrap wrapper) with piped stdio; stderr is
+/// Fork/exec argv[0] with piped stdio; stderr is
 /// inherited (the child's diagnostics reach the effector's log, never the
 /// result channel). The declared frame codec crosses as the
 /// `INDUCTION_ENCODING` env ("json" | "cbor") — the child-side protocol
@@ -1275,69 +1212,17 @@ fn table_fn<'a>(
 /// name is the protocol's own constant, not a literal kept here.
 fn spawn_child(
     argv: &[String],
-    policy: &crate::environment::Environment,
     encoding: Encoding,
 ) -> Result<(Child, ChildStdin, BufReader<std::process::ChildStdout>)> {
     let (head, rest) = argv
         .split_first()
         .ok_or_else(|| anyhow!("exec/induction carrier: empty spawn spec"))?;
-    let mut cmd = match policy {
-        crate::environment::Environment::Host => {
-            let mut c = Command::new(head);
-            c.args(rest);
-            c
-        }
-        crate::environment::Environment::Jailed {
-            allow_write,
-            deny_read,
-            cwd,
-            proxy,
-            ..
-        } => {
-            let quoted = argv
-                .iter()
-                .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let config = sandbox_runtime::config::SandboxRuntimeConfig {
-                filesystem: sandbox_runtime::config::FilesystemConfig {
-                    allow_write: allow_write.clone(),
-                    deny_read: deny_read.clone(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            // The jail reaches the node's proxies through a prelude THIS side
-            // writes (two socat bridges on the jail's loopback plus the proxy
-            // environment); the generator is asked for no bridges of its own —
-            // the ones it writes are joined `& ;`, which no shell parses. With no
-            // face the namespace simply has no network (`--unshare-net` is
-            // unconditional).
-            let quoted = match proxy {
-                Some(face) => crate::egress::jail_prelude(face, &quoted),
-                None => quoted,
-            };
-            let (wrapped, _) = sandbox_runtime::sandbox::linux::generate_bwrap_command(
-                &quoted,
-                &config,
-                std::path::Path::new(cwd),
-                None,
-                None,
-                0,
-                0,
-                // The shell the JAIL runs, resolved on this host: `/bin/bash` does
-                // not exist on NixOS (only `/bin/sh`), and a jail whose shell is a
-                // path that is not there fails before any script does.
-                Some(jail_shell()),
-            )
-            .map_err(|e| anyhow!("exec/induction carrier: bwrap command: {e}"))?;
-            let mut c = Command::new("bash");
-            c.arg("-c").arg(own_dev_and_proc(&wrapped));
-            c
-        }
-    };
-    // bwrap inherits the parent environment (--clearenv is not part of
-    // the generated command), so the codec crosses the jail edge either way.
+    // No wrapper: what contains this process is the node's class (ADR-0003 §1), decided by the
+    // launcher that started it, not by argv surgery here. A node that cannot contain a call refuses
+    // it before this point (`class_refusal`), which is the only place the decision belongs.
+    let mut cmd = Command::new(head);
+    cmd.args(rest);
+    // The codec crosses the exec edge as an ordinary environment variable.
     cmd.env(
         induction_protocol::ENCODING_ENV,
         match encoding {

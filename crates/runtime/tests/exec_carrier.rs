@@ -56,7 +56,6 @@ fn induction_call_round_trip() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             |sess| sess.call("echo", &json!({"x": 1})),
         )
         .unwrap();
@@ -71,7 +70,6 @@ fn induction_call_round_trip() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             |sess| sess.call("echo", &json!({"y": 2})),
         )
         .unwrap();
@@ -105,7 +103,6 @@ fn induction_host_call_crosses_the_seam() {
             "induction",
             &argv,
             Some(&bridge),
-            &effector_runtime::environment::Environment::Host,
             |sess| {
                 sess.call(
                     "ctx_round_trip",
@@ -138,7 +135,6 @@ fn induction_iterate_stream() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             move |sess| sess.iterate(op.clone()),
         )
         .unwrap()
@@ -181,7 +177,6 @@ fn induction_iterate_stream() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             |sess| {
                 sess.iterate(StreamOp::Next {
                     stream_id: "s1".into(),
@@ -213,7 +208,6 @@ fn exec_oneshot_runs_per_call() {
             "exec",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             move |sess| sess.call("echo", &v),
         )
         .unwrap()
@@ -240,7 +234,6 @@ fn exec_oneshot_iterate_is_a_named_error() {
         "exec",
         &argv,
         None,
-        &effector_runtime::environment::Environment::Host,
         |sess| {
             let start = sess.iterate(StreamOp::Start {
                 stream_id: "s1".into(),
@@ -281,7 +274,6 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
         "induction",
         &argv,
         None,
-        &effector_runtime::environment::Environment::Host,
         |sess| sess.call("echo", &json!(1)),
     )
     .unwrap();
@@ -294,7 +286,6 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             |sess| {
                 sess.as_any()
                     .downcast_mut::<effector_runtime::carrier::exec::InductionExecutor>()
@@ -327,7 +318,6 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             |sess| sess.call("echo", &json!("after respawn")),
         )
         .unwrap();
@@ -346,7 +336,6 @@ fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
             "box/k5",
             "induction",
             &argv,
-            &effector_runtime::environment::Environment::Host,
             induction_protocol::Encoding::Json,
             None,
             |shared| {
@@ -376,7 +365,6 @@ fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             |sess| sess.call("echo", &json!(0)),
         )
         .unwrap_err()
@@ -392,7 +380,6 @@ fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
         "box/k5",
         "induction",
         &argv,
-        &effector_runtime::environment::Environment::Host,
         induction_protocol::Encoding::Json,
         None,
         |shared| {
@@ -439,7 +426,6 @@ fn nu_induction_call_round_trip_and_residency() {
             "induction",
             &spec,
             None,
-            &effector_runtime::environment::Environment::Host,
             move |sess| sess.call(event, &args),
         )
         .unwrap()
@@ -486,7 +472,6 @@ fn nu_induction_host_call_crosses_the_seam() {
             "induction",
             &spec,
             Some(&bridge),
-            &effector_runtime::environment::Environment::Host,
             // the CANONICAL invoke payload (ADR-0001): the child forwards
             // it verbatim into the host frame's args, where the shared
             // dispatcher decodes the nested booth shape — an opaque
@@ -521,7 +506,6 @@ fn nu_induction_iterate_stream() {
             "induction",
             &spec,
             None,
-            &effector_runtime::environment::Environment::Host,
             move |sess| sess.iterate(op.clone()),
         )
         .unwrap()
@@ -565,7 +549,6 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
         "induction",
         &spec,
         None,
-        &effector_runtime::environment::Environment::Host,
         |sess| sess.call("echo", &json!("x")),
     )
     .unwrap();
@@ -575,7 +558,6 @@ fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
             "induction",
             &spec,
             None,
-            &effector_runtime::environment::Environment::Host,
             |sess| {
                 let b = sess
                     .as_any()
@@ -641,7 +623,6 @@ fn induction_cbor_round_trip() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             Encoding::Cbor,
             |sess| sess.call("echo", &json!({"x": 1})),
         )
@@ -655,7 +636,6 @@ fn induction_cbor_round_trip() {
             "induction",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             Encoding::Cbor,
             |sess| {
                 sess.iterate(StreamOp::Start {
@@ -696,7 +676,6 @@ fn induction_cbor_host_call_crosses_the_seam() {
             "induction",
             &argv,
             Some(&bridge),
-            &effector_runtime::environment::Environment::Host,
             Encoding::Cbor,
             // canonical booth payload (see the nu seam test's note): the
             // shared dispatcher decodes the nested shape on the CBOR leg too
@@ -743,7 +722,6 @@ fn induction_untyped_host_frame_fails_at_decode() {
             "induction",
             &argv,
             Some(&bridge),
-            &effector_runtime::environment::Environment::Host,
             |sess| sess.call("bad_host_frame", &json!({"q": 1})),
         )
         .unwrap();
@@ -776,7 +754,6 @@ fn exec_cbor_round_trip() {
             "exec",
             &argv,
             None,
-            &effector_runtime::environment::Environment::Host,
             Encoding::Cbor,
             |sess| sess.call("echo", &json!({"n": 1})),
         )
@@ -798,7 +775,6 @@ fn nu_cbor_declaration_is_an_error() {
             "induction",
             &spec,
             None,
-            &effector_runtime::environment::Environment::Host,
             Encoding::Cbor,
             |sess| sess.call("echo", &json!({})),
         )
@@ -857,7 +833,6 @@ fn induction_executor_rearms_the_bridge_per_call() {
             "induction",
             &argv,
             Some(&b1),
-            &effector_runtime::environment::Environment::Host,
             |sess| sess.call("ctx_round_trip", &args),
         )
         .unwrap();
@@ -869,7 +844,6 @@ fn induction_executor_rearms_the_bridge_per_call() {
             "induction",
             &argv,
             Some(&b2),
-            &effector_runtime::environment::Environment::Host,
             |sess| sess.call("ctx_round_trip", &args),
         )
         .unwrap();
@@ -903,7 +877,6 @@ fn the_resident_runner_keeps_its_ctx_frames_on_the_wire() {
             "induction",
             &spec,
             Some(&bridge),
-            &effector_runtime::environment::Environment::Host,
             induction_protocol::Encoding::Json,
             |sess| {
                 sess.iterate(StreamOp::Start {
@@ -955,7 +928,6 @@ fn an_interrupt_releases_the_wait_and_reaches_the_guest() {
         "induction",
         &argv,
         None,
-        &effector_runtime::environment::Environment::Host,
         move |sess| {
             sess.arm_interrupt(&arm);
             std::thread::spawn(move || {
@@ -993,7 +965,6 @@ fn an_interrupt_kills_a_one_shot_child_instead_of_waiting_for_it() {
         "exec",
         "sleep 30",
         None,
-        &effector_runtime::environment::Environment::Host,
         move |sess| {
             sess.arm_interrupt(&arm);
             std::thread::spawn(move || {

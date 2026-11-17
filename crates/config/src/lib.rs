@@ -34,26 +34,12 @@ use serde::{Deserialize, Serialize};
 /// This is the ONLY containment layer (no per-operation container
 /// boundary beneath it), so the scope check must be enforced at execution,
 /// not just honored at dispatch-declaration. No credential fields by design.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapabilitySurface {
     /// Carriers this node carries (e.g. ["steel", "python"]). Registration
     /// advertises these; a task naming a missing carrier is an error value.
     pub carriers: Vec<String>,
-    /// Filesystem paths delivered scripts may WRITE. Enforced as the jail's
-    /// write scope: everything else is read-only, and reads are not confined
-    /// by this field (deny_read is the read-side declaration).
-    pub fs_scope: Vec<String>,
-    /// Paths delivered scripts must NOT read, whatever else would allow them
-    /// (credentials, shell configs, other users' trees). Enforced as the
-    /// jail's deny_read.
-    pub deny_read: Vec<String>,
-    /// Working directory inside the jail. `None` = the system temp dir (the
-    /// pre-declaration default, kept so an unconfigured node behaves as it
-    /// did before this field existed).
-    pub cwd: Option<String>,
-    /// Network egress policy for script execution.
-    pub network: NetworkPolicy,
     /// Host alias identifying this node's connection: `register` carries it,
     /// and the control plane keys the live connection by it. Residency and
     /// entry addressing do NOT ride on it — those are the call's own
@@ -62,36 +48,7 @@ pub struct CapabilitySurface {
     pub node_alias: String,
 }
 
-impl Default for CapabilitySurface {
-    fn default() -> Self {
-        Self {
-            carriers: Vec::new(),
-            fs_scope: Vec::new(),
-            deny_read: Vec::new(),
-            cwd: None,
-            network: NetworkPolicy::None,
-            node_alias: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkPolicy {
-    /// No outbound network from skills.
-    #[default]
-    None,
-    /// Explicit allowlist of host:port targets.
-    Allow(Vec<String>),
-    /// Unrestricted (single-user nodes where the user accepted the trade).
-    Open,
-}
-
 /// Effector startup configuration (Phase 3): where to register and what to claim.
-fn default_true() -> bool {
-    true
-}
-
 fn default_max_idle() -> u64 {
     300
 }
@@ -192,11 +149,6 @@ pub struct EffectorConfig {
     /// the runtime leaves is refused, because a claim nothing enforces is a lie the config tells.
     #[serde(default)]
     pub class: Class,
-    /// Wrap executor processes in bubblewrap. Remote deployments MUST set
-    /// true (unattended external code); requires bwrap on PATH. In-process
-    /// embedded deployments (aura) pass None instead.
-    #[serde(default = "default_true")]
-    pub sandbox: bool,
     /// The token the control plane minted for this node's alias (ADR-0003). It rides the DIAL
     /// — a query parameter on the mount URL — and is checked once, when the connection is
     /// accepted; everything after that rides the connection, which is the authorization. A
@@ -210,43 +162,22 @@ pub struct EffectorConfig {
 }
 
 impl EffectorConfig {
-    /// Refuse a configuration that claims containment this node cannot
-    /// enforce. A declared field IS a claim about what delivered code may do,
-    /// so every field must name its enforcement point: a claim nothing
-    /// enforces is a lie the config file tells, and this node fails closed
-    /// rather than registering it as a capability.
+    /// Refuse a configuration whose claims this node cannot make true.
     ///
-    /// Enforced today: `fs_scope` (the jail's write scope), `deny_read`, `cwd`,
-    /// the wrap itself (`sandbox`), and `network` as an allowlist — the node runs
-    /// the proxies and hands the jail the sockets to reach them, so a declared
-    /// list is a list the script is confined to.
+    /// A declared field IS a claim about what delivered code may do, so every claim names its
+    /// enforcement point. After ADR-0003 §1 there is exactly one: the class. A node that is not a
+    /// container runs uncontained, and it runs only what its callers declared they accept
+    /// (`ToolCall.requires`); a node that claims `container` is checked against the markers the
+    /// runtime leaves. The jail's declaration fields (`fs_scope`, `deny_read`, `cwd`, `sandbox`,
+    /// `network`) were retired with it — a claim whose enforcement point no longer exists is the
+    /// lie this function exists to refuse.
     ///
-    /// There is no command-execution grant to declare, and there never can be
-    /// one: a node's whole job is to run a delivered script inside a jail that
-    /// admits `exec` by construction, so "may execute" is not a capability
-    /// distinct from existing. The field that used to claim it was retired
-    /// (ADR-0001's Update) rather than wired — the honest close for a claim
-    /// with no enforcement point is to stop making it.
-    ///
-    /// Refused: `open` (the jail has no way to be open — its network namespace is
-    /// created unshared, so "unrestricted" is a promise this shape cannot keep),
-    /// and an EMPTY allowlist (the filter reads an empty list as "allow
-    /// everything", which is the opposite of what a declaration asks for).
     pub fn validate(&self) -> Result<(), String> {
-        // The class is a claim about what contains the code this node runs, and the two failure
-        // directions are both real: claiming a container the node is not in makes a host machine
-        // look safe, and running a jail INSIDE a container is a second boundary story with nothing
-        // left to bound.
-        // The contradiction is checked FIRST because it is a property of the file alone (so a test
-        // can reach it); the marker check depends on where the process happens to run.
-        if self.class == Class::Container && self.sandbox {
-            return Err(
-                "class = container with sandbox = true: the container is already the boundary; \
-                 wrapping a jail inside it is a second containment story with nothing left to \
-                 bound — set `sandbox: false`"
-                    .into(),
-            );
-        }
+        // A node claiming a container must BE in one: the launcher starts it with `docker run` and
+        // the runtime leaves a marker, so the claim is checkable against a fact rather than trusted
+        // as a word. There is no jail beneath the class any more (ADR-0003 §1): the filesystem of
+        // whatever contains this process is the only boundary there is, which is exactly why the
+        // claim has to be true.
         if self.class == Class::Container && !Class::marker_present() {
             return Err(
                 "class = container: this process is not inside a container (no /.dockerenv or \
@@ -264,27 +195,7 @@ impl EffectorConfig {
                     .into(),
             );
         }
-        match &self.capabilities.network {
-            NetworkPolicy::None => Ok(()),
-            NetworkPolicy::Allow(domains) if domains.is_empty() => Err(
-                "capabilities.network = allow []: an empty allowlist reads as \"allow \
-                 everything\" to the egress filter — declare the hostnames, or declare \
-                 \"none\""
-                    .into(),
-            ),
-            NetworkPolicy::Allow(_) if !self.sandbox => Err(
-                "capabilities.network = allow [...]: the allowlist is reached through the \
-                 jail's bridges, and `sandbox: false` builds no jail — declare \
-                 \"none\" for a trusted-domain node"
-                    .into(),
-            ),
-            NetworkPolicy::Allow(_) => Ok(()),
-            NetworkPolicy::Open => Err(
-                "capabilities.network = open: this node's network namespace is unshared, so \
-                 an unrestricted namespace is not a shape it can offer — declare an allowlist"
-                    .into(),
-            ),
-        }
+        Ok(())
     }
 }
 
@@ -296,7 +207,6 @@ mod tests {
         EffectorConfig {
             control_plane_url: "ws://127.0.0.1:8787".into(),
             class: Class::Host,
-            sandbox: true,
             token: "test-token".into(),
             capabilities,
             lease: LeaseConfig::default(),
@@ -307,7 +217,6 @@ mod tests {
         CapabilitySurface {
             node_alias: "n1".into(),
             carriers: vec!["exec".into()],
-            ..Default::default()
         }
     }
 
@@ -337,52 +246,14 @@ mod tests {
     }
 
     #[test]
-    fn a_declaration_without_an_enforcement_point_is_refused() {
-        // An allowlist IS enforceable now (the node runs the proxies and the jail
-        // reaches them through its bridges), so the accepted shape is the ordinary
-        // one; what is refused is the shapes nothing can enforce.
-        let mut caps = declaring();
-        caps.network = NetworkPolicy::Allow(vec!["github.com:443".into()]);
-        config(caps).validate().expect("a declared allowlist is a jail");
-
-        let mut caps = declaring();
-        caps.network = NetworkPolicy::Open;
-        let err = config(caps).validate().unwrap_err();
-        assert!(err.contains("unshared"), "{err}");
-
-        let mut caps = declaring();
-        caps.network = NetworkPolicy::Allow(Vec::new());
-        let err = config(caps).validate().unwrap_err();
-        assert!(
-            err.contains("empty allowlist") || err.contains("allow everything"),
-            "an empty list would read as allow-all: {err}"
-        );
-
-        let mut caps = declaring();
-        caps.network = NetworkPolicy::Allow(vec!["github.com".into()]);
-        let mut trusted = config(caps);
-        trusted.sandbox = false;
-        let err = trusted.validate().unwrap_err();
-        assert!(
-            err.contains("builds no jail"),
-            "an allowlist needs the jail's bridges: {err}"
-        );
-    }
-
-    #[test]
     fn a_container_class_is_refused_where_it_would_be_a_claim_and_not_a_fact() {
         // The claim and the boundary are checked together: a jail inside a container bounds nothing,
         // and a host process claiming a container's boundary is the more dangerous of the two
         // because it makes an uncontained machine look safe.
+        // The marker decides — and this test runs outside a container, so the honest answer here is
+        // the refusal, naming what is missing.
         let mut c = config(declaring());
         c.class = Class::Container;
-        c.sandbox = true;
-        let err = c.validate().unwrap_err();
-        assert!(err.contains("container is already the boundary"), "{err}");
-
-        // With the contradiction out of the way, the marker decides — and this test runs outside a
-        // container, so the honest answer here is the refusal, naming what is missing.
-        c.sandbox = false;
         match c.validate() {
             Err(err) => assert!(err.contains("not inside a container"), "{err}"),
             Ok(()) => { /* this test ran inside a container: the claim is checkable, so it held */ }
@@ -390,11 +261,15 @@ mod tests {
     }
 
     #[test]
-    fn the_enforceable_declarations_pass() {
-        let mut caps = declaring();
-        caps.fs_scope = vec!["/srv/work".into()];
-        caps.deny_read = vec!["/home/user/.ssh".into()];
-        caps.cwd = Some("/srv/work".into());
-        assert!(config(caps).validate().is_ok());
+    fn only_the_class_and_the_token_are_claims_left_to_check() {
+        // The jail's declaration fields retired with it (ADR-0003 §1), so the only claims a config
+        // can still make are the two that have an enforcement point: what contains the node, and the
+        // token it dialed with.
+        assert!(config(declaring()).validate().is_ok());
+
+        let mut c = config(declaring());
+        c.token = "  ".into();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("token: empty"), "{err}");
     }
 }

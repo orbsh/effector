@@ -28,7 +28,6 @@ fn run(
         language,
         src,
         None::<&HostBridge>,
-        &effector_runtime::environment::Environment::Host,
         |s: &mut dyn effector_runtime::carrier::executor::Executor| s.call(handler, args),
     )
 }
@@ -60,7 +59,6 @@ fn py_state_persists() {
             "python",
             src,
             host,
-            &effector_runtime::environment::Environment::Host,
             call,
         )
         .unwrap();
@@ -70,7 +68,6 @@ fn py_state_persists() {
             "python",
             src,
             host,
-            &effector_runtime::environment::Environment::Host,
             call,
         )
         .unwrap();
@@ -117,7 +114,6 @@ fn unknown_language_is_error_value() {
             "koto",
             "(+ 1 2)",
             None::<&HostBridge>,
-            &effector_runtime::environment::Environment::Host,
             |s: &mut dyn effector_runtime::carrier::executor::Executor| {
                 s.call("f", &serde_json::json!(null))
             },

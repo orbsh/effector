@@ -83,8 +83,11 @@ fn store_emit_carries_the_instruction_as_data() {
 }
 
 #[test]
-fn capability_surface_defaults_deny() {
+fn capability_surface_carries_only_what_it_can_enforce() {
+    // The surface answers "which carriers does this node carry, under which alias". The jail's
+    // fs/network declarations left with the jail (effector ADR-0003 §1), so a default surface is
+    // empty in both of its fields and claims nothing else.
     let c = effector_config::CapabilitySurface::default();
-    assert!(c.fs_scope.is_empty());
-    assert!(matches!(c.network, effector_config::NetworkPolicy::None));
+    assert!(c.carriers.is_empty());
+    assert!(c.node_alias.is_empty());
 }
