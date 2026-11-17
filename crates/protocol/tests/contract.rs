@@ -23,7 +23,6 @@ fn roundtrip_call_carries_a_code_reference() {
             url: "http://code.local/ab12".into(),
             sha256: "ab12".into(),
         },
-        resources: Vec::new(),
     };
     let s = serde_json::to_string(&call).unwrap();
     let back: ToolCall = serde_json::from_str(&s).unwrap();

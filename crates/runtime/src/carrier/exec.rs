@@ -1193,6 +1193,17 @@ impl induction_host::HostOps for BridgeOps<'_> {
         })
     }
 
+    fn resource<'a>(&'a self, op: &'a Value) -> induction_host::OpsFuture<'a> {
+        // `ctx.resource` — the same instruction-beside-`type` shape as `store`, answered by the
+        // node's own bridge: the transfer happens here, and the script gets a path.
+        let f = self.bridge.functions.get("resource").cloned();
+        Box::pin(async move {
+            let f = f
+                .ok_or_else(|| "induction carrier: host fn 'resource' not bridged".to_string())?;
+            (f)(op.clone()).map_err(|e| e.to_string())
+        })
+    }
+
     fn iterate<'a>(&'a self, arm: Arm, args: &'a Value) -> induction_host::OpsFuture<'a> {
         let name = arm.as_str();
         let f = self.bridge.functions.get(name).cloned();

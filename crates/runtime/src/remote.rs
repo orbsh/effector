@@ -32,6 +32,7 @@ async fn serve_connection(
     executors: &Executors,
     code_cache: &Arc<CodeCache>,
     policy: &crate::environment::Environment,
+    adopted: &Arc<Adopted>,
 ) -> Result<Closing> {
     let pending_host: Arc<PendingHost> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -44,7 +45,6 @@ async fn serve_connection(
     let pending_material: Arc<PendingMaterial> =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     // What the plane said each declared resource's mode is, for the publish step after the call.
-    let modes: Arc<Modes> = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let url = effector_protocol::dial_url(base_url, token);
     let (ws, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -142,12 +142,12 @@ async fn serve_connection(
                 let tx = tx.clone();
                 let pending_host = pending_host.clone();
                 let pending_material = pending_material.clone();
-                let modes = modes.clone();
                 let config = config.clone();
                 let executors = executors.clone();
                 let code_cache = code_cache.clone();
                 let policy = policy.clone();
                 let calls = calls.clone();
+                let adopted = adopted.clone();
                 // One executor task per call; host calls it makes run
                 // concurrently over the same writer channel.
                 tokio::spawn(async move {
@@ -158,71 +158,16 @@ async fn serve_connection(
                         &tx,
                         &pending_host,
                         &pending_material,
-                        &modes,
                         &code_cache,
                         &control,
                         &policy,
+                        &adopted,
                     )
                     .await;
                     let _ = tx.send(Frame::Result(ToolResult {
                         call_id: call.call_id.clone(),
                         outcome: result,
                     }));
-                    // Then the `rw` resources go out, at completion (ADR-0003 §7). Each one asks
-                    // for its own material: material is per transfer, so the write has a
-                    // different one than the read that preceded it.
-                    for decl in &call.resources {
-                        let identity = format!("{}/{}", decl.kind, decl.seq);
-                        let writable = modes
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .get(&identity)
-                            .copied()
-                            .unwrap_or(crate::resource::Mode::ReadOnly);
-                        if writable != crate::resource::Mode::ReadWrite {
-                            // Nothing to publish: the plane never offered a write half, and
-                            // publishing anyway would be the no-op the contract forbids.
-                            continue;
-                        }
-                        match request_material(
-                            &tx,
-                            &pending_material,
-                            &call.call_id,
-                            &decl.kind,
-                            decl.seq,
-                            true,
-                        )
-                        .await
-                        {
-                            Ok(minted) => match crate::resource::Spec::from_plane(
-                                &decl.kind,
-                                decl.seq,
-                                &minted.mode,
-                                minted.at.as_deref(),
-                            ) {
-                                Ok(spec) => {
-                                    let material = crate::resource::Material {
-                                        url: minted.url,
-                                        credential: minted.credential,
-                                    };
-                                    let root = resources_root();
-                                    match crate::resource::sync(&spec, &material, &root) {
-                                        Ok(reference) => {
-                                            let _ = tx.send(Frame::Synced {
-                                                call_id: call.call_id.clone(),
-                                                kind: decl.kind.clone(),
-                                                seq: decl.seq,
-                                                reference,
-                                            });
-                                        }
-                                        Err(e) => eprintln!("resource `{identity}`: sync failed: {e:#}"),
-                                    }
-                                }
-                                Err(e) => eprintln!("resource `{identity}`: {e:#}"),
-                            },
-                            Err(e) => eprintln!("{e:#}"),
-                        }
-                    }
                     // The call is over, so its control entry goes: the map's length
                     // is what the lease reads to decide whether work is in flight,
                     // and a handle outliving its call would stop the next one.
@@ -327,6 +272,12 @@ type PendingMaterial = std::sync::Mutex<
     >,
 >;
 
+/// What this node has materialised, by `kind/seq`. The directories are a cache with a known
+/// owner — this node — so they go when it leaves (an executor's data is not something a later
+/// process should inherit). A shared resource is fetched once; this is a set, not a count, because
+/// the lifetime is the process's, not a call's.
+type Adopted = std::sync::Mutex<std::collections::BTreeSet<String>>;
+
 fn material_key(call_id: &str, kind: &str, seq: u64) -> String {
     format!("{call_id}\u{1f}{kind}\u{1f}{seq}")
 }
@@ -334,19 +285,18 @@ fn material_key(call_id: &str, kind: &str, seq: u64) -> String {
 /// Which resources the plane said were writable. The declaration does not carry a mode (the row
 /// decides, not the task), so the node records what it was told, for the publish step after the
 /// call.
-type Modes = std::sync::Mutex<std::collections::HashMap<String, crate::resource::Mode>>;
 
 /// Ask the control plane for one transfer's material and wait for it. The node never invents a
 /// credential: it names the resource, and the plane answers with where to reach the store and how
 /// (ADR-0003 §8). The answer is used for one `ensure`/`sync` and dropped.
-async fn request_material(
+fn ask_material(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending: &Arc<PendingMaterial>,
     call_id: &str,
     kind: &str,
     seq: u64,
     write: bool,
-) -> anyhow::Result<Minted> {
+) -> anyhow::Result<tokio::sync::oneshot::Receiver<anyhow::Result<Minted>>> {
     let key = material_key(call_id, kind, seq);
     let (sender, receiver) = tokio::sync::oneshot::channel();
     pending
@@ -366,7 +316,20 @@ async fn request_material(
             .remove(&key);
         anyhow::bail!("resource `{kind}/{seq}`: the connection is gone");
     }
-    match receiver.await {
+    Ok(receiver)
+}
+
+/// The same ask, from a host fn — a blocking context (the script is waiting on a value), so the
+/// reply is awaited by parking the thread rather than by an `async` frame.
+fn ask_material_blocking(
+    tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
+    pending: &Arc<PendingMaterial>,
+    call_id: &str,
+    kind: &str,
+    seq: u64,
+    write: bool,
+) -> anyhow::Result<Minted> {
+    match ask_material(tx, pending, call_id, kind, seq, write)?.blocking_recv() {
         Ok(material) => material,
         Err(_) => anyhow::bail!("resource `{kind}/{seq}`: the control plane never answered"),
     }
@@ -392,10 +355,10 @@ async fn execute_call(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
     pending_material: &Arc<PendingMaterial>,
-    modes: &Arc<Modes>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
     policy: &crate::environment::Environment,
+    adopted: &Arc<Adopted>,
 ) -> Result<serde_json::Value, String> {
     execute_call_inner(
         config,
@@ -404,10 +367,10 @@ async fn execute_call(
         tx,
         pending_host,
         pending_material,
-        modes,
         code_cache,
         control,
         policy,
+        adopted,
     )
     .await
     .map_err(|e| e.to_string())
@@ -421,35 +384,11 @@ async fn execute_call_inner(
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
     pending_material: &Arc<PendingMaterial>,
-    modes: &Arc<Modes>,
     code_cache: &Arc<CodeCache>,
     control: &CallControl,
     policy: &crate::environment::Environment,
+    adopted: &Arc<Adopted>,
 ) -> Result<serde_json::Value> {
-    // Data first, code second: a resource that is absent costs a directory appearing rather
-    // than a restart, because `ensure` is idempotent — the second call pays a fetch that has
-    // nothing to do. This happens BEFORE the code runs, so a task never starts on data it
-    // cannot see.
-    let resources_root = resources_root();
-    for decl in &call.resources {
-        let minted =
-            request_material(tx, pending_material, &call.call_id, &decl.kind, decl.seq, false)
-                .await?;
-        let spec =
-            crate::resource::Spec::from_plane(&decl.kind, decl.seq, &minted.mode, minted.at.as_deref())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-        // What the plane said about writability, remembered for the publish step.
-        modes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(spec.identity(), spec.mode);
-        let material = crate::resource::Material {
-            url: minted.url,
-            credential: minted.credential,
-        };
-        crate::resource::ensure(&spec, &material, &resources_root)?;
-    }
-
     // Content-addressed code (ADR-0027): the frame carries a reference,
     // bytes ride the data path. Resolve = per-hash cache hit, else fetch +
     // verify (mismatch = error, never silent). The cache is a discardable
@@ -462,7 +401,13 @@ async fn execute_call_inner(
     // identity (below).
     // Host bridge: ctx ops ride Frame::Host over the same connection, each
     // with a unique host_call_id; the closure awaits the correlated reply.
-    let bridge = build_host_bridge(call.call_id.clone(), tx, pending_host);
+    let bridge = build_host_bridge(
+        call.call_id.clone(),
+        tx,
+        pending_host,
+        pending_material,
+        adopted,
+    );
     // Residency: the caller's executor identity keys the resident runtime —
     // calls sharing a `executor` share VM/module state, different ones never
     // do. The node alias in the key is only for readability (the registry is
@@ -549,6 +494,8 @@ fn build_host_bridge(
     call_id: String,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
     pending_host: &Arc<PendingHost>,
+    pending_material: &Arc<PendingMaterial>,
+    adopted: &Arc<Adopted>,
 ) -> HostBridge {
     let tx = tx.clone();
     let pending = pending_host.clone();
@@ -689,7 +636,86 @@ fn build_host_bridge(
             bridge.functions.insert(name.to_string(), f);
         }
     }
+    // Durable data, asked for at RUN time (`ctx.resource`). This is the only way a declaration
+    // reaches a node: a booth's need is not knowable before it runs, so nothing rides the call.
+    // The transfer happens HERE — the script gets a path, never a credential, and the store's
+    // answers stay on this side of the host call.
+    {
+        let tx = tx.clone();
+        let pending = pending_material.clone();
+        let call_id = call_id.clone();
+        let adopted = adopted.clone();
+        let f: crate::carrier::HostFn = Arc::new(move |arg: serde_json::Value| {
+            let m = match &arg {
+                serde_json::Value::String(s) => {
+                    serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
+                }
+                other => other.clone(),
+            };
+            let text = |k: &str| m.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+            let (Some(op), Some(kind)) = (text("op"), text("kind")) else {
+                anyhow::bail!("a resource op names both `op` (`get` or `publish`) and `kind`");
+            };
+            let Some(seq) = m.get("seq").and_then(serde_json::Value::as_u64) else {
+                anyhow::bail!("a resource op names `seq` — the number inside (owner, kind)");
+            };
+            let write = match op.as_str() {
+                "get" => false,
+                "publish" => true,
+                other => anyhow::bail!(
+                    "`{other}` is not a resource op; a resource is `get` or `publish`"
+                ),
+            };
+            let minted = ask_material_blocking(&tx, &pending, &call_id, &kind, seq, write)?;
+            let spec =
+                crate::resource::Spec::from_plane(&kind, seq, &minted.mode, minted.at.as_deref())?;
+            let material = crate::resource::Material {
+                url: minted.url,
+                credential: minted.credential,
+            };
+            let root = resources_root();
+            let path = crate::resource::ensure(&spec, &material, &root)?;
+            adopted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(spec.identity());
+            if !write {
+                return Ok(serde_json::json!(path.to_string_lossy()));
+            }
+            let reference = crate::resource::sync(&spec, &material, &root)?;
+            Ok(serde_json::json!(reference))
+        });
+        bridge.functions.insert("resource".to_string(), f);
+    }
     bridge
+}
+
+/// Removes the resource directories this node materialised, when the node leaves. What a task
+/// fetched is a cache with a known owner; a later process starts from nothing rather than from
+/// whatever a previous one happened to leave lying around.
+struct Materialised {
+    root: std::path::PathBuf,
+    adopted: Arc<Adopted>,
+}
+
+impl Drop for Materialised {
+    fn drop(&mut self) {
+        let identities: Vec<String> = self
+            .adopted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect();
+        for identity in identities {
+            let path = self.root.join(&identity);
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                // Leaving it is reported, never hidden: a node that cannot clean up is a node
+                // whose disk will fill, and silence would make that a mystery later.
+                eprintln!("resource `{identity}`: left behind at {}: {e}", path.display());
+            }
+        }
+    }
 }
 
 /// Which iterate/store op a bridge arm builds from the script's JSON arg.
@@ -823,6 +849,14 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
     } else {
         crate::environment::Environment::Host
     };
+    // What this node has fetched, and the guard that removes it when the node leaves. A `Drop`
+    // rather than a call at each exit: `run` has several honest ends (lease, disconnect, error),
+    // and one of them forgetting is the leak nobody notices until a disk fills.
+    let adopted: Arc<Adopted> = Arc::new(std::sync::Mutex::new(Default::default()));
+    let _materialised = Materialised {
+        root: resources_root(),
+        adopted: adopted.clone(),
+    };
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
         match serve_connection(
@@ -832,6 +866,7 @@ pub async fn run(config: EffectorConfig) -> Result<()> {
             &executors,
             &code_cache,
             &policy,
+            &adopted,
         )
         .await
         {

@@ -103,12 +103,6 @@ pub struct ToolCall {
     /// (ADR-0027): bytes left the control frame — code is content-
     /// addressed, every remote call rides a reference.
     pub code: CodeRef,
-    /// Durable data this call needs (ADR-0003 §7). Empty for a call that touches nothing, which
-    /// is the ordinary case — and an empty list is not a claim, so it costs a task nothing to
-    /// omit it. Nothing here is a credential: material is minted per transfer, after the node
-    /// asks for it by name.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resources: Vec<ResourceDecl>,
 }
 
 /// The operation's code by content address (ADR-0027 — replaces the old
@@ -130,19 +124,6 @@ pub struct CodeRef {
     pub sha256: String,
 }
 
-/// A task's declaration of durable data this call needs (ADR-0003 §7). It names the resource and
-/// the TRANSPORT, never a credential: the credential is minted by the control plane when the node
-/// asks for it (see `Frame::MaterialRequest`), which is the whole reason this contract exists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResourceDecl {
-    /// The resource's TYPE — part of its identity, not a transport detail: the same dataset as
-    /// `git` and as `snapshot` are two resources.
-    pub kind: String,
-    /// Its sequence number, unique within (owner, type). The owner is NOT here: it is whoever
-    /// submitted the turn, filled in by the plane. A task that could name an owner could borrow
-    /// another's data.
-    pub seq: u64,
-}
 
 /// The Effector's answer, message-sized by discipline.
 ///
