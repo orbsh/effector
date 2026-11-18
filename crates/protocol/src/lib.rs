@@ -384,13 +384,50 @@ pub mod resource {
 
     /// The mechanisms a node can actually move. A plane may serve ONLY these: a grant for a
     /// mechanism nobody implements is a promise the operator would discover at the first task, not
-    /// at the door they declared it. `archive` is the case that taught this: it is a word in the
+    /// at the door they declared it. `archive` was the case that taught this: it is a word in the
     /// protocol so a node can refuse it BY NAME, and being nameable is not being servable.
-    pub const KINDS: [&str; 2] = ["git", "object"];
+    pub const KINDS: [&str; 3] = ["git", "object", "archive"];
 
     /// Whether `kind` names a mechanism some node implements.
     pub fn is_kind(name: &str) -> bool {
         KINDS.contains(&name)
+    }
+
+    /// What an `archive` credential carries: a repository PASSWORD, and — when the repository sits
+    /// in a store rather than on a path — the signing triple that reaches it.
+    ///
+    /// Two shapes, and no guessing between them: `password` for a repository the node opens by
+    /// address, `access:secret:region:password` for one it signs into. A password is not optional
+    /// (an archive is encrypted at rest, that is what it is for), which is why it is the one field
+    /// every shape ends with.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ArchiveCredential<'a> {
+        pub s3: Option<(&'a str, &'a str, &'a str)>,
+        pub password: &'a str,
+    }
+
+    pub fn archive_credential(credential: &str) -> Result<ArchiveCredential<'_>> {
+        let parts: Vec<&str> = credential.split(':').collect();
+        match parts.as_slice() {
+            [password] if !password.is_empty() => Ok(ArchiveCredential {
+                s3: None,
+                password,
+            }),
+            [access, secret, region, password]
+                if !access.is_empty()
+                    && !secret.is_empty()
+                    && !region.is_empty()
+                    && !password.is_empty() =>
+            {
+                Ok(ArchiveCredential {
+                    s3: Some((access, secret, region)),
+                    password,
+                })
+            }
+            _ => bail!(
+                "an `archive` credential must be `password` or `access:secret:region:password`"
+            ),
+        }
     }
 
     /// The file name an object resource lands under, taken from its URL: `s3://bucket/builds/out.tar`
@@ -424,5 +461,42 @@ pub mod resource {
             }
             _ => bail!("a credential must be `access_key:secret_key[:region]`, got {credential:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::resource;
+
+    /// The archive credential has two shapes and no third: a repository password, or the signing
+    /// triple plus one. Everything else is refused HERE rather than becoming a puzzling rustic
+    /// failure at the first transfer.
+    #[test]
+    fn an_archive_credential_is_a_password_or_a_store_and_a_password() {
+        let plain = resource::archive_credential("correct horse").expect("a password");
+        assert_eq!(plain.password, "correct horse");
+        assert!(plain.s3.is_none());
+
+        let stored = resource::archive_credential("ak:sk:us-east-1:hunter2").expect("a store");
+        assert_eq!(stored.s3, Some(("ak", "sk", "us-east-1")));
+        assert_eq!(stored.password, "hunter2");
+
+        for bad in ["", "ak:sk", "ak:sk:region", "ak::region:pw", "ak:sk::pw"] {
+            assert!(
+                resource::archive_credential(bad).is_err(),
+                "`{bad}` must be refused"
+            );
+        }
+    }
+
+    /// The kinds a plane may serve are the kinds a node can move: one list, read by both ends.
+    #[test]
+    fn the_servable_kinds_are_the_protocols_list() {
+        assert!(resource::is_kind("git"));
+        assert!(resource::is_kind("object"));
+        assert!(resource::is_kind("archive"));
+        assert!(!resource::is_kind("ftp"));
     }
 }

@@ -13,9 +13,10 @@
 //! SCRIPT, not into a table: the store already keeps the history, and a pointer kept here would be
 //! a second copy of the truth that can disagree with the first one.
 //!
-//! Two mechanisms exist here: `git` and `object`. `archive` (an incremental repository) is refused
-//! BY NAME until its code and tests exist — a mechanism is something that actually moves the data,
-//! and half-moved data is worse than a refusal.
+//! Three mechanisms exist here: `git`, `object`, and `archive` — an incremental, content-addressed
+//! repository (rustic at the time of writing; the protocol names the MECHANISM, never the tool). A
+//! mechanism is something that actually moves the data, and each one either moves it or is refused
+//! by name: half-moved data is worse than a refusal.
 //!
 //! Credentials: the material comes from the control plane per transfer and lives for that
 //! transfer. It is handed to the `git` child as an environment variable (the child is ours, it
@@ -36,6 +37,10 @@ pub enum Transport {
     /// One blob: fetched from its address by `ensure`, uploaded back by `sync`. The protocol is the
     /// S3-shaped one (a signed HTTP request), which is what object stores speak.
     Object,
+    /// A whole TREE, stored incrementally: content-addressed blobs plus snapshots that name them, so
+    /// the second backup of a directory costs the bytes that changed. `ensure` restores a snapshot,
+    /// `sync` takes one, and the reference is the snapshot id.
+    Archive,
 }
 
 /// Whether the task may write this kind. Publishing an `ro` grant is an ERROR, not a no-op
@@ -80,6 +85,7 @@ impl Spec {
         let transport = match kind {
             "git" => Transport::Git,
             "object" => Transport::Object,
+            "archive" => Transport::Archive,
             // Unreachable after the check above; stated rather than wildcarded so a new name in
             // `resource::KINDS` cannot be added without a mechanism to move it.
             _ => bail!("this node cannot move `{kind}` resources"),
@@ -242,6 +248,7 @@ pub fn ensure(
     let outcome = match spec.transport {
         Transport::Git => ensure_git(spec, material, remote, &path, cancel),
         Transport::Object => ensure_object(spec, material, remote, &path, cancel),
+        Transport::Archive => ensure_archive(spec, material, remote, &path, cancel),
     };
     if let Err(e) = outcome {
         // A cancelled transfer is not a FAILED one, it is an UNFINISHED one — and what it leaves is a
@@ -278,6 +285,7 @@ pub fn sync(
         // deleting them because the caller gave up would destroy the only copy of what it made.
         Transport::Git => sync_git(spec, material, remote, &path, cancel),
         Transport::Object => sync_object(spec, material, remote, &path, cancel),
+        Transport::Archive => sync_archive(spec, material, remote, &path, cancel),
     }
 }
 
@@ -361,6 +369,200 @@ fn sync_object(
     // An object store that answers without an ETag has not told us what it stored; the address is
     // still a true statement about where it went, and saying so beats inventing an identifier.
     Ok(if etag.is_empty() { url } else { etag })
+}
+
+/// A directory that already holds something. The three arms share one rule: a second `ensure` does
+/// not overwrite what the task put there — the bytes on disk are its own work, not a cache.
+fn holds_content(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
+/// The `rustic` binary, or the one the environment names.
+///
+/// The node carries no archive implementation and should not: content-addressed storage is a
+/// versioned format with its own on-disk contract, and a second implementation of it would be a
+/// second way for the plane and the node to disagree about what a snapshot is. `EFFECTOR_RUSTIC`
+/// exists so a host with the binary somewhere unusual can say where.
+fn rustic_bin() -> String {
+    std::env::var("EFFECTOR_RUSTIC")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "rustic".to_string())
+}
+
+/// Build one `rustic` invocation whose credential rides the CHILD's environment — the same rule the
+/// git arm follows, for the same two reasons: argv is visible to `ps`, and the node's own
+/// environment is inherited by the guest.
+fn rustic_command(spec: &Spec, material: &Material, remote: &str) -> Result<Command> {
+    let mut command = Command::new(rustic_bin());
+    // WHERE IT RUNS MATTERS. `rustic` reads `./rustic.toml` from its working directory, and that
+    // file can carry hooks — commands. A workspace belongs to the task, so the node must never be
+    // the one standing in it when a tool that executes configuration starts: cwd is the root, and
+    // every path it is given is absolute.
+    command.current_dir("/");
+    // And the same for the host's own configuration: a node's transfers must not depend on
+    // `~/.config/rustic/rustic.toml` (or inherit whatever it happens to say).
+    command.env("XDG_CONFIG_HOME", "/nonexistent");
+    // A repository is a file format, not a terminal experience: no progress bars, no prompts.
+    command.env("RUSTIC_NO_HUMAN", "1");
+    let credential = material.credential.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "`{}`: an archive credential is a repository password, and none was granted",
+            spec.label(remote)
+        )
+    })?;
+    let parsed = effector_protocol::resource::archive_credential(credential)
+        .map_err(|e| anyhow::anyhow!("`{}`: {e}", spec.label(remote)))?;
+    command.env("RUSTIC_PASSWORD", parsed.password);
+    if let Some((access, secret, region)) = parsed.s3 {
+        command
+            .env("AWS_ACCESS_KEY_ID", access)
+            .env("AWS_SECRET_ACCESS_KEY", secret)
+            .env("AWS_DEFAULT_REGION", region);
+    }
+    Ok(command)
+}
+
+fn run_rustic(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    args: &[&str],
+    cancel: Option<&dyn Interrupt>,
+) -> Result<String> {
+    let mut command = rustic_command(spec, material, remote)?;
+    command.args(args);
+    let what = format!("rustic {} (`{}`)", args.join(" "), spec.label(remote));
+    let output = run_child(&mut command, cancel, &what)?;
+    if !output.status.success() {
+        bail!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    // rustic reports through STDERR — its `[INFO] snapshot … saved` lines — so the answer is both
+    // streams. Reading only stdout is how a successful backup looked like it said nothing.
+    let mut said = String::from_utf8_lossy(&output.stdout).into_owned();
+    said.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(said)
+}
+
+/// The id `rustic backup` names in its own output (`snapshot <id> successfully saved.`). Reading it
+/// from the message rather than from a second `snapshots` call keeps the reference the one the store
+/// actually minted, on the same invocation that minted it.
+fn snapshot_id(output: &str) -> Option<String> {
+    let after = output.split("snapshot ").nth(1)?;
+    let id: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    (id.len() >= 8).then_some(id)
+}
+
+/// Restore a snapshot into the workspace. Idempotent like the other arms: a directory that already
+/// holds the task's bytes is not restored over.
+fn ensure_archive(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    path: &Path,
+    cancel: Option<&dyn Interrupt>,
+) -> Result<()> {
+    if holds_content(path) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("`{}`: {}", spec.label(remote), path.display()))?;
+    let url = address(material, remote);
+    // `latest` is what "the current state of this resource" means for an archive: a task that did
+    // not pin a snapshot wants the newest one, not the first.
+    let reference = spec.at.as_deref().unwrap_or("latest");
+    let into = path.to_string_lossy().into_owned();
+    match run_rustic(
+        spec,
+        material,
+        remote,
+        &["restore", "--repository", &url, reference, &into],
+        cancel,
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // A repository nobody has written yet is an empty workspace for a WRITABLE name — the
+            // task's job may be to produce the first snapshot. For a readable one it is a real
+            // error: it asked to read something the plane never stored.
+            if spec.mode == Mode::ReadWrite && repository_absent(&e) {
+                // The directory stays: it is the empty workspace the task is meant to fill.
+                return Ok(());
+            }
+            Err(e)
+        }
+    }
+}
+
+/// "There is no repository here" — the one failure an archive read may treat as "nothing yet".
+/// The words are rustic's own; matching them is the alternative to a second, weaker probe (a
+/// `snapshots` call that would itself need a repository to answer).
+fn repository_absent(e: &anyhow::Error) -> bool {
+    let text = e.to_string().to_ascii_lowercase();
+    text.contains("does not exist")
+        || text.contains("not found")
+        || text.contains("no repository")
+        || text.contains("unable to open")
+}
+
+/// Take a snapshot of the workspace. The reference is the snapshot's id — the store's own handle on
+/// exactly what it now has, which is what a script gets back.
+fn sync_archive(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    path: &Path,
+    cancel: Option<&dyn Interrupt>,
+) -> Result<String> {
+    if !path.exists() {
+        bail!(
+            "`{}` was never ensured, so there is nothing to publish",
+            spec.label(remote)
+        );
+    }
+    let url = address(material, remote);
+    // A repository nobody initialised answers "does not exist" to everything, so `init` runs first
+    // and its "already exists" is the ordinary case rather than a failure.
+    let _ = run_rustic(
+        spec,
+        material,
+        remote,
+        &["init", "--repository", &url],
+        cancel,
+    );
+    let into = path.to_string_lossy().into_owned();
+    // `--as-path /` makes the WORKSPACE the backup's root, so a later restore puts the files back
+    // where the script had them instead of under this node's absolute paths.
+    let out = run_rustic(
+        spec,
+        material,
+        remote,
+        &[
+            "backup",
+            &into,
+            "--repository",
+            &url,
+            "--as-path",
+            "/",
+            "--tag",
+            "effector",
+        ],
+        cancel,
+    )?;
+    snapshot_id(&out).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`{}`: rustic did not name the snapshot it saved: {}",
+            spec.label(remote),
+            out.trim()
+        )
+    })
 }
 
 /// One signed HTTP request, with the credential the PLANE handed over for this transfer. The secret
@@ -702,6 +904,72 @@ mod tests {
         }
     }
 
+    fn archive_spec(mode: Mode) -> Spec {
+        Spec {
+            kind: "archive".into(),
+            transport: Transport::Archive,
+            at: None,
+            mode,
+        }
+    }
+
+    /// The shape an `archive` grant holds: a repository password, in the credential.
+    fn archive_material(base: &Path) -> Material {
+        Material {
+            base: base.to_string_lossy().into_owned(),
+            credential: Some("a-repository-password".into()),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_id_is_read_from_what_rustic_says() {
+        let line = "[INFO] snapshot 3f2a9c81d4e5 successfully saved.\n";
+        assert_eq!(snapshot_id(line).as_deref(), Some("3f2a9c81d4e5"));
+        assert!(snapshot_id("[INFO] backup done.").is_none(), "nothing minted, nothing to read");
+        assert!(snapshot_id("snapshot abc").is_none(), "too short to be an id");
+    }
+
+    /// The point of the kind: a tree goes up as a snapshot and comes back as a tree, and the second
+    /// publish is a SECOND snapshot rather than a rewrite.
+    ///
+    /// Skipped — loudly — when no `rustic` is reachable: the format is rustic's, so a test against a
+    /// stub would only be testing the stub.
+    #[test]
+    fn an_archive_round_trips_through_snapshots() {
+        if Command::new(rustic_bin()).arg("--version").output().is_err() {
+            eprintln!(
+                "skipping an_archive_round_trips: no `{}` on this machine (set EFFECTOR_RUSTIC)",
+                rustic_bin()
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("store");
+        std::fs::create_dir_all(&base).unwrap();
+        let root = dir.path().join("work");
+        let spec = archive_spec(Mode::ReadWrite);
+        let m = archive_material(&base);
+
+        // First ensure on an empty plane: a writable name is an empty workspace, not a failure.
+        let path = ensure(&spec, &m, "notes", None, &root, None).expect("an empty workspace");
+        std::fs::write(path.join("a.txt"), "first").unwrap();
+        let first = sync(&spec, &m, "notes", None, &root, None).expect("the first snapshot");
+
+        std::fs::write(path.join("a.txt"), "second").unwrap();
+        let second = sync(&spec, &m, "notes", None, &root, None).expect("the second snapshot");
+        assert_ne!(first, second, "each publish mints its own snapshot");
+
+        // A fresh root restores the NEWEST snapshot: `latest` is what an unpinned read means here.
+        let fresh = dir.path().join("fresh");
+        let restored = ensure(&spec, &m, "notes", None, &fresh, None).expect("restored");
+        assert_eq!(std::fs::read_to_string(restored.join("a.txt")).unwrap(), "second");
+
+        // And a second ensure leaves the task's own bytes alone — a workspace, not a cache.
+        std::fs::write(restored.join("a.txt"), "mine").unwrap();
+        let again = ensure(&spec, &m, "notes", None, &fresh, None).expect("second ensure");
+        assert_eq!(std::fs::read_to_string(again.join("a.txt")).unwrap(), "mine");
+    }
+
     /// A one-request HTTP server: it answers exactly what an object store answers for the verb it
     /// receives — the body for a GET, an ETag for a PUT — and records that it was asked. Enough to
     /// exercise the node's whole half of an object transfer without a store.
@@ -844,10 +1112,15 @@ mod tests {
 
     #[test]
     fn a_mechanism_this_node_cannot_move_is_refused_by_name() {
-        // The venue serves three; this node moves two. The refusal names the kind it was asked for,
-        // so the operator learns which one is missing rather than "a transfer failed".
-        let err = Spec::from_plane("archive", "rw", None).unwrap_err();
-        assert!(err.to_string().contains("archive"), "{err}");
+        // The venue serves what this node moves, and the list is the protocol's — so the only kinds
+        // that reach this test are the ones nobody implemented. The refusal names the kind it was
+        // asked for, so the operator learns which one is missing rather than "a transfer failed".
+        let err = Spec::from_plane("ftp", "rw", None).unwrap_err();
+        assert!(err.to_string().contains("ftp"), "{err}");
+        assert!(
+            Spec::from_plane("archive", "rw", None).is_ok(),
+            "archive is a mechanism this node moves now"
+        );
     }
 
     #[test]
