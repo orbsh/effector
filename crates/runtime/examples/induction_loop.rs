@@ -226,6 +226,14 @@ fn dispatch(
         ("call" | "iterate_start", "ctx_round_trip") => {
             host(serde_json::json!({"host": {"type": "invoke", "args": args}}))
         }
+        // `ctx.resource` over the seam (ADR-0048/0049): ONE typed host frame, the instruction
+        // forwarded verbatim (the schema-blind rule — the child never parses it), and the answer
+        // handed back: a path for `get`, the store's reference for `publish`. The credential a
+        // transfer needs never crosses this boundary, so there is nothing here to strip.
+        ("call" | "iterate_start", "resource_round_trip") => {
+            let op = args.get("op").cloned().unwrap_or(Value::Null);
+            host(serde_json::json!({"host": {"type": "resource", "op": op}}))
+        }
         // The retired shape on purpose (ADR-0037 §2 lock): an UNTYPED
         // frame (free `op` name, no discriminator) must fail at the
         // parent's typed decode — the bridge's fn never runs, and the
