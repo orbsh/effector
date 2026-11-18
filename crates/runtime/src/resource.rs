@@ -131,6 +131,81 @@ fn address(material: &Material, remote: &str) -> String {
     format!("{}/{}", material.base.trim_end_matches('/'), remote)
 }
 
+/// "Was this call cancelled?" — the one question a transfer asks while it runs.
+///
+/// A transfer is the only thing a node does that can take minutes, so it is the only thing where
+/// "the caller gave up" has to reach the WORK and not just the bookkeeping. The token is the call's
+/// own (`CallControl`), never a node-wide flag: a flag that outlived a call would stop the next one.
+pub trait Interrupt {
+    fn cancelled(&self) -> bool;
+}
+
+impl Interrupt for crate::carrier::CallControl {
+    fn cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+}
+
+fn cancelled(cancel: Option<&dyn Interrupt>) -> bool {
+    cancel.is_some_and(|c| c.cancelled())
+}
+
+/// Run one child to completion — or kill it the moment the call is cancelled.
+///
+/// `Command::output()` cannot be interrupted: it blocks until the child is gone, so a 2 GB clone
+/// ignores every cancellation until it finishes. Spawning plus a poll loop is the only way the
+/// answer reaches the transfer, and the pipes are drained on their own threads because a child that
+/// fills a pipe while we are polling would deadlock instead of exiting.
+fn run_child(
+    command: &mut Command,
+    cancel: Option<&dyn Interrupt>,
+    what: &str,
+) -> Result<std::process::Output> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    if cancelled(cancel) {
+        bail!("`{what}` was cancelled before it started");
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().with_context(|| format!("starting {what}"))?;
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        pipe.map(|mut p| {
+            std::thread::spawn(move || {
+                let mut out = Vec::new();
+                let _ = p.read_to_end(&mut out);
+                out
+            })
+        })
+    };
+    let out_thread = drain(child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
+    let err_thread = drain(child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
+    let status = loop {
+        if cancelled(cancel) {
+            // Kill and REPAP: a zombie that nobody waits on is a leaked pid, and the caller is about
+            // to be told the transfer did not finish, so there is nothing to read back.
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("`{what}` was cancelled");
+        }
+        match child.try_wait().with_context(|| format!("waiting on {what}"))? {
+            Some(status) => break status,
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+    let join = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        h.and_then(|h| h.join().ok()).unwrap_or_default()
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: join(out_thread),
+        stderr: join(err_thread),
+    })
+}
+
 /// Make the data present at its location. Idempotent: a repository already checked out is not
 /// re-cloned (that would throw away whatever the task has done inside it), and an object already
 /// fetched is not overwritten.
@@ -140,11 +215,22 @@ pub fn ensure(
     remote: &str,
     mount: Option<&Path>,
     root: &Path,
+    cancel: Option<&dyn Interrupt>,
 ) -> Result<PathBuf> {
     let path = location(root, mount, remote)?;
-    match spec.transport {
-        Transport::Git => ensure_git(spec, material, remote, &path)?,
-        Transport::Object => ensure_object(spec, material, remote, &path)?,
+    let outcome = match spec.transport {
+        Transport::Git => ensure_git(spec, material, remote, &path, cancel),
+        Transport::Object => ensure_object(spec, material, remote, &path, cancel),
+    };
+    if let Err(e) = outcome {
+        // A cancelled transfer is not a FAILED one, it is an UNFINISHED one — and what it leaves is a
+        // lie that the next caller cannot tell from the truth: half a clone has a `.git`, half a
+        // download has the right name. Removing it is the only state the next `ensure` can trust.
+        if cancelled(cancel) {
+            let _ = std::fs::remove_dir_all(&path);
+            let _ = std::fs::remove_file(&path);
+        }
+        return Err(e);
     }
     Ok(path)
 }
@@ -157,6 +243,7 @@ pub fn sync(
     remote: &str,
     mount: Option<&Path>,
     root: &Path,
+    cancel: Option<&dyn Interrupt>,
 ) -> Result<String> {
     if spec.mode == Mode::ReadOnly {
         bail!(
@@ -166,14 +253,22 @@ pub fn sync(
     }
     let path = location(root, mount, remote)?;
     match spec.transport {
-        Transport::Git => sync_git(spec, material, remote, &path),
-        Transport::Object => sync_object(spec, material, remote, &path),
+        // A cancelled publish does NOT clean up: the bytes on disk are the task's own work, and
+        // deleting them because the caller gave up would destroy the only copy of what it made.
+        Transport::Git => sync_git(spec, material, remote, &path, cancel),
+        Transport::Object => sync_object(spec, material, remote, &path, cancel),
     }
 }
 
 /// Fetch the blob to its location. Idempotent like the git arm: present means present — the task's
 /// own bytes are its own, and a second `ensure` must not overwrite them.
-fn ensure_object(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<()> {
+fn ensure_object(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    path: &Path,
+    cancel: Option<&dyn Interrupt>,
+) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
@@ -188,6 +283,7 @@ fn ensure_object(spec: &Spec, material: &Material, remote: &str, path: &Path) ->
         material,
         remote,
         &["-sSL", "--output", &into, "--write-out", "%{http_code}", &url],
+        cancel,
     )?;
     let code = code.trim();
     if code == "200" {
@@ -207,7 +303,13 @@ fn ensure_object(spec: &Spec, material: &Material, remote: &str, path: &Path) ->
 }
 
 /// Upload the blob and return what the store says about it (its ETag).
-fn sync_object(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<String> {
+fn sync_object(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    path: &Path,
+    cancel: Option<&dyn Interrupt>,
+) -> Result<String> {
     if !path.exists() {
         bail!(
             "`{}` was never ensured, so there is nothing to publish",
@@ -232,6 +334,7 @@ fn sync_object(spec: &Spec, material: &Material, remote: &str, path: &Path) -> R
             "%header{etag}",
             &url,
         ],
+        cancel,
     )?;
     let etag = etag.trim().trim_matches('"').to_string();
     // An object store that answers without an ETag has not told us what it stored; the address is
@@ -244,7 +347,13 @@ fn sync_object(spec: &Spec, material: &Material, remote: &str, path: &Path) -> R
 ///
 /// This is also why `sync`/`ensure` do not need an SDK: S3's wire protocol is a signed HTTP
 /// request, and curl speaks SigV4. A node that cannot perform it (no curl) fails here by name.
-fn curl(spec: &Spec, material: &Material, remote: &str, args: &[&str]) -> Result<String> {
+fn curl(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    args: &[&str],
+    cancel: Option<&dyn Interrupt>,
+) -> Result<String> {
     let mut command = Command::new("curl");
     // Both arms are idempotent (a GET writes the same bytes; a PUT stores the same object), and a
     // store that answers 503 once while it settles is not a task failure. The retry is bounded so a
@@ -266,9 +375,8 @@ fn curl(spec: &Spec, material: &Material, remote: &str, args: &[&str]) -> Result
             .arg("--aws-sigv4")
             .arg(format!("aws:amz:{region}:s3"));
     }
-    let output = command
-        .output()
-        .with_context(|| format!("curl (`{}`)", spec.label(remote)))?;
+    let label = format!("curl (`{}`)", spec.label(remote));
+    let output = run_child(&mut command, cancel, &label)?;
     if !output.status.success() {
         bail!(
             "curl failed for `{}`: {}",
@@ -279,11 +387,17 @@ fn curl(spec: &Spec, material: &Material, remote: &str, args: &[&str]) -> Result
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn ensure_git(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<()> {
+fn ensure_git(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    path: &Path,
+    cancel: Option<&dyn Interrupt>,
+) -> Result<()> {
     let url = address(material, remote);
     if path.join(".git").exists() {
         // Present: fetch, then put it on the ref the task asked for.
-        run_git(spec, material, remote, path, &["fetch", "--prune", "origin"])?;
+        run_git(spec, material, remote, path, &["fetch", "--prune", "origin"], cancel)?;
     } else {
         let mut argv = vec!["clone", "--quiet"];
         if let Some(reference) = &spec.at {
@@ -302,24 +416,37 @@ fn ensure_git(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Re
         let parent = path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)
             .with_context(|| format!("`{}`: {}", spec.label(remote), parent.display()))?;
-        run_git(spec, material, remote, parent, &argv)?;
+        run_git(spec, material, remote, parent, &argv, cancel)?;
     }
     if let Some(reference) = &spec.at {
         // `checkout` after a fetch (the clone case already sits on it): a ref that moved must be
         // what the task sees, and `--force` is wrong here — a task's local edits are its own.
-        let _ = run_git(spec, material, remote, path, &["checkout", "--quiet", reference]);
+        let _ = run_git(
+            spec,
+            material,
+            remote,
+            path,
+            &["checkout", "--quiet", reference],
+            cancel,
+        );
     }
     Ok(())
 }
 
-fn sync_git(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Result<String> {
+fn sync_git(
+    spec: &Spec,
+    material: &Material,
+    remote: &str,
+    path: &Path,
+    cancel: Option<&dyn Interrupt>,
+) -> Result<String> {
     if !path.join(".git").exists() {
         bail!(
             "`{}` was never ensured, so there is nothing to publish",
             spec.label(remote)
         );
     }
-    run_git(spec, material, remote, path, &["add", "-A"])?;
+    run_git(spec, material, remote, path, &["add", "-A"], cancel)?;
     // `commit` with nothing staged is the ordinary case (a task that changed nothing), so its
     // failure is not an error — the push below still reports the reference that now exists.
     let _ = run_git(
@@ -328,8 +455,16 @@ fn sync_git(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Resu
         remote,
         path,
         &["commit", "--quiet", "-m", "effector: sync"],
+        cancel,
     );
-    let branch = git_stdout(spec, material, remote, path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = git_stdout(
+        spec,
+        material,
+        remote,
+        path,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        cancel,
+    )?;
     let branch = branch.trim().to_string();
     run_git(
         spec,
@@ -337,8 +472,9 @@ fn sync_git(spec: &Spec, material: &Material, remote: &str, path: &Path) -> Resu
         remote,
         path,
         &["push", "--quiet", "origin", &format!("HEAD:{branch}")],
+        cancel,
     )?;
-    let sha = git_stdout(spec, material, remote, path, &["rev-parse", "HEAD"])?;
+    let sha = git_stdout(spec, material, remote, path, &["rev-parse", "HEAD"], cancel)?;
     Ok(format!("{branch}@{}", sha.trim()))
 }
 
@@ -348,12 +484,12 @@ fn git_stdout(
     remote: &str,
     cwd: &Path,
     args: &[&str],
+    cancel: Option<&dyn Interrupt>,
 ) -> Result<String> {
     let mut command = git_command(material, cwd);
-    let output = command
-        .args(args)
-        .output()
-        .with_context(|| format!("git {} (`{}`)", args.join(" "), spec.label(remote)))?;
+    command.args(args);
+    let what = format!("git {} (`{}`)", args.join(" "), spec.label(remote));
+    let output = run_child(&mut command, cancel, &what)?;
     if !output.status.success() {
         bail!(
             "git {} failed for `{}`: {}",
@@ -371,12 +507,12 @@ fn run_git(
     remote: &str,
     cwd: &Path,
     args: &[&str],
+    cancel: Option<&dyn Interrupt>,
 ) -> Result<()> {
     let mut command = git_command(material, cwd);
-    let output = command
-        .args(args)
-        .output()
-        .with_context(|| format!("git {} (`{}`)", args.join(" "), spec.label(remote)))?;
+    command.args(args);
+    let what = format!("git {} (`{}`)", args.join(" "), spec.label(remote));
+    let output = run_child(&mut command, cancel, &what)?;
     if !output.status.success() {
         bail!(
             "git {} failed for `{}`: {}",
@@ -457,6 +593,59 @@ mod tests {
             at: Some("main".into()),
             mode,
         }
+    }
+
+    /// A call's cancellation as the resource layer sees it: one flag, set from another thread —
+    /// exactly what `CallControl::interrupt` does to a live transfer.
+    struct Stub(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Interrupt for Stub {
+        fn cancelled(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// `output()` would wait for the child no matter what; this is the test that says a cancelled
+    /// call ends the TRANSFER, not just the waiting.
+    #[test]
+    fn a_child_is_killed_when_the_call_is_cancelled() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stub = Stub(flag.clone());
+        let tick = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let err = run_child(&mut command, Some(&stub), "sleep")
+            .unwrap_err()
+            .to_string();
+        tick.join().unwrap();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the kill lands when the call is cancelled, not when the child would have finished"
+        );
+    }
+
+    /// A half clone reads like a clone: `.git` exists and the next `ensure` would believe it. The
+    /// cancelled path therefore removes what it made.
+    #[test]
+    fn a_cancelled_ensure_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bare, _) = bare_repo(dir.path());
+        let root = dir.path().join("resources");
+        let m = material(&bare);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let err = ensure(&spec(Mode::ReadOnly), &m, "bare.git", None, &root, Some(&Stub(flag)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(
+            !root.join("bare.git").exists(),
+            "an unfinished transfer must not leave a directory the next call trusts"
+        );
     }
 
     fn material(base: &Path) -> Material {
@@ -543,7 +732,7 @@ mod tests {
             credential: None,
         };
 
-        let path = ensure(&s, &m, "out.tar", None, &root).unwrap();
+        let path = ensure(&s, &m, "out.tar", None, &root, None).unwrap();
         assert_eq!(path, root.join("out.tar"));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -553,7 +742,7 @@ mod tests {
 
         // A second ensure is a no-op: the task may have changed the file, and its edit is its own.
         std::fs::write(&path, "edited").unwrap();
-        ensure(&s, &m, "out.tar", None, &root).unwrap();
+        ensure(&s, &m, "out.tar", None, &root, None).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited");
     }
 
@@ -566,10 +755,10 @@ mod tests {
             base: fake_store("hello", "etag-42"),
             credential: None,
         };
-        let path = ensure(&s, &m, "out.tar", None, &root).unwrap();
+        let path = ensure(&s, &m, "out.tar", None, &root, None).unwrap();
         std::fs::write(&path, "new bytes").unwrap();
 
-        let reference = sync(&s, &m, "out.tar", None, &root).unwrap();
+        let reference = sync(&s, &m, "out.tar", None, &root, None).unwrap();
         assert_eq!(
             reference, "etag-42",
             "the reference is the store's own word for what it now holds"
@@ -587,13 +776,20 @@ mod tests {
         };
         // A task's job may be to produce the first object; an empty workspace says so, and nothing
         // half-written is left behind for the task to trip over.
-        let path = ensure(&rw, &m, "out.tar", None, &root).expect("nothing there yet is fine");
+        let path = ensure(&rw, &m, "out.tar", None, &root, None).expect("nothing there yet is fine");
         assert!(!path.exists(), "no stub file is invented");
 
         // The same answer on a READABLE name is the truth the task asked for: it is not there.
         let ro = object_spec(Mode::ReadOnly);
         let dir2 = tempfile::tempdir().unwrap();
-        let err = ensure(&ro, &m, "out.tar", None, &dir2.path().join("resources"))
+        let err = ensure(
+            &ro,
+            &m,
+            "out.tar",
+            None,
+            &dir2.path().join("resources"),
+            None,
+        )
             .unwrap_err()
             .to_string();
         assert!(err.contains("404"), "the store's own word is passed on: {err}");
@@ -616,14 +812,14 @@ mod tests {
         // The grant is the DIRECTORY the repositories live in; the script names which one.
         let m = material(dir.path());
 
-        let path = ensure(&s, &m, "bare.git", None, &root).unwrap();
+        let path = ensure(&s, &m, "bare.git", None, &root, None).unwrap();
         assert_eq!(path, root.join("bare.git"));
         assert_eq!(
             std::fs::read_to_string(path.join("README.md")).unwrap(),
             "first\n"
         );
         assert_eq!(
-            git_stdout(&s, &m, "bare.git", &path, &["rev-parse", "HEAD"])
+            git_stdout(&s, &m, "bare.git", &path, &["rev-parse", "HEAD"], None)
                 .unwrap()
                 .trim(),
             sha
@@ -631,7 +827,7 @@ mod tests {
 
         // A file the task made must survive the second ensure: presence is a no-op by design.
         std::fs::write(path.join("scratch.txt"), "mine\n").unwrap();
-        ensure(&s, &m, "bare.git", None, &root).unwrap();
+        ensure(&s, &m, "bare.git", None, &root, None).unwrap();
         assert!(path.join("scratch.txt").exists());
     }
 
@@ -643,9 +839,9 @@ mod tests {
         let s = spec(Mode::ReadWrite);
         let m = material(dir.path());
 
-        let path = ensure(&s, &m, "bare.git", None, &root).unwrap();
+        let path = ensure(&s, &m, "bare.git", None, &root, None).unwrap();
         std::fs::write(path.join("README.md"), "second\n").unwrap();
-        let reference = sync(&s, &m, "bare.git", None, &root).unwrap();
+        let reference = sync(&s, &m, "bare.git", None, &root, None).unwrap();
 
         let (branch, sha) = reference.split_once('@').expect("branch@sha");
         assert_eq!(branch, "main");
@@ -671,6 +867,7 @@ mod tests {
             "bare.git",
             None,
             &root,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("read-only"), "{err}");
@@ -695,7 +892,7 @@ mod tests {
             base: fake_store("weights", "etag-9"),
             credential: None,
         };
-        let path = ensure(&s, &m, "anything", Some(&mount), &root).unwrap();
+        let path = ensure(&s, &m, "anything", Some(&mount), &root, None).unwrap();
         assert_eq!(path, mount);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "weights");
         assert!(

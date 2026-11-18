@@ -57,11 +57,11 @@ fn an_object_goes_up_and_comes_back() {
     // publish. The reference is the store's own word for what it now holds.
     // Nothing is there yet, and this is a WRITABLE resource: the empty workspace is the correct
     // answer, and producing the first object is this half's job.
-    let path = resource::ensure(&spec, &material, &remote, None, root)
+    let path = resource::ensure(&spec, &material, &remote, None, root, None)
         .expect("an empty workspace, not a failure");
     std::fs::write(&path, b"effector was here").unwrap();
     let reference =
-        resource::sync(&spec, &material, &remote, None, root).expect("the object is published");
+        resource::sync(&spec, &material, &remote, None, root, None).expect("the object is published");
     assert!(!reference.is_empty(), "a publish answers with what it stored");
     eprintln!("published {url} -> {reference}");
 
@@ -72,7 +72,7 @@ fn an_object_goes_up_and_comes_back() {
         ..spec
     };
     let read_path =
-        resource::ensure(&read_spec, &material, &remote, None, other.path()).expect("fetched");
+        resource::ensure(&read_spec, &material, &remote, None, other.path(), None).expect("fetched");
     assert_eq!(
         std::fs::read(read_path).unwrap(),
         b"effector was here",
@@ -85,7 +85,7 @@ fn an_object_goes_up_and_comes_back() {
         credential: Some("not-a-pair".into()),
     };
     let third = tempfile::tempdir().unwrap();
-    let err = resource::ensure(&read_spec, &bad, &remote, None, third.path())
+    let err = resource::ensure(&read_spec, &bad, &remote, None, third.path(), None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("access_key:secret_key"), "{err}");

@@ -401,6 +401,7 @@ async fn execute_call_inner(
         pending_host,
         pending_material,
         adopted,
+        control,
     );
     // Residency: the caller's executor identity keys the resident runtime —
     // calls sharing a `executor` share VM/module state, different ones never
@@ -483,6 +484,7 @@ fn build_host_bridge(
     pending_host: &Arc<PendingHost>,
     pending_material: &Arc<PendingMaterial>,
     adopted: &Arc<Adopted>,
+    control: &CallControl,
 ) -> HostBridge {
     let tx = tx.clone();
     let pending = pending_host.clone();
@@ -632,6 +634,7 @@ fn build_host_bridge(
         let pending = pending_material.clone();
         let call_id = call_id.clone();
         let adopted = adopted.clone();
+        let control = control.clone();
         let f: crate::carrier::HostFn = Arc::new(move |arg: serde_json::Value| {
             let m = match &arg {
                 serde_json::Value::String(s) => {
@@ -654,6 +657,11 @@ fn build_host_bridge(
                 ),
             };
             let mount = text("mount").map(std::path::PathBuf::from);
+            // A call that was cancelled before it asked must not ask: the plane has already stopped
+            // accounting for this call, and a transfer nobody is waiting for is pure cost.
+            if control.is_cancelled() {
+                anyhow::bail!("`{kind}:{remote}` was cancelled before the transfer started");
+            }
             let reach = ask_material_blocking(&tx, &pending, &call_id, &kind, write)?;
             let spec = crate::resource::Spec::from_plane(&kind, &reach.mode, text("ref").as_deref())?;
             let material = crate::resource::Material {
@@ -661,7 +669,15 @@ fn build_host_bridge(
                 credential: reach.credential,
             };
             let root = resources_root();
-            let path = crate::resource::ensure(&spec, &material, &remote, mount.as_deref(), &root)?;
+            let token: &dyn crate::resource::Interrupt = &control;
+            let path = crate::resource::ensure(
+                &spec,
+                &material,
+                &remote,
+                mount.as_deref(),
+                &root,
+                Some(token),
+            )?;
             adopted
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -669,8 +685,14 @@ fn build_host_bridge(
             if !write {
                 return Ok(serde_json::json!(path.to_string_lossy()));
             }
-            let reference =
-                crate::resource::sync(&spec, &material, &remote, mount.as_deref(), &root)?;
+            let reference = crate::resource::sync(
+                &spec,
+                &material,
+                &remote,
+                mount.as_deref(),
+                &root,
+                Some(token),
+            )?;
             Ok(serde_json::json!(reference))
         });
         bridge.functions.insert("resource".to_string(), f);
