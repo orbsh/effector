@@ -137,7 +137,12 @@ impl Class {
     }
 }
 
+/// Unknown fields are REFUSED, not ignored: after the jail's fields were deleted (2026-11-17), a
+/// config that still carries `fs_scope` or `sandbox` would otherwise be read as "this node has a
+/// boundary", when the honest answer is that the file no longer offers one. Silence about a
+/// misspelling is the same lie as a field with no enforcement point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectorConfig {
     /// Control plane endpoint for the outbound registration connection
     /// WS only — no degraded fallback (long-polling explicitly rejected).
@@ -258,6 +263,22 @@ mod tests {
             Err(err) => assert!(err.contains("not inside a container"), "{err}"),
             Ok(()) => { /* this test ran inside a container: the claim is checkable, so it held */ }
         }
+    }
+
+    #[test]
+    fn a_config_that_still_names_the_jails_fields_is_refused_rather_than_ignored() {
+        // The retirement left the fields in operators' files. Ignoring them would tell an operator
+        // their node has a filesystem scope when the file no longer offers one.
+        let text = r#"{
+            "control_plane_url": "ws://127.0.0.1:8787",
+            "token": "t",
+            "sandbox": true,
+            "capabilities": {"node_alias": "n", "carriers": ["steel"]}
+        }"#;
+        let err = serde_json::from_str::<EffectorConfig>(text)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sandbox"), "{err}");
     }
 
     #[test]

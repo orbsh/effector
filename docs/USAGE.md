@@ -22,7 +22,7 @@ executable). Resolving a skill into that set is control-plane work — and none 
 the fields carries capability semantics: the Effector derives nothing from `executor`
 or `entry` beyond an identity and an entry-point name.
 
-The Effector owns runtimes, executors, and the sandbox. The control plane owns identity, scheduling, deadlines, ctx scope, and
+The Effector owns runtimes, executors, and whatever contains them (its `class`). The control plane owns identity, scheduling, deadlines, ctx scope, and
 policy (whether an operation is AI-generated live or pre-audited).
 
 ### 1.1 The hops: which protocol runs where
@@ -70,47 +70,45 @@ Order of operations at effector startup:
 ```json
 {
   "control_plane_url": "ws://127.0.0.1:8787",
-  "sandbox": true,
+  "class": "host",
   "token": "…minted by the control plane (POST /admin/nodes)…",
   "capabilities": {
     "node_alias": "home-pc",
-    "carriers": ["steel", "python", "induction"],
-    "fs_scope": ["/home/user/work"],
-    "deny_read": ["/home/user/.ssh", "/home/user/.config"],
-    "cwd": "/home/user/work",
-    "network": "none"
+    "carriers": ["steel", "python", "induction"]
   }
 }
 ```
 
 - `control_plane_url` — WebSocket only. There is no degraded fallback by design
   (long-polling was rejected; a WS-only egress is the contract).
-- `sandbox` — defaults to `true`; wraps executor processes in bubblewrap. Remote
-  deployments must keep it on (unattended external code).
+- `class` — **what contains this node**, and the only containment decision the node makes
+  (ADR-0003 §1). `host` (default): a process on somebody's machine, running with that machine's
+  authority. `container`: the node IS the container's root process, started by
+  `deploy/node-container.nu` (`docker run --rm --init -i …`), and its filesystem is the boundary.
+  The claim is checked against the marker the runtime leaves (`/.dockerenv`, `/.containerenv`) at
+  load: a host process that says `container` is refused, because a claim nothing enforces is a lie
+  the config removes from the file only.
 - `token` — the node's authority (ADR-0003). The control plane mints it for the
   alias and keeps only its digest; the node attaches it to the mount URL as
   `?token=…`, and the connection that results authorizes every call afterwards.
-  It never expires on a clock — revoking means minting a new one.
+  It never expires on a clock — revoking means minting a new one. An empty token is a startup
+  failure.
 - `capabilities.node_alias` — **the alias must be set.** The default is the empty
   string, and a effector registered as `""` cannot be addressed by name (the failure
   shows up on the control-plane side as "effector not connected").
-- `capabilities.fs_scope` — the paths delivered scripts may **write**. Everything
-  outside them is read-only; reads are not confined by this field (that is
-  `deny_read`'s job).
-- `capabilities.deny_read` — paths delivered scripts must **not read** (your
-  credentials, shell configs, other users' trees). Undeclared = nothing denied.
-- `capabilities.cwd` — the working directory inside the jail. Undeclared = the
-  system temp dir (the pre-declaration behavior).
-- `capabilities.network` — `"none"` or `{ "allow": ["host", "host:port", "*.host"] }`.
-  An allowlist is honored: the node runs an HTTP and a SOCKS5 proxy, the jail
-  reaches them over UNIX sockets bridged into its namespace, and scripts find
-  `http_proxy`/`https_proxy`/`ALL_PROXY` already pointing at them — so an ordinary
-  client works unchanged and nothing outside the list resolves. What the node
-  needs for that: `sandbox: true` (no jail, no bridges), `bwrap` and `socat` on
-  PATH, and `$HOME` (the sockets live in `~/.cache/effector/`, because the jail
-  replaces `/tmp` and `/run` with empty tmpfs). `"open"` is a **startup error**
-  (an unshared namespace cannot be unrestricted) and so is an empty list (the
-  filter would read it as "allow everything").
+- The jail's fields (`sandbox`, `fs_scope`, `deny_read`, `cwd`, `network`) are **gone**
+  (2026-11-17). They were the per-call bubblewrap policy, and the per-call jail was retired with
+  ADR-0003 §1: what contains the process is the `class`, decided by the launcher that started it.
+  A config that still carries them is refused by the unknown-field rule rather than silently
+  ignored — an operator who writes `fs_scope` believes they have a boundary, and the honest answer
+  is that the file no longer offers one. What replaces the containment question is on the CALL side:
+  a `ToolCall` that says nothing requires a **container**, and a host node refuses it by name
+  ("`call … requires a container, and this node is host`"); `requires: "host"` is the exception a
+  caller asks for explicitly.
+- Where delivered code runs: the `steel` and `python` carriers execute **inside this process** (they
+  are this node's own VM), and `exec`/`induction` spawn a child that inherits the node's authority.
+  In a container node all of them are inside the container, which is the point of running the node
+  as PID 1.
 - `lease` — when this node leaves (ADR-0003). Defaults to never: a node on a host
   reconnects and stays. A node that IS a container sets `idle_secs = 15` (the grace;
   it doubles per call served and caps at `max_idle_secs`, default 300) and

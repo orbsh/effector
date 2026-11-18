@@ -8,6 +8,11 @@ refused at startup. Scope stated 2026-11-09 (point 5): the jail covers the
 process carriers (`exec`, `induction`) — `steel` and `python` run in-process.
 Still open: the proxy path for egress allowlists, the seccomp profile, and a
 mechanism (or the retirement) of `command_exec`.
+**Retired 2026-11-17:** the jail, the egress proxies it reached the world
+through, and this record's whole declaration surface (`sandbox`, `fs_scope`,
+`deny_read`, `cwd`, `network`) are deleted. What is left of the containment
+question is `class` — what contains this node — checked against a fact at
+load, and the per-call `requires` the plane routes by.
 **Date:** 2026-10-14
 
 ## Context

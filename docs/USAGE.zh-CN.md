@@ -10,7 +10,7 @@ Effector 是**客户端**：它主动拨出、注册，然后服务到达的帧�
 
 Effector 同时是**技能盲**的：它看不到 skill、看不到操作名、看不到 LLM 提示词。到达的是 `executor`（执行单元）、`entry`（代码里的入口点）、`language`（用哪个运行时）、`args`、`code`（可执行部分）。把 skill 解析成这一组是控制端的工作——而且其中没有任何字段携带能力语义：`executor` 与 `entry` 在 Effector 眼里只是一个身份与一个入口名，别无其他。
 
-Effector 拥有运行时、常驻会话与 sandbox。控制端拥有身份、调度、deadline、ctx 作用域与策略（某个操作是 AI 现场生成还是预先审计过的）。
+Effector 拥有运行时、执行器，以及容纳它们的那个东西（它的 `class`）。控制端拥有身份、调度、deadline、ctx 作用域与策略（某个操作是 AI 现场生成还是预先审计过的）。
 
 ### 1.1 每一跳各跑什么协议
 
@@ -33,27 +33,21 @@ Effector 启动顺序：
 ```json
 {
   "control_plane_url": "ws://127.0.0.1:8787",
-  "sandbox": true,
+  "class": "host",
   "token": "……控制面铸造的（POST /admin/nodes）……",
   "capabilities": {
     "node_alias": "home-pc",
-    "carriers": ["steel", "python", "induction"],
-    "fs_scope": ["/home/user/work"],
-    "deny_read": ["/home/user/.ssh", "/home/user/.config"],
-    "cwd": "/home/user/work",
-    "network": "none"
+    "carriers": ["steel", "python", "induction"]
   }
 }
 ```
 
-- `control_plane_url` —— 只认 WebSocket。按设计没有降级通道（long-polling 被否决过；WS-only 出网就是契约）。
-- `sandbox` —— 默认 `true`，把会话进程包进 bubblewrap。远程部署必须保持开启（无人值守的外部代码）。
-- `token` —— 节点的权柄（ADR-0003）。控制面为这个别名铸造它，只留下摘要；节点把它拼到挂载 URL 上（`?token=…`），由此建立的连接就是此后每次下发的授权。它不按时间过期——吊销的办法是重新铸造一个。
-- `capabilities.node_alias` —— **别名必须设置。** 默认值是空串，以 `""` 注册的 effector 无法按名字寻址（症状出现在控制端一侧："effector not connected"）。
-- `capabilities.fs_scope` —— 下发脚本可以**写**的路径。它们之外一律只读；**读**不受这个字段约束（那是 `deny_read` 的事）。
-- `capabilities.deny_read` —— 下发脚本**不许读**的路径（你的凭证、shell 配置、别人的目录）。不声明 = 什么都不拒。
-- `capabilities.cwd` —— jail 里的工作目录。不声明 = 系统临时目录（声明面出现之前的行为）。
-- `capabilities.network` —— `"none"` 或 `{ "allow": ["host", "host:port", "*.host"] }`。允许清单是**兑现得了**的：节点自己跑一个 HTTP 代理和一个 SOCKS5 代理，jail 通过桥进它命名空间的 UNIX socket 够到它们，脚本拿到的 `http_proxy`/`https_proxy`/`ALL_PROXY` 已经指好——所以普通客户端不用改，而清单之外的地址解析不到。兑现它需要三样东西：`sandbox: true`（没有 jail 就没有桥）、PATH 上的 `bwrap` 与 `socat`、以及 `$HOME`（socket 放在 `~/.cache/effector/`，因为 jail 把 `/tmp` 和 `/run` 都换成空 tmpfs）。`"open"` 是**启动错误**（unshared 的命名空间没法「不受限」），空清单同样是**启动错误**（过滤器会把空表读成「全放行」）。
+- `control_plane_url` —— 只接受 WebSocket。没有降级路径是有意的（长轮询被否决；只走 WS 的出网就是契约）。
+- `class` —— **是什么容纳了这个节点**，也是节点唯一做的容纳判断（ADR-0003 §1）。`host`（默认）：某人机器上的一个进程，带着那台机器的权限跑。`container`：节点**就是**容器的根进程，由 `deploy/node-container.nu` 起（`docker run --rm --init -i …`），它的文件系统就是边界。这条声明在加载时对照运行时留下的标记（`/.dockerenv`、`/.containerenv`）核查：一个宿主进程自称 `container` 会被拒绝，因为没有执行点的声明只是把谎言从文件里挪开。
+- `token` —— 节点的权限（ADR-0003）。控制面为这个别名铸造它，只留摘要；节点把它挂在 mount URL 的 `?token=…` 上，由此建立的连接就是此后每个调用的授权。它不按钟表过期——撤销就是重新铸造。空 token 是**启动失败**。
+- `capabilities.node_alias` —— **必须设置。** 默认是空串，注册成 `""` 的节点无法按名寻址（故障表现为控制面侧「effector not connected」）。
+- jail 的那组字段（`sandbox`、`fs_scope`、`deny_read`、`cwd`、`network`）**已经删除**（2026-11-17）。它们曾是「一次调用一个 bubblewrap 策略」，而那次调用的 jail 随 ADR-0003 §1 一起退役：容纳进程的是 `class`，由起它的启动器决定。仍带着这些字段的配置会被未知字段规则拒绝，而不是被静默忽略——写下 `fs_scope` 的运维以为自己有了一道边界，而诚实的回答是文件里已经没有这道边界了。取代容纳问题的是**调用侧**：一个什么都不说的 `ToolCall` 要求**容器**，宿主节点按名字拒绝它（「`call … requires a container, and this node is host`」）；`requires: "host"` 是调用方显式提出的例外。
+- 下发代码在哪里跑：`steel` 与 `python` 载体**在本进程内**执行（它们是节点自己的 VM），`exec`/`induction` 起一个继承节点权限的子进程。容器节点里它们全在容器内，这正是把节点当 PID 1 跑的意义。
 - `lease` —— 这个节点什么时候离开（ADR-0003）。默认永不：跑在宿主上的节点会重连、会留着。本身就是一个容器的节点设 `idle_secs = 15`（宽限；每服务一个调用翻倍，封顶 `max_idle_secs`，默认 300）并设 `exit_on_disconnect = true`，于是进程离开**就是**容器结束——退出时不保存任何东西，因为那时持久数据已经越过边界了。
 - 没有 `command_exec` 这个字段了：跑下发的脚本就是这台节点的本职，jail 内部的 `exec` 是构造上就有的，「能不能执行」从来不是一项独立于「节点存在」的能力。它是被**退役**的，不是被接上的（ADR-0001 的 Update）。
 - 剩下那条拒绝背后的规矩（ADR-0001）：声明出去的字段就是发布出去的能力，所以它必须指明自己的**执行点**——这台节点兑现不了的声明，在启动时失败，而不是被当作谎言注册出去。
