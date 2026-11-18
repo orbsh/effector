@@ -71,10 +71,18 @@ impl Spec {
     /// ignored: a plane that answers `archive` must hear that this node cannot perform it, rather
     /// than run with the data missing.
     pub fn from_plane(kind: &str, mode: &str, at: Option<&str>) -> Result<Self> {
+        // The vocabulary is the protocol's (`resource::KINDS`) — the same list the plane checks at
+        // its door. A kind added on one side only would otherwise become a declaration that fails
+        // here, which is the failure that shared list exists to prevent.
+        if !effector_protocol::resource::is_kind(kind) {
+            bail!("this node cannot move `{kind}` resources");
+        }
         let transport = match kind {
             "git" => Transport::Git,
             "object" => Transport::Object,
-            other => bail!("this node cannot move `{other}` resources"),
+            // Unreachable after the check above; stated rather than wildcarded so a new name in
+            // `resource::KINDS` cannot be added without a mechanism to move it.
+            _ => bail!("this node cannot move `{kind}` resources"),
         };
         let mode = match mode {
             "ro" => Mode::ReadOnly,

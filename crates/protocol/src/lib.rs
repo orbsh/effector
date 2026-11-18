@@ -382,6 +382,17 @@ pub struct HostResult {
 pub mod resource {
     use anyhow::{bail, Result};
 
+    /// The mechanisms a node can actually move. A plane may serve ONLY these: a grant for a
+    /// mechanism nobody implements is a promise the operator would discover at the first task, not
+    /// at the door they declared it. `archive` is the case that taught this: it is a word in the
+    /// protocol so a node can refuse it BY NAME, and being nameable is not being servable.
+    pub const KINDS: [&str; 2] = ["git", "object"];
+
+    /// Whether `kind` names a mechanism some node implements.
+    pub fn is_kind(name: &str) -> bool {
+        KINDS.contains(&name)
+    }
+
     /// The file name an object resource lands under, taken from its URL: `s3://bucket/builds/out.tar`
     /// and `https://host/builds/out.tar` both give `out.tar`. A URL that ends in `/` names a PREFIX,
     /// which is a different kind of resource; inventing a name would put a task's data somewhere it
