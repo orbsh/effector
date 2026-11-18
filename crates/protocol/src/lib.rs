@@ -231,6 +231,16 @@ pub enum Frame {
     Call(ToolCall),
     /// Effector to control plane: the operation's answer.
     Result(ToolResult),
+    /// Effector to control plane: this call is still making progress.
+    ///
+    /// Silence is not death. A call whose work is a TRANSFER is quiet for exactly as long as the
+    /// bytes take, and the plane's only other evidence of life is the answer — so accounting that
+    /// treats quiet as stuck kills a healthy clone the moment it is big enough to matter. The node
+    /// therefore states the fact: throttled by the sender, addressed by `call_id`, carrying nothing
+    /// (a rate is a measurement, and a measurement that nobody asked for is a second vocabulary).
+    Progress {
+        call_id: String,
+    },
     /// Control plane to effector: stop waiting for this call (aura ADR-0047 stage
     /// two — the realm lifted an in-flight operation). Addressed by `call_id` because
     /// that is the only handle the control plane holds; the node answers with

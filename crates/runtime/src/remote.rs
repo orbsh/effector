@@ -478,6 +478,47 @@ async fn execute_call_inner(
 /// Build a HostBridge whose functions send Frame::Host(Call) over the
 /// connection and await the correlated Frame::Host(Result). One JSON arg
 /// in, JSON value out — the same marshal contract as in-process bridges.
+/// What a transfer reports with, and what it is stopped by: one object, because both answers come
+/// from the same call.
+///
+/// `Progress` is throttled to one frame a second. The poll loop asks every 50 ms, and a frame per
+/// poll would put twenty frames a second on the wire to say what one says — that the child is alive.
+struct Advance {
+    control: CallControl,
+    tx: tokio::sync::mpsc::UnboundedSender<Frame>,
+    call_id: String,
+    last_ms: std::sync::atomic::AtomicU64,
+}
+
+impl crate::resource::Interrupt for Advance {
+    fn cancelled(&self) -> bool {
+        self.control.is_cancelled()
+    }
+
+    fn advanced(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+        let last = self.last_ms.load(Relaxed);
+        // Zero is "nothing said yet", so the first poll reports immediately: a transfer that has not
+        // reached its first second is still news to a plane that is counting silence.
+        if last != 0 && now.saturating_sub(last) < 1000 {
+            return;
+        }
+        if self
+            .last_ms
+            .compare_exchange(last, now, Relaxed, Relaxed)
+            .is_ok()
+        {
+            let _ = self.tx.send(Frame::Progress {
+                call_id: self.call_id.clone(),
+            });
+        }
+    }
+}
+
 fn build_host_bridge(
     call_id: String,
     tx: &tokio::sync::mpsc::UnboundedSender<Frame>,
@@ -669,7 +710,16 @@ fn build_host_bridge(
                 credential: reach.credential,
             };
             let root = resources_root();
-            let token: &dyn crate::resource::Interrupt = &control;
+            // The node's own testimony while a transfer runs: the call's stop handle plus this
+            // connection's writer, because "still moving" is a fact only the process watching the
+            // child has. Throttled by `advanced`, not by this call site.
+            let advance = Advance {
+                control: control.clone(),
+                tx: tx.clone(),
+                call_id: call_id.clone(),
+                last_ms: std::sync::atomic::AtomicU64::new(0),
+            };
+            let token: &dyn crate::resource::Interrupt = &advance;
             let path = crate::resource::ensure(
                 &spec,
                 &material,

@@ -138,6 +138,13 @@ fn address(material: &Material, remote: &str) -> String {
 /// own (`CallControl`), never a node-wide flag: a flag that outlived a call would stop the next one.
 pub trait Interrupt {
     fn cancelled(&self) -> bool;
+
+    /// Called while a child is running, on every poll: "the work is still moving".
+    ///
+    /// A transfer cannot say it is alive the way a conversation can — there is no turn to answer —
+    /// so the ONLY party that knows a clone is still receiving bytes is the process watching it.
+    /// Implementations throttle; the poll rate is this file's, not the wire's.
+    fn advanced(&self) {}
 }
 
 impl Interrupt for crate::carrier::CallControl {
@@ -193,7 +200,13 @@ fn run_child(
         }
         match child.try_wait().with_context(|| format!("waiting on {what}"))? {
             Some(status) => break status,
-            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            None => {
+                // The child is still working: the one fact only this loop can observe.
+                if let Some(c) = cancel {
+                    c.advanced();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
     };
     let join = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
@@ -603,6 +616,32 @@ mod tests {
         fn cancelled(&self) -> bool {
             self.0.load(std::sync::atomic::Ordering::Relaxed)
         }
+    }
+
+    /// The other half of the poll loop: a child that is still running says so. Without this a
+    /// transfer is indistinguishable from a hang, and the plane's deadline kills healthy clones.
+    #[test]
+    fn a_running_child_reports_that_it_is_alive() {
+        struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Interrupt for Counting {
+            fn cancelled(&self) -> bool {
+                false
+            }
+            fn advanced(&self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Counting(ticks.clone());
+        let mut command = Command::new("sleep");
+        command.arg("0.4");
+        let out = run_child(&mut command, Some(&counter), "sleep").unwrap();
+        assert!(out.status.success());
+        // 400 ms at one poll per 50 ms: a handful, and certainly more than "the child started".
+        assert!(
+            ticks.load(std::sync::atomic::Ordering::Relaxed) >= 3,
+            "the poll loop reports while the child works"
+        );
     }
 
     /// `output()` would wait for the child no matter what; this is the test that says a cancelled
