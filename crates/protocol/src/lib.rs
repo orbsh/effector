@@ -379,6 +379,12 @@ pub struct HostResult {
 /// WIRE contract (`Material.url`, `Material.credential`), and both ends must agree: the plane
 /// refuses a declaration at the operator's door with the same rule the node applies when it moves
 /// the data.
+mod job;
+
+pub use job::{
+    Job, JobSource, Mode, Need, OnError, Op, Placement, ResourceKind, ResourceReq, Scope,
+};
+
 pub mod resource {
     use anyhow::{bail, Result};
 
