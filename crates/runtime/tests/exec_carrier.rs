@@ -694,6 +694,111 @@ fn induction_cbor_host_call_crosses_the_seam() {
     );
 }
 
+/// THE BYTE PAYLOAD, END TO END (ADR-0050): a CBOR booth writes `data` as a real CBOR byte
+/// string — the one value `serde_json::Value` cannot hold. The carrier used to fail the whole
+/// decode on that (the link died at `carrier/exec.rs`'s CBOR arm), which is why a booth had to
+/// spell its content as `{"$cbor": "<base64>"}`. Now the bytes are LIFTED and handed to a
+/// host that takes them, unchanged: no base64 anywhere on the path.
+#[test]
+fn induction_cbor_byte_payload_reaches_a_bytes_host_unchanged() {
+    use induction_protocol::{Encoding, FrameBytes};
+    let payload: Vec<u8> = (0u16..64).map(|i| (i * 5 % 251) as u8).collect();
+    let seen: Arc<Mutex<Vec<(String, Value, FrameBytes)>>> = Arc::new(Mutex::new(Vec::new()));
+    let bridge = {
+        let seen = seen.clone();
+        let mut b = HostBridge::default();
+        b.emit_bytes = Some(Arc::new(move |event: &str, data: &Value, bytes: &FrameBytes| {
+            seen.lock()
+                .unwrap()
+                .push((event.to_string(), data.clone(), bytes.clone()));
+            Ok(Value::Null)
+        }));
+        b
+    };
+    let s = executors();
+    let argv = induction_bin();
+    let out = s
+        .with_executor_encoded(
+            "box/cbor-bytes",
+            "induction",
+            &argv,
+            Some(&bridge),
+            Encoding::Cbor,
+            |sess| sess.call("bytes_emit", &json!({ "bytes": payload })),
+        )
+        .unwrap();
+    assert_eq!(out["emitted"], 64, "the call was served, the link survived");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one emit frame: {seen:?}");
+    let (event, data, bytes) = &seen[0];
+    assert_eq!(event, "ui:bytes");
+    assert_eq!(bytes.bytes, payload, "the bytes cross the carrier unchanged");
+    assert_eq!(
+        bytes.path,
+        vec![
+            "host".to_string(),
+            "args".to_string(),
+            "data".to_string(),
+            "data".to_string()
+        ],
+        "the payload is recorded against the whole frame, routing head included — the host is \
+         handed the payload alone, so `embed` walks the shorter suffixes until one resolves"
+    );
+    assert_eq!(
+        data["data"],
+        Value::Null,
+        "the JSON half has a hole where the bytes were, not a spelling of them"
+    );
+    assert_eq!(data["name"], "ui:bytes", "the routing head is untouched");
+    assert_eq!(data["island"], "island-one");
+}
+
+/// THE FALLBACK, AND THE REGRESSION THAT MATTERS: a host with no byte seam is served by the
+/// `$cbor` mapping — and the frame it sees on a CBOR link is IDENTICAL to the frame the same
+/// booth sends on a JSON link. Bytes cost one hop's compactness for such a host; they never
+/// change its frame.
+#[test]
+fn a_host_without_the_byte_seam_sees_todays_frame_on_both_codecs() {
+    use induction_protocol::Encoding;
+    let payload: Vec<u8> = (0u16..32).map(|i| (i * 11 % 251) as u8).collect();
+    let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let bridge = {
+        let seen = seen.clone();
+        let mut b = HostBridge::default();
+        b.functions.insert(
+            "emit".into(),
+            Arc::new(move |arg: Value| {
+                seen.lock().unwrap().push(arg);
+                Ok(Value::Null)
+            }),
+        );
+        b
+    };
+    let s = executors();
+    let argv = induction_bin();
+    for (slot, encoding) in [("box/bytes-json", Encoding::Json), ("box/bytes-cbor", Encoding::Cbor)] {
+        s.with_executor_encoded(slot, "induction", &argv, Some(&bridge), encoding, |sess| {
+            sess.call("bytes_emit", &json!({ "bytes": payload }))
+        })
+        .unwrap();
+    }
+
+    let frames = seen.lock().unwrap();
+    assert_eq!(frames.len(), 2, "one emit per link: {frames:?}");
+    assert_eq!(
+        frames[1], frames[0],
+        "the CBOR link's frame is the JSON link's frame, field for field"
+    );
+    // …and that shared frame is today's spelling: the payload under the reserved key.
+    assert_eq!(
+        induction_protocol::payload_bytes(&frames[0]["data"]["data"]),
+        Some(payload),
+        "a host that cannot hold bytes reads the mapping it has always read: {}",
+        frames[0]
+    );
+}
+
 /// The typing kills the document-layer mistake (ADR-0037 §2): a child
 /// sending the RETIRED untyped shape (`{"op": "invoke"}` with no
 /// discriminator) fails at the parent's typed-frame DECODE — the bridge

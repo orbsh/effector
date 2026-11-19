@@ -52,7 +52,9 @@
 use super::executor::{Executor, StreamOp};
 use super::HostBridge;
 use anyhow::{anyhow, Result};
-use induction_protocol::{Arm, CallFrame, Encoding, FrameKind, IterateKind, Reply, ResultFrame};
+use induction_protocol::{
+    Arm, CallFrame, Encoding, FrameBytes, FrameKind, IterateKind, Reply, ResultFrame,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -345,7 +347,12 @@ impl Shared {
 /// ends the channel for everybody.
 fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdout>) {
     loop {
-        let msg: Value = match shared.encoding {
+        // The frame's JSON half, plus the opaque bytes it carried if any. A byte string is the
+        // one CBOR value with no JSON counterpart, so it is LIFTED out of the tree instead of
+        // failing the decode (`serde_json::Value` would refuse it and the link would die on the
+        // first booth that sent real bytes). A JSON line can carry none: that codec spells an
+        // opaque payload as base64 text, which is data, not a lift.
+        let (msg, bytes): (Value, Option<FrameBytes>) = match shared.encoding {
             Encoding::Json => {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
@@ -366,7 +373,7 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
                     continue;
                 }
                 match serde_json::from_str(trimmed) {
-                    Ok(v) => v,
+                    Ok(v) => (v, None),
                     Err(e) => {
                         shared.fail(format!(
                             "induction carrier: malformed frame {trimmed}: {e}"
@@ -379,17 +386,31 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
                 // Self-delimited CBOR reading: decode_one_value from a byte
                 // reader that blocks per byte. ciborium reports an incomplete
                 // value as EOF on the reader, so the read blocks until the
-                // document completes.
-                match ciborium::de::from_reader(&mut reader) {
-                    Ok(v) => v,
+                // document completes. The tree is read as `ciborium::Value`
+                // (bytes included) and then split: everything that has a JSON
+                // form becomes the frame, the byte payload is lifted beside it.
+                match ciborium::de::from_reader::<ciborium::Value, _>(&mut reader)
+                    .map_err(|e| format!("malformed cbor frame: {e}"))
+                    .and_then(|doc| induction_protocol::split_bytes(doc))
+                {
+                    Ok(split) => split,
                     Err(e) => {
-                        shared.fail(format!("induction carrier: malformed cbor frame: {e}"));
+                        shared.fail(format!("induction carrier: {e}"));
                         return;
                     }
                 }
             }
         };
         if let Some(result) = ResultFrame::from_value(&msg) {
+            // A byte payload belongs to a ctx frame's argument. On a result it would be
+            // dropped silently, and a result is the one frame a caller is waiting for.
+            if bytes.is_some() {
+                shared.fail(format!(
+                    "induction carrier: byte payload on a result frame (only an arm's `data` \
+                     may carry bytes): {msg}"
+                ));
+                return;
+            }
             let Some(id) = result.id.as_u64() else {
                 shared.fail(format!("induction carrier: result without a request id: {msg}"));
                 return;
@@ -425,7 +446,9 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
             // from this thread (no io inside — the future cannot actually block
             // on the runtime, it parks only until the sync fn returns).
             let frame = match induction_host::parse_guest_value(&msg) {
-                Some(induction_protocol::GuestFrame::Host(f)) => f,
+                // The lift rides the frame: `route_frame` hands the bytes to a host that
+                // takes them, and to one that does not via the `$cbor` fallback.
+                Some(induction_protocol::GuestFrame::Host(f)) => f.with_bytes(bytes),
                 Some(induction_protocol::GuestFrame::Result(_)) | None => {
                     let reply = Reply::error(format!(
                         "induction carrier: bad host frame: {}",
@@ -1117,6 +1140,31 @@ impl induction_host::HostOps for BridgeOps<'_> {
         (f)(serde_json::json!({ "event": event, "data": data }))
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    /// The bytes crossed the pipe as a CBOR byte string and are still bytes here: a host that
+    /// takes them (a realm whose storage carries native bytes) gets them untouched. A host that
+    /// does not gets the `$cbor` fallback — its `emit` fn, with the base64 spelling put back
+    /// where the bytes were, which is byte-for-byte the frame it handled before this arm
+    /// existed. Losing the compactness of one hop is a cost; a host that cannot hold bytes must
+    /// still get its frame.
+    fn emit_bytes(
+        &self,
+        event: &str,
+        data: &Value,
+        bytes: &induction_protocol::FrameBytes,
+    ) -> Result<(), String> {
+        if let Some(f) = &self.bridge.emit_bytes {
+            return (f)(event, data, bytes).map(|_| ()).map_err(|e| e.to_string());
+        }
+        let mut data = data.clone();
+        if !bytes.embed(&mut data) {
+            return Err(format!(
+                "host fn 'emit': byte payload path {:?} is not in the frame (event `{event}`)",
+                bytes.path
+            ));
+        }
+        self.emit(event, &data)
     }
 
     fn store<'a>(&'a self, op: &'a Value) -> induction_host::OpsFuture<'a> {

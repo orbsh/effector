@@ -89,6 +89,7 @@ fn a_ctx_call_is_answered_by_its_own_requests_bridge() {
                 Arc::new(move |_args: Value| Ok(json!({ "who": tag }))) as _,
             )]),
             storage: None,
+            emit_bytes: None,
         };
         handles.push(std::thread::spawn(move || {
             executors

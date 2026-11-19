@@ -93,6 +93,35 @@ fn run_json() {
             }
         };
         let job = job_from(&req);
+        // The byte-payload arm on a JSON link: same payload, the codec's own spelling — the
+        // `$cbor` mapping, because JSON text cannot hold binary. The frame a booth builds is
+        // therefore the one it always built; only the CBOR link writes the byte string.
+        if job.event == "bytes_emit" {
+            let payload: Vec<u8> = job
+                .args
+                .get("bytes")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(Value::as_u64).map(|b| b as u8).collect())
+                .unwrap_or_default();
+            emit_json(&serde_json::json!({
+                "host": {
+                    "type": "emit",
+                    "args": {
+                        "event": "ui:bytes",
+                        "data": {
+                            "name": "ui:bytes",
+                            "island": "island-one",
+                            "data": induction_protocol::cbor_payload(&payload),
+                        },
+                    },
+                },
+            }));
+            emit_json(&serde_json::json!({
+                "id": job.id,
+                "result": {"emitted": payload.len()},
+            }));
+            continue;
+        }
         // The ctx round trips answer inline on THIS channel — a shared
         // helper per handler, emitting the typed frame and reading the
         // host_reply line it waits for.
@@ -137,6 +166,30 @@ fn run_cbor() {
     // parent closed stdin = EOF) ends the link.
     while let Ok(req) = ciborium::de::from_reader(&mut reader) {
         let job = job_from(&req);
+        // THE BYTE PAYLOAD ARM (ADR-0050): a frame whose `data` is a REAL CBOR byte string.
+        // `host(…)` takes a `Value`, which cannot hold bytes — that is the whole reason this
+        // arm builds the document itself, exactly as a Rust booth with encoded content does.
+        // `emit` is fire-and-forget, so nothing is read back.
+        if job.event == "bytes_emit" {
+            let payload: Vec<u8> = job
+                .args
+                .get("bytes")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(Value::as_u64).map(|b| b as u8).collect())
+                .unwrap_or_default();
+            let mut out = std::io::stdout();
+            ciborium::ser::into_writer(&byte_emit_frame(&payload), &mut out)
+                .expect("cbor encode");
+            out.flush().unwrap();
+            let mut out = std::io::stdout();
+            ciborium::ser::into_writer(
+                &serde_json::json!({"id": job.id, "result": {"emitted": payload.len()}}),
+                &mut out,
+            )
+            .expect("cbor encode");
+            out.flush().unwrap();
+            continue;
+        }
         let mut host = |frame: Value| -> Value {
             let mut out = std::io::stdout();
             ciborium::ser::into_writer(&frame, &mut out).expect("cbor encode");
@@ -291,6 +344,34 @@ fn dispatch(
         }
         _ => serde_json::json!({"error": "no such handler"}),
     }
+}
+
+/// One `emit` frame whose payload is a CBOR BYTE STRING: the envelope's head stays JSON
+/// (`name`/`island` are what the venue routes on), only `data` is binary — the shape
+/// gravity's `carried(…, Cbor)` produces, built here without passing through a `Value`.
+fn byte_emit_frame(payload: &[u8]) -> ciborium::Value {
+    use ciborium::Value as Cbor;
+    let text = |s: &str| Cbor::Text(s.to_string());
+    Cbor::Map(vec![(
+        text("host"),
+        Cbor::Map(vec![
+            (text("type"), text("emit")),
+            (
+                text("args"),
+                Cbor::Map(vec![
+                    (text("event"), text("ui:bytes")),
+                    (
+                        text("data"),
+                        Cbor::Map(vec![
+                            (text("name"), text("ui:bytes")),
+                            (text("island"), text("island-one")),
+                            (text("data"), Cbor::Bytes(payload.to_vec())),
+                        ]),
+                    ),
+                ]),
+            ),
+        ]),
+    )])
 }
 
 fn emit_json(v: &Value) {

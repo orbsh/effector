@@ -13,6 +13,17 @@ use serde_json::Value;
 /// carrier only marshals values across the VM boundary.
 pub type HostFn = std::sync::Arc<dyn Fn(Value) -> anyhow::Result<Value> + Send + Sync>;
 
+/// `ctx.emit` for a payload that arrived as OPAQUE BYTES — the byte-carrying twin of the
+/// `emit` entry in [`HostBridge::functions`].
+///
+/// Three arguments, because the bytes are not a `Value`: the event, the emit payload's JSON
+/// half (with `null` where the bytes sat), and the payload itself. A host that registers this
+/// moves the bytes without ever spelling them as text; a host that does not is served by the
+/// `$cbor` fallback and sees the frame it has always seen.
+pub type HostFnBytes = std::sync::Arc<
+    dyn Fn(&str, &Value, &induction_protocol::FrameBytes) -> anyhow::Result<Value> + Send + Sync,
+>;
+
 /// Stage two of a stop, at a node (aura ADR-0047, effector's half): one CALL's
 /// cancel handle. Per call and never per carrier — an executor outlives the call,
 /// and a flag that outlived it would stop the next one.
@@ -149,6 +160,12 @@ pub struct HostBridge {
     pub functions: std::collections::BTreeMap<String, HostFn>,
     /// Storage injection (python carrier only; `None` = no collections).
     pub storage: Option<std::sync::Arc<StorageSlot>>,
+    /// `ctx.emit` when the payload arrived as opaque bytes (a CBOR byte string). `None` — the
+    /// default, and what every host binary predating the field has — means "this host reads
+    /// the JSON spelling", and the carrier takes the `$cbor` fallback: base64 in, base64 out,
+    /// the exact frame it always handled. A host that can hold bytes registers its fn here and
+    /// the payload crosses the seam unchanged, with no text in between.
+    pub emit_bytes: Option<HostFnBytes>,
 }
 
 pub struct ExecRequest<'a> {

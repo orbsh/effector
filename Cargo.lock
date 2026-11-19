@@ -1494,6 +1494,7 @@ dependencies = [
 name = "induction-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "ciborium",
  "serde",
  "serde_json",
