@@ -50,7 +50,7 @@ python = ["dep:pyo3", "dep:okm-python"]
 
 [dev-dependencies]
 tempfile = "3"
-okm-core = { git = "https://github.com/orbsh/okm", branch = "main", default-features = false, features = ["test-engines"] }
+okm-core = { git = "https://github.com/orbsh/okm", branch = "main", default-features = false }
 okm-wire = { git = "https://github.com/orbsh/okm", branch = "main" }
 base64 = "0.22"
 # The interrupt fixture is a real guest, so the test rides the same shim a deployed
