@@ -8,7 +8,9 @@
 //!
 //! What a job deliberately does NOT say:
 //!
-//! - WHICH node runs it. Placement is the realm's, decided from declared capability and locality.
+//! - WHICH node runs it. Placement states the place the work must be in — a set of labels, or one
+//!   machine id (aura ADR-0053/0054) — and the realm resolves that against the nodes it holds. The
+//!   node never chooses itself, and a job that says nothing gets whatever can carry it.
 //! - HOW LONG the node lives. That is the node's own `LeaseConfig`; `scope` states a fact about the
 //!   work, not a timeout.
 //! - WHICH codec it travels in. That is settled per leg at the handshake.
@@ -85,6 +87,14 @@ pub enum Placement {
     /// A node carrying every one of these labels (`u101:laptop`, `site:home`, …). Labels are
     /// minted by the control plane from the node's grant; an empty list means `Any`.
     Labels { labels: Vec<String> },
+    /// ONE machine, by the id it reports (effector ADR-0006) — what addressing uses once the
+    /// caller has resolved a name to a box: a dispatcher retrying the step that ran on a
+    /// particular piece of hardware, or one that keeps its own table of which machine holds
+    /// which file. A label is a word a person says; a machine id is the thing the word meant.
+    ///
+    /// Every process of that machine is reachable (two nodes on one box are one address). An
+    /// empty id addresses nothing — it is refused, never widened to `Any`.
+    Machine { machine: String },
 }
 
 /// The lifetime a job claims. This is not a timeout (the node's lease owns that) — it says which
