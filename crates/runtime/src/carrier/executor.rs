@@ -443,9 +443,19 @@ impl Executors {
                 Some(shared) => shared.clone(),
                 None => {
                     // Cold start under the handle lock: a second call never sees a
-                    // half-loaded executor, and the spawn happens once.
-                    let mut executor = spawn_executor(language, source, host, encoding)?;
-                    executor.load(source)?;
+                    // half-loaded executor, and the spawn happens once. The error's
+                    // subject is the START (ADR-0014 §4), as on the queued path.
+                    let mut executor = spawn_executor(language, source, host, encoding)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "executor `{key}` could not be started (carrier `{language}`): {e:#}"
+                            )
+                        })?;
+                    executor.load(source).map_err(|e| {
+                        anyhow::anyhow!(
+                            "executor `{key}` was spawned but could not be loaded (carrier `{language}`): {e:#}"
+                        )
+                    })?;
                     executor.set_host(host);
                     let shared = executor.shared().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -531,8 +541,23 @@ impl Executors {
                 // Cold start (or after eviction): spawn + load BEFORE the slot is
                 // published, so a spawn error surfaces as an error and a failed
                 // entry is never cached.
-                let mut executor = spawn_executor(language, source, host, encoding)?;
-                executor.load(source)?;
+                //
+                // THE ERROR'S SUBJECT IS THE START, not the delivered code
+                // (ADR-0014 §4): `language not resident-carried by this effector
+                // build: python` arriving as the call's own failure reads like a
+                // bug in someone's script, when it is a fact about the node's
+                // build or its spawn spec. Nothing else changes — no state, no
+                // retry; one sentence that says whose failure it is.
+                let mut executor = spawn_executor(language, source, host, encoding).map_err(|e| {
+                    anyhow::anyhow!(
+                        "executor `{key}` could not be started (carrier `{language}`): {e:#}"
+                    )
+                })?;
+                executor.load(source).map_err(|e| {
+                    anyhow::anyhow!(
+                        "executor `{key}` was spawned but could not be loaded (carrier `{language}`): {e:#}"
+                    )
+                })?;
                 Ok(executor)
             },
             |executor| {

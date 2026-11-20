@@ -413,6 +413,107 @@ fn nu_induction_spec() -> String {
     format!("nu {}", path.display())
 }
 
+// ------------------------------------------------------- the residency rule --
+// The tier a caller never sees (gravity ADR-0014): the key names the executor, the
+// node checks and starts it under the slot lock, and a child that exited is not a
+// cache entry. These three tests are what makes that contract checkable instead of
+// a claim in a comment.
+
+/// ONE KEY, ONE CHILD. The state half is already asserted by the fixture's `$env`
+/// counter; this is the other half — the resident child IS the process, so a second
+/// call on one key answers with the same pid, and a second key never shares it.
+#[test]
+fn one_key_is_one_child_and_a_second_key_is_a_second_child() {
+    let s = executors();
+    let spec = induction_bin();
+    let pid = |key: &str| -> u64 {
+        s.with_executor(key, "induction", &spec, None, |sess| {
+            sess.call("pid", &json!({}))
+        })
+        .unwrap()
+        .as_u64()
+        .expect("the fixture answers its own pid")
+    };
+    let first = pid("box/res-a");
+    assert_eq!(
+        first,
+        pid("box/res-a"),
+        "the same key reuses the resident child"
+    );
+    assert_ne!(
+        first,
+        pid("box/res-b"),
+        "a different key is a different child: state never crosses keys"
+    );
+}
+
+/// A CHILD THAT EXITED IS NOT A CACHE ENTRY: the call that killed it answers nothing,
+/// the sweep drops the slot, and the next call for the same key cold-starts a child.
+/// Nothing here evicts a live executor for being idle — that is the node process's
+/// own lifetime rule, not this registry's.
+#[test]
+fn a_dead_child_is_evicted_and_the_next_call_starts_a_new_one() {
+    let s = executors();
+    let spec = induction_bin();
+    let pid = |key: &str| -> u64 {
+        s.with_executor(key, "induction", &spec, None, |sess| {
+            sess.call("pid", &json!({}))
+        })
+        .unwrap()
+        .as_u64()
+        .expect("the fixture answers its own pid")
+    };
+    let key = "box/res-dead";
+    let first = pid(key);
+    let died = s.with_executor(key, "induction", &spec, None, |sess| {
+        sess.call("__exit", &json!({}))
+    });
+    assert!(
+        died.is_err(),
+        "a child that left mid-call answers nothing: {died:?}"
+    );
+    // The sweep is the node's own liveness read, so it may need a moment to see the
+    // exit; the assertion is about the OUTCOME, never about one particular tick.
+    let mut swept = Vec::new();
+    for _ in 0..100 {
+        swept = s.sweep_dead();
+        if !swept.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        swept.iter().any(|k| k == key),
+        "the dead slot is swept out of the registry: {swept:?}"
+    );
+    assert_ne!(
+        first,
+        pid(key),
+        "the next call cold-starts a new child after the eviction"
+    );
+}
+
+/// A START'S FAILURE NAMES THE START, not the delivered code: the message says which
+/// executor and which carrier could not be brought up, so a node's build problem does
+/// not read like a bug in someone's script.
+#[test]
+fn a_start_failure_names_the_start_not_the_code() {
+    let s = executors();
+    let err = s
+        .with_executor(
+            "box/res-nope",
+            "koto",
+            "whatever the language would have",
+            None,
+            |sess| sess.call("x", &json!({})),
+        )
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("could not be started"), "{text}");
+    assert!(text.contains("box/res-nope"), "{text}");
+    assert!(text.contains("koto"), "{text}");
+}
+
 /// Round trip over the fifo channels + residency: the `count` handler
 /// rides `$env` across calls on the SAME child (the for-loop scope rule
 /// the fixture documents — `each` would eat the writes).

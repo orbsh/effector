@@ -241,7 +241,7 @@ fn dispatch(
     match (kind.as_str(), event.as_str()) {
         // Introspection answers the same schema either way.
         ("call", "interface_schema") | ("iterate_start", "interface_schema") => serde_json::json!({
-            "receives": { "echo": {}, "slow": {}, "ctx_round_trip": {}, "store_round_trip": {}, "bad_host_frame": {}, "count": {} },
+            "receives": { "echo": {}, "slow": {}, "ctx_round_trip": {}, "store_round_trip": {}, "bad_host_frame": {}, "count": {}, "pid": {} },
             "wildcard_receives": [],
             // Reserved lifecycle hooks (ADR-0043 §3): names only — the
             // handlers live in THIS process (a Declared hook dispatches
@@ -263,6 +263,15 @@ fn dispatch(
         // dispatch calls the executor by the reserved name. __sleep runs
         // before eviction (return ignored), __wake on reactivation.
         ("call" | "iterate_start", "__sleep") => serde_json::json!({"slept": true}),
+        // Residency is observable only from inside the child: two calls of one key
+        // share this process (the same pid), two keys never do (exec_carrier.rs).
+        ("call" | "iterate_start", "pid") => serde_json::json!(std::process::id()),
+        // Leave in the middle of a call, so the tests can watch the sweep drop a
+        // dead slot and the next call cold-start a fresh child. Nothing replies —
+        // the process is gone, which is exactly the failure that is not a cache hit.
+        ("call" | "iterate_start", "__exit") => {
+            std::process::exit(1);
+        }
         ("call" | "iterate_start", "__wake") => serde_json::json!({"woke": true}),
         // Plain handlers: reply a bare value; the carrier wraps to a
         // terminal envelope. echo echoes the args.
