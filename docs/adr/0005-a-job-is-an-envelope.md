@@ -67,12 +67,17 @@ struct ResourceReq {
 
 5. **A job's frames say which job and which op they belong to.** A booth is already emitting frames for its own turn; frames coming back from a job are a second stream through the same channel, and without ids the booth cannot tell what it is looking at.
 
+6. **Attachments carry what the job needs but does not mean.** `Job::attachments` is a list of `{name, media, bytes}`: a generic slot, opaque to this crate. The reason it exists is concrete — a job that runs types defined at submission time (a skill taken out of a store, a graph's nodes) cannot name them in `ops` alone, and a remote submission has nowhere else to put the definitions. The reason it is shaped this way rather than as a `JobSource` variant is that a variant would make the envelope learn the vocabulary of whoever filled it (a body, a storage schema); an attachment makes it learn only "something travels with this job", and the meaning stays on the side that filled it.
+
+   Three rules keep the slot from becoming an untyped side channel across a boundary that only frames are supposed to cross. The DISPATCHER fills it: a booth cannot hand a realm definitions that were not part of its own submission. The RECEIVER caps the total and refuses what is over. And an unrecognised `name` or `media` is a REFUSAL, never a silent skip — a definition that failed to arrive must not leave a job looking healthy.
+
 ## Consequences
 
 - **The realm holds job rows.** A job is data before it is work: it can be inspected, retried, and replayed, which the spawn-spec-in-dispatch arrangement could never be. The row is `(id, attempt, state)` plus the job document — the same shape as the run table k10r already keeps.
 - **A booth gains exactly one new verb.** `ctx.plan(job)` (name of the verb still open) submits and returns a stream handle; the results arrive over the iterate surface induction-guest already has (`IterateStart`/`Next`/`Dispose`), so no new streaming concept is introduced.
 - **`Body::Script`'s spawn spec moves out of dispatch.** This record does not perform that move; it states that a job is where `language`, `entry` and `code` belong, so the move has a destination.
 - **Schematic is a carrier, not a dependency of this type.** `JobSource::Plan` names a plan by hash and a run by id; whether the node runs it via the planned `plan` carrier arm is the node's business.
+- **An attachment is bytes, not text.** On CBOR it is a byte string (one header, not one integer per byte); on JSON it is a number array (the only spelling JSON has). A leg that changes codec mid-flight still lands, because the reader accepts either form.
 - **Compiled-in `Body::Rust` becomes a choice with a cost.** A body that ships as a job can change without recompiling the platform; a body compiled in cannot. This record does not forbid the compiled form — it makes it the exception rather than the only way to run something.
 
 ## Nesting is allowed, and it is the point

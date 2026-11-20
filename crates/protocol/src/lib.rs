@@ -382,8 +382,66 @@ pub struct HostResult {
 mod job;
 
 pub use job::{
-    Job, JobSource, Mode, Need, OnError, Op, Placement, ResourceKind, ResourceReq, Scope,
+    Attachment, Job, JobSource, Mode, Need, OnError, Op, Placement, ResourceKind, ResourceReq, Scope,
 };
+
+/// A byte payload that stays bytes.
+///
+/// Plain `Vec<u8>` under serde is a sequence of numbers: correct on both codecs, wasteful on one and
+/// unreadable on the other (a CBOR envelope would spend an integer per byte where a byte string costs
+/// one header). This writes through `serialize_bytes` — a byte string in CBOR, an array in JSON, which
+/// is the only spelling JSON has — and accepts either form when reading, so a leg that changed codec
+/// mid-flight still lands.
+pub mod bytes_serde {
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    use std::fmt;
+
+    pub fn serialize<S>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_bytes(bytes)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Bytes;
+
+        impl<'de> Visitor<'de> for Bytes {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a byte string or an array of bytes")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+                Ok(v.to_vec())
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+                Ok(v)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+                Ok(v.as_bytes().to_vec())
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(32));
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    out.push(byte);
+                }
+                Ok(out)
+            }
+        }
+
+        d.deserialize_bytes(Bytes)
+    }
+}
 
 pub mod resource {
     use anyhow::{bail, Result};

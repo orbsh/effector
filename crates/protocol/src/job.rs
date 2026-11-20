@@ -45,6 +45,33 @@ pub struct Job {
     /// requirements; placement picks the node.
     #[serde(default)]
     pub placement: Placement,
+    /// Things that travel WITH the job but are not the job's meaning: opaque to this crate, named and
+    /// typed so the layer that filled them can read them back. A job that runs a type defined at
+    /// submission time (a skill taken out of a store, a graph's nodes) cannot name it in `ops` alone —
+    /// the definition has to arrive, and it has to arrive in the envelope or a remote submission has
+    /// nowhere to put it. This crate never decodes one: `name` and `media` are the filler's
+    /// vocabulary, and a realm refuses an attachment it does not recognise rather than ignoring it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// One thing carried beside the work, at the filler's naming (see `Job::attachments`).
+///
+/// Three rules keep this from becoming an untyped side channel across a boundary that only frames
+/// are supposed to cross: the DISPATCHER fills them (a booth cannot hand a realm definitions that
+/// were not part of its own submission), the total is capped by the receiver, and an unrecognised
+/// `name`/`media` is a refusal, never a silent skip — a definition that failed to arrive must not
+/// leave a job looking healthy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// The filler's own name for it (`boothset`, say). Meaningless here, deliberate there.
+    pub name: String,
+    /// Media type of `bytes` (`application/cbor`, `application/json`). Bytes, not text: a CBOR
+    /// envelope carries them as a byte string, so an attachment never pays base64.
+    pub media: String,
+    /// The payload, uninterpreted.
+    #[serde(with = "crate::bytes_serde")]
+    pub bytes: Vec<u8>,
 }
 
 /// Where a job may run. Absent means "anywhere that can carry it", which is the only thing a job
@@ -216,6 +243,7 @@ mod tests {
                 }],
             },
             placement: Placement::Any,
+            attachments: Vec::new(),
             resources: vec![ResourceReq {
                 name: "repo".to_string(),
                 kind: ResourceKind::Git {
@@ -260,6 +288,7 @@ mod tests {
             placement: Placement::Labels {
                 labels: vec!["u101:laptop".to_string()],
             },
+            attachments: Vec::new(),
         };
         let text = serde_json::to_string(&job).expect("serializes");
         assert!(
@@ -281,4 +310,104 @@ mod tests {
         assert_eq!(never, OnError::Never);
         assert_eq!(OnError::default(), OnError::Fail, "silence means one attempt");
     }
+
+    // --- attachments: a carrying slot, not a type (ADR-0005 §attachments) -------------------
+
+    fn with_attachment() -> Job {
+        Job {
+            id: "job-1".to_string(),
+            booth: "gravity/turn-7".to_string(),
+            scope: Scope::Turn,
+            source: JobSource::Ops {
+                ops: vec![Op {
+                    call: call("runner/execute"),
+                    needs: Need::default(),
+                    on_error: OnError::default(),
+                }],
+            },
+            resources: Vec::new(),
+            placement: Placement::Any,
+            attachments: vec![Attachment {
+                name: "boothset".to_string(),
+                media: "application/cbor".to_string(),
+                // Not valid UTF-8 on purpose: a definition is bytes, and a codec that assumed
+                // text would corrupt it rather than fail.
+                bytes: vec![0xa1, 0x00, 0xff, 0x02],
+            }],
+        }
+    }
+
+    #[test]
+    fn an_attachment_survives_both_codecs_unchanged() {
+        let job = with_attachment();
+        let text = serde_json::to_string(&job).expect("json");
+        let back: Job = serde_json::from_str(&text).expect("json back");
+        assert_eq!(
+            back.attachments, job.attachments,
+            "the payload is bytes in and bytes out, under JSON too"
+        );
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&job, &mut encoded).expect("cbor");
+        let back: Job = ciborium::de::from_reader(encoded.as_slice()).expect("cbor back");
+        assert_eq!(back.attachments, job.attachments, "CBOR carries it too");
+    }
+
+    #[test]
+    fn a_byte_payload_is_a_byte_string_in_cbor_and_an_array_in_json() {
+        // The two codecs' realities: CBOR has a byte string, JSON does not. `bytes_serde` writes
+        // `serialize_bytes` and accepts either form on the way back, which is why a leg that changed
+        // codec mid-flight still lands.
+        let payload = vec![0xde, 0xad, 0xbe, 0xef];
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&Payload(payload.clone()), &mut encoded).expect("cbor");
+        let value: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).expect("cbor value");
+        // A newtype is transparent on the wire, so the encoded value IS the payload: a byte
+        // string, one header plus four bytes.
+        assert_eq!(
+            value,
+            ciborium::value::Value::Bytes(payload.clone()),
+            "four bytes must cost four bytes, not four integers"
+        );
+
+        let text = serde_json::to_string(&Payload(payload.clone())).expect("json");
+        assert!(text.contains("222,173,190,239"), "JSON's only spelling is a number array: {text}");
+        let back: Payload = serde_json::from_str(&text).expect("json back");
+        assert_eq!(back.0, payload);
+    }
+
+    #[test]
+    fn a_job_without_attachments_says_nothing_and_still_decodes() {
+        let job = Job {
+            id: "job-2".to_string(),
+            booth: "gravity/turn-8".to_string(),
+            scope: Scope::Turn,
+            source: JobSource::Ops {
+                ops: vec![Op {
+                    call: call("runner/execute"),
+                    needs: Need::default(),
+                    on_error: OnError::default(),
+                }],
+            },
+            resources: Vec::new(),
+            placement: Placement::Any,
+            attachments: Vec::new(),
+        };
+        let text = serde_json::to_string(&job).expect("json");
+        assert!(
+            !text.contains("attachments"),
+            "an empty attachment list is not written: {text}"
+        );
+        // The other direction matters more: a frame minted before this field existed must still
+        // decode, which is what `#[serde(default)]` buys and why the field is additive.
+        let older = text.replace("\"placement\":\"any\"", "\"placement\":\"any\"");
+        let back: Job = serde_json::from_str(&older).expect("an older frame decodes");
+        assert!(back.attachments.is_empty());
+    }
+
+    /// A newtype so `bytes_serde` can be exercised on its own.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct Payload(#[serde(with = "crate::bytes_serde")] Vec<u8>);
 }

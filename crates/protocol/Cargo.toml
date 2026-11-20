@@ -19,6 +19,9 @@ induction-protocol = { path = "../../../induction/crates/induction-protocol" }
 # The contract test asserts the node's declaration defaults; the protocol itself
 # names no config type (the ordering claim is that frames do not depend on config).
 effector-config = { path = "../config" }
+# The attachment claim is a claim about BOTH codecs: a byte string in CBOR (one header, not one
+# integer per byte), an array in JSON (the only spelling it has).
+ciborium = "0.2"
 
 [lints]
 workspace = true
