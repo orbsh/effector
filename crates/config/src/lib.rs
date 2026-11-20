@@ -46,6 +46,12 @@ pub struct CapabilitySurface {
     /// `executor` (the opaque name of one execution unit) and `entry` (entry point in the
     /// delivered code) fields.
     pub node_alias: String,
+    /// The machine's identity, stated by the deployment: SMBIOS UUID, product serial, asset tag.
+    ///
+    /// `None` means "read the box": the runtime asks the platform for its own serial and reports
+    /// that. Stated explicitly it wins, because a container's `/sys` is the host's or nobody's,
+    /// and an operator running twelve nodes is the one who knows which box each of them is on.
+    pub machine: Option<String>,
 }
 
 /// Effector startup configuration (Phase 3): where to register and what to claim.
@@ -222,6 +228,7 @@ mod tests {
         CapabilitySurface {
             node_alias: "n1".into(),
             carriers: vec!["exec".into()],
+            machine: None,
         }
     }
 

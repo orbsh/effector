@@ -52,9 +52,12 @@ async fn fake_control_plane(listener: TcpListener, code: CodeRef) {
             node_alias,
             carriers,
             class,
+            machine,
         } => {
             assert_eq!(node_alias, "test-node");
             assert!(carriers.contains(&"steel".to_string()));
+            // The deployment stated it, so the node reports it (effector ADR-0006).
+            assert_eq!(machine, "box-7");
             assert_eq!(
                 class,
                 effector_protocol::NodeClass::Host,
@@ -134,6 +137,7 @@ async fn outbound_registration_and_task_downlink() {
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "test-node".into(),
+            machine: Some("box-7".into()),
         },
         lease: Default::default(),
     };
@@ -321,6 +325,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
             // non-`none` value is a startup error now — effector ADR-0001 —
             // so this test, which is about content-addressed code and not
             // about the network, declares the enforceable thing.
+            machine: None,
         },
         lease: Default::default(),
     };
@@ -346,6 +351,7 @@ async fn a_claim_the_machine_cannot_back_fails_before_dialing() {
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "refusing-node".into(),
+            machine: None,
         },
         lease: Default::default(),
     };
@@ -376,6 +382,7 @@ async fn a_leased_node_leaves_when_the_work_stops() {
         capabilities: CapabilitySurface {
             node_alias: "leased-node".into(),
             carriers: vec!["steel".into()],
+            machine: None,
         },
         lease: effector_config::LeaseConfig {
             idle_secs: 1,
@@ -447,6 +454,7 @@ async fn a_plane_that_accepts_and_goes_silent_ends_a_leased_node() {
         capabilities: CapabilitySurface {
             node_alias: "silent-plane-node".into(),
             carriers: vec!["steel".into()],
+            machine: None,
         },
         lease: effector_config::LeaseConfig {
             idle_secs: 1,

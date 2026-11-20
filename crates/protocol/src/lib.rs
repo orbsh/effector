@@ -220,6 +220,18 @@ pub enum Frame {
         /// a node that does not say it is a container is treated as one that is not.
         #[serde(default)]
         class: NodeClass,
+        /// Which BOX this is (effector ADR-0006): the machine's own serial — SMBIOS UUID or
+        /// product serial where the platform offers one, the deployment's word where it does not.
+        /// Empty means the node could not be identified, which is a fact and not an error.
+        ///
+        /// Self-reported, and that is consistent rather than lax: this value authorizes nothing.
+        /// The alias can be reclaimed and renamed and means only "the name this connection
+        /// answers to"; the machine is the box a caller's history belongs to, and a node that
+        /// lied about it would be naming somebody else's hardware — a claim about itself, not a
+        /// claim on another's privilege. Labels, which DO carry privilege, never travel here
+        /// (ADR-0005 §2b).
+        #[serde(default)]
+        machine: String,
     },
     /// Control plane to effector: a `Register` was accepted.
     Registered,

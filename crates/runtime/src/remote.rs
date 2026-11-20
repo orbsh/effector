@@ -59,6 +59,9 @@ async fn serve_connection(
         // What contains this node (ADR-0003 §10). A call that NEEDS a container is refused by a
         // host node in words — see `execute_call_inner`.
         class: node_class(config),
+        // Which box this is (effector ADR-0006). Stated by the deployment if it said so,
+        // otherwise read from the platform; empty means unidentified.
+        machine: machine_identity(config),
     };
     sink.send(Message::Text(serde_json::to_string(&register)?))
         .await?;
@@ -871,6 +874,9 @@ pub async fn register_once(config: &EffectorConfig) -> Result<()> {
         // What contains this node (ADR-0003 §10). A call that NEEDS a container is refused by a
         // host node in words — see `execute_call_inner`.
         class: node_class(config),
+        // Which box this is (effector ADR-0006). Stated by the deployment if it said so,
+        // otherwise read from the platform; empty means unidentified.
+        machine: machine_identity(config),
     };
     ws.send(Message::Text(serde_json::to_string(&register)?))
         .await?;
@@ -904,6 +910,139 @@ fn class_refusal(config: &EffectorConfig, call: &ToolCall) -> Option<String> {
 }
 
 /// The node's declared class, as the wire spells it. One conversion, at the dialect boundary.
+/// Which box this is: stated, read off the hardware, or minted once and kept.
+///
+/// In order, and each step answers a different situation:
+///
+/// 1. The deployment said so (`capabilities.machine`). It wins, because an operator running
+///    twelve nodes is the one who knows which box each of them is on, and a container's
+///    `/sys` is the host's or nobody's.
+/// 2. The hardware's own serial, where the platform parts with one (SMBIOS UUID first —
+///    it is the machine's identity, not the mainboard's). A container usually sees the
+///    host's DMI, which is exactly right for "which box is this".
+/// 3. Minted once and kept in the node's state directory (`$EFFECTOR_STATE_DIR`, else
+///    `$XDG_STATE_HOME/effector`, else `~/.local/state/effector`). This is the case for a
+///    VM, a jail with `/sys` hidden, an SBC with no DMI: there is no serial to read, and a
+///    node that reported nothing would be a node whose history restarts every time it
+///    reconnects. Writing the id down is what makes it stable.
+/// 4. None of that is possible (no state directory either) → empty, which the plane reads as
+///    unidentified. Deliberately NOT `/etc/machine-id`: that is the OS installation's
+///    identity, it resets on reinstall, and borrowing it would put the node's identity
+///    under somebody else's lifecycle.
+///
+/// Self-reported throughout, and that is consistent rather than lax: this value authorizes
+/// nothing (effector ADR-0006). Labels, which do carry privilege, never travel here.
+fn machine_identity(config: &EffectorConfig) -> String {
+    if let Some(machine) = &config.capabilities.machine {
+        return machine.clone();
+    }
+    if let Some(serial) = hardware_serial() {
+        return serial;
+    }
+    minted_machine_id().unwrap_or_default()
+}
+
+/// The platform's own serial for this box, if it will say.
+fn hardware_serial() -> Option<String> {
+    for path in [
+        "/sys/class/dmi/id/product_uuid",
+        "/sys/devices/virtual/dmi/id/product_uuid",
+        "/sys/class/dmi/id/product_serial",
+        "/sys/class/dmi/id/board_serial",
+        "/proc/device-tree/serial-number",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let serial = text.trim().trim_end_matches('\0').trim();
+            if !serial.is_empty() {
+                return Some(serial.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Where this node keeps the little it must remember between runs.
+fn state_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("EFFECTOR_STATE_DIR") {
+        if !dir.is_empty() {
+            return Some(std::path::PathBuf::from(dir));
+        }
+    }
+    if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
+        if !dir.is_empty() {
+            return Some(std::path::PathBuf::from(dir).join("effector"));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("effector"),
+    )
+}
+
+/// The machine id this node was given the first time it ran, minted if this is that time.
+///
+/// `create_new` is the race: two nodes starting together on one box both try to create the
+/// file, exactly one succeeds, and the loser reads the winner's id instead of overwriting it.
+fn minted_machine_id() -> Option<String> {
+    minted_machine_id_in(&state_dir()?)
+}
+
+/// The file's rules, given where it lives — so the rules can be tested without a HOME.
+fn minted_machine_id_in(dir: &std::path::Path) -> Option<String> {
+    let path = dir.join("machine-id");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let id = text.trim().to_string();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    let fresh = random_hex_16()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(fresh.as_bytes()).ok()?;
+            Some(fresh)
+        }
+        // Lost the race: the other process wrote the id this box will use.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let text = std::fs::read_to_string(&path).ok()?;
+            let id = text.trim().to_string();
+            if id.is_empty() {
+                None
+            } else {
+                Some(id)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// 16 bytes from the kernel's entropy pool, hex — an id, not a secret, so no crypto review
+/// is owed to it; `/dev/urandom` is simply the source that is always there.
+fn random_hex_16() -> Option<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn node_class(config: &EffectorConfig) -> effector_protocol::NodeClass {
     match config.class {
         effector_config::Class::Host => effector_protocol::NodeClass::Host,
@@ -1039,4 +1178,56 @@ mod tests {
         assert!(class_refusal(&inside, &call_requiring(effector_protocol::NodeClass::Host)).is_none());
     }
 
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("effector-machine-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_minted_id_is_written_once_and_read_back_unchanged() {
+        let dir = scratch("once");
+        let first = minted_machine_id_in(&dir).expect("a fresh state directory yields an id");
+        assert_eq!(first.len(), 32, "16 bytes of hex: {first}");
+        let second = minted_machine_id_in(&dir).expect("the second run reads it");
+        assert_eq!(first, second, "the id is the node's, not the run's");
+        let on_disk = std::fs::read_to_string(dir.join("machine-id")).unwrap();
+        assert_eq!(on_disk.trim(), first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_id_already_on_disk_is_never_overwritten() {
+        let dir = scratch("kept");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("machine-id"), "box-7\n").unwrap();
+        assert_eq!(minted_machine_id_in(&dir).as_deref(), Some("box-7"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("machine-id")).unwrap(),
+            "box-7\n",
+            "a file that already answers must not be rewritten"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stated_machine_wins_and_an_empty_one_falls_through_to_the_source() {
+        let mut config: EffectorConfig = serde_json::from_value(serde_json::json!({
+            "control_plane_url": "ws://127.0.0.1:1",
+            "token": "t",
+            "capabilities": { "node_alias": "n", "carriers": ["steel"], "machine": "asset-4471" }
+        }))
+        .unwrap();
+        assert_eq!(machine_identity(&config), "asset-4471");
+        config.capabilities.machine = None;
+        // No DMI on a great many boxes; the chain then falls through to a minted id or "".
+        // What must never happen is a panic or a borrowed OS identity.
+        let _ = machine_identity(&config);
+    }
 }
