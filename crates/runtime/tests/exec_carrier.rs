@@ -51,13 +51,9 @@ fn induction_call_round_trip() {
     let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_executor(
-            "box/k1",
-            "induction",
-            &argv,
-            None,
-            |sess| sess.call("echo", &json!({"x": 1})),
-        )
+        .with_executor("box/k1", "induction", &argv, None, |sess| {
+            sess.call("echo", &json!({"x": 1}))
+        })
         .unwrap();
     assert_eq!(out, json!({"echoed": {"x": 1}}));
 
@@ -65,13 +61,9 @@ fn induction_call_round_trip() {
     // re-spawned, the stream guard state below would never work — and
     // here, the same executor key must not have been evicted.
     let out2 = s
-        .with_executor(
-            "box/k1",
-            "induction",
-            &argv,
-            None,
-            |sess| sess.call("echo", &json!({"y": 2})),
-        )
+        .with_executor("box/k1", "induction", &argv, None, |sess| {
+            sess.call("echo", &json!({"y": 2}))
+        })
         .unwrap();
     assert_eq!(out2, json!({"echoed": {"y": 2}}));
 }
@@ -98,18 +90,12 @@ fn induction_host_call_crosses_the_seam() {
     let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_executor(
-            "box/k2",
-            "induction",
-            &argv,
-            Some(&bridge),
-            |sess| {
-                sess.call(
-                    "ctx_round_trip",
-                    &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}}),
-                )
-            },
-        )
+        .with_executor("box/k2", "induction", &argv, Some(&bridge), |sess| {
+            sess.call(
+                "ctx_round_trip",
+                &json!({"type": "t", "key": "k", "handler": "h", "args": {"q": 1}}),
+            )
+        })
         .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1, "the host fn ran once");
     assert_eq!(
@@ -130,13 +116,9 @@ fn induction_iterate_stream() {
     // (the registry keys residency; the guard state lives in the
     // child's memory across the calls, exactly like a executor VM).
     let pull = |op: StreamOp| -> Value {
-        s.with_executor(
-            "box/k3",
-            "induction",
-            &argv,
-            None,
-            move |sess| sess.iterate(op.clone()),
-        )
+        s.with_executor("box/k3", "induction", &argv, None, move |sess| {
+            sess.iterate(op.clone())
+        })
         .unwrap()
     };
     let mut envs = vec![pull(StreamOp::Start {
@@ -172,19 +154,13 @@ fn induction_iterate_stream() {
     // Pull-after-done: the child's guard is gone — a failed pull (an
     // error value through the stream), never a resurrection.
     let late = s
-        .with_executor(
-            "box/k3",
-            "induction",
-            &argv,
-            None,
-            |sess| {
-                sess.iterate(StreamOp::Next {
-                    stream_id: "s1".into(),
-                    handler: "count".into(),
-                    args: json!({}),
-                })
-            },
-        )
+        .with_executor("box/k3", "induction", &argv, None, |sess| {
+            sess.iterate(StreamOp::Next {
+                stream_id: "s1".into(),
+                handler: "count".into(),
+                args: json!({}),
+            })
+        })
         .unwrap_err()
         .to_string();
     assert!(
@@ -203,13 +179,9 @@ fn exec_oneshot_runs_per_call() {
     let s = executors();
     let argv = one_shot_bin();
     let call = |v: Value| {
-        s.with_executor(
-            "box/b1",
-            "exec",
-            &argv,
-            None,
-            move |sess| sess.call("echo", &v),
-        )
+        s.with_executor("box/b1", "exec", &argv, None, move |sess| {
+            sess.call("echo", &v)
+        })
         .unwrap()
     };
     assert_eq!(call(json!({"n": 1})), json!({"echoed": {"n": 1}}));
@@ -229,31 +201,25 @@ fn exec_oneshot_runs_per_call() {
 fn exec_oneshot_iterate_is_a_named_error() {
     let s = executors();
     let argv = one_shot_bin();
-    let r = s.with_executor(
-        "box/b2",
-        "exec",
-        &argv,
-        None,
-        |sess| {
-            let start = sess.iterate(StreamOp::Start {
-                stream_id: "s1".into(),
-                handler: "count".into(),
-                args: json!({"total": 2}),
-            })?;
-            // Start answers the terminal invoke envelope...
-            assert_eq!(
-                start.get("done").and_then(|d| d.as_bool()),
-                Some(true),
-                "a one-shot Start is terminal (invoke shape): {start}"
-            );
-            // ...and the stream verb after it names the design.
-            sess.iterate(StreamOp::Next {
-                stream_id: "s1".into(),
-                handler: "count".into(),
-                args: json!({}),
-            })
-        },
-    );
+    let r = s.with_executor("box/b2", "exec", &argv, None, |sess| {
+        let start = sess.iterate(StreamOp::Start {
+            stream_id: "s1".into(),
+            handler: "count".into(),
+            args: json!({"total": 2}),
+        })?;
+        // Start answers the terminal invoke envelope...
+        assert_eq!(
+            start.get("done").and_then(|d| d.as_bool()),
+            Some(true),
+            "a one-shot Start is terminal (invoke shape): {start}"
+        );
+        // ...and the stream verb after it names the design.
+        sess.iterate(StreamOp::Next {
+            stream_id: "s1".into(),
+            handler: "count".into(),
+            args: json!({}),
+        })
+    });
     let err = r.unwrap_err().to_string();
     assert!(
         err.contains("stateless by definition") && err.contains("induction"),
@@ -269,30 +235,20 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
     let s = executors();
     let argv = induction_bin();
     // Spawn + one call.
-    s.with_executor(
-        "box/k4",
-        "induction",
-        &argv,
-        None,
-        |sess| sess.call("echo", &json!(1)),
-    )
+    s.with_executor("box/k4", "induction", &argv, None, |sess| {
+        sess.call("echo", &json!(1))
+    })
     .unwrap();
 
     // Kill the child behind the registry's back (simulates a crash):
     // sweep_dead finds it and drops the slot (which reaps + releases).
     let pid = s
-        .with_executor(
-            "box/k4",
-            "induction",
-            &argv,
-            None,
-            |sess| {
-                sess.as_any()
-                    .downcast_mut::<effector_runtime::carrier::exec::InductionExecutor>()
-                    .and_then(|e| e.child_pid().map(|p| json!({ "pid": p })))
-                    .ok_or_else(|| anyhow::anyhow!("not a InductionExecutor"))
-            },
-        )
+        .with_executor("box/k4", "induction", &argv, None, |sess| {
+            sess.as_any()
+                .downcast_mut::<effector_runtime::carrier::exec::InductionExecutor>()
+                .and_then(|e| e.child_pid().map(|p| json!({ "pid": p })))
+                .ok_or_else(|| anyhow::anyhow!("not a InductionExecutor"))
+        })
         .unwrap()["pid"]
         .as_u64()
         .unwrap() as i32;
@@ -313,13 +269,9 @@ fn eviction_ends_the_residency_and_sweep_clears_the_dead() {
         "the dead slot is swept: {swept:?}"
     );
     let out = s
-        .with_executor(
-            "box/k4",
-            "induction",
-            &argv,
-            None,
-            |sess| sess.call("echo", &json!("after respawn")),
-        )
+        .with_executor("box/k4", "induction", &argv, None, |sess| {
+            sess.call("echo", &json!("after respawn"))
+        })
         .unwrap();
     assert_eq!(out, json!({"echoed": "after respawn"}));
 }
@@ -351,7 +303,11 @@ fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
             },
         )
         .unwrap();
-    assert_eq!(out["value"], json!({"echoed": {"n": 1}}), "the one frame ran: {out}");
+    assert_eq!(
+        out["value"],
+        json!({"echoed": {"n": 1}}),
+        "the one frame ran: {out}"
+    );
     assert!(
         s.sweep_dead().is_empty(),
         "a live unbounded executor is not a dead slot"
@@ -360,13 +316,9 @@ fn a_shared_executor_survives_the_sweep_while_its_child_lives() {
     // ONE instance, ONE process: a queued call on the same key must refuse rather
     // than open a slot executor beside the shared one.
     let refused = s
-        .with_executor(
-            "box/k5",
-            "induction",
-            &argv,
-            None,
-            |sess| sess.call("echo", &json!(0)),
-        )
+        .with_executor("box/k5", "induction", &argv, None, |sess| {
+            sess.call("echo", &json!(0))
+        })
         .unwrap_err()
         .to_string();
     assert!(
@@ -522,13 +474,9 @@ fn nu_induction_call_round_trip_and_residency() {
     let s = executors();
     let spec = nu_induction_spec();
     let call = |event: &str, args: Value| {
-        s.with_executor(
-            "box/nu1",
-            "induction",
-            &spec,
-            None,
-            move |sess| sess.call(event, &args),
-        )
+        s.with_executor("box/nu1", "induction", &spec, None, move |sess| {
+            sess.call(event, &args)
+        })
         .unwrap()
     };
     assert_eq!(call("echo", json!({"a": 1})), json!({"echoed": {"a": 1}}));
@@ -602,13 +550,9 @@ fn nu_induction_iterate_stream() {
     let s = executors();
     let spec = nu_induction_spec();
     let pull = |op: StreamOp| -> Value {
-        s.with_executor(
-            "box/nu3",
-            "induction",
-            &spec,
-            None,
-            move |sess| sess.iterate(op.clone()),
-        )
+        s.with_executor("box/nu3", "induction", &spec, None, move |sess| {
+            sess.iterate(op.clone())
+        })
         .unwrap()
     };
     let mut envs = vec![pull(StreamOp::Start {
@@ -645,37 +589,30 @@ fn nu_induction_iterate_stream() {
 fn nu_induction_eviction_reaps_the_child_and_clears_the_dir() {
     let s = executors();
     let spec = nu_induction_spec();
-    s.with_executor(
-        "box/nu4",
-        "induction",
-        &spec,
-        None,
-        |sess| sess.call("echo", &json!("x")),
-    )
+    s.with_executor("box/nu4", "induction", &spec, None, |sess| {
+        sess.call("echo", &json!("x"))
+    })
     .unwrap();
     let got = s
-        .with_executor(
-            "box/nu4",
-            "induction",
-            &spec,
-            None,
-            |sess| {
-                let b = sess
-                    .as_any()
-                    .downcast_mut::<effector_runtime::carrier::exec::InductionExecutor>()
-                    .ok_or_else(|| anyhow::anyhow!("not a InductionExecutor"))?;
-                let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
-                let dir = b
-                    .executor_dir()
-                    .ok_or_else(|| anyhow::anyhow!("no executor dir"))?
-                    .to_path_buf();
-                Ok(json!({"pid": pid, "dir": dir.display().to_string()}))
-            },
-        )
+        .with_executor("box/nu4", "induction", &spec, None, |sess| {
+            let b = sess
+                .as_any()
+                .downcast_mut::<effector_runtime::carrier::exec::InductionExecutor>()
+                .ok_or_else(|| anyhow::anyhow!("not a InductionExecutor"))?;
+            let pid = b.child_pid().ok_or_else(|| anyhow::anyhow!("no child"))?;
+            let dir = b
+                .executor_dir()
+                .ok_or_else(|| anyhow::anyhow!("no executor dir"))?
+                .to_path_buf();
+            Ok(json!({"pid": pid, "dir": dir.display().to_string()}))
+        })
         .unwrap();
     let pid = got["pid"].as_u64().unwrap() as i32;
     let dir = PathBuf::from(got["dir"].as_str().unwrap());
-    assert!(dir.exists(), "the executor dir exists while the child lives");
+    assert!(
+        dir.exists(),
+        "the executor dir exists while the child lives"
+    );
 
     s.evict("box/nu4");
     // Reaped: the pid is gone (ESRCH) — poll for the kernel's delivery.
@@ -808,12 +745,14 @@ fn induction_cbor_byte_payload_reaches_a_bytes_host_unchanged() {
     let bridge = {
         let seen = seen.clone();
         let mut b = HostBridge::default();
-        b.emit_bytes = Some(Arc::new(move |event: &str, data: &Value, bytes: &FrameBytes| {
-            seen.lock()
-                .unwrap()
-                .push((event.to_string(), data.clone(), bytes.clone()));
-            Ok(Value::Null)
-        }));
+        b.emit_bytes = Some(Arc::new(
+            move |event: &str, data: &Value, bytes: &FrameBytes| {
+                seen.lock()
+                    .unwrap()
+                    .push((event.to_string(), data.clone(), bytes.clone()));
+                Ok(Value::Null)
+            },
+        ));
         b
     };
     let s = executors();
@@ -834,7 +773,10 @@ fn induction_cbor_byte_payload_reaches_a_bytes_host_unchanged() {
     assert_eq!(seen.len(), 1, "one emit frame: {seen:?}");
     let (event, data, bytes) = &seen[0];
     assert_eq!(event, "ui:bytes");
-    assert_eq!(bytes.bytes, payload, "the bytes cross the carrier unchanged");
+    assert_eq!(
+        bytes.bytes, payload,
+        "the bytes cross the carrier unchanged"
+    );
     assert_eq!(
         bytes.path,
         vec![
@@ -878,7 +820,10 @@ fn a_host_without_the_byte_seam_sees_todays_frame_on_both_codecs() {
     };
     let s = executors();
     let argv = induction_bin();
-    for (slot, encoding) in [("box/bytes-json", Encoding::Json), ("box/bytes-cbor", Encoding::Cbor)] {
+    for (slot, encoding) in [
+        ("box/bytes-json", Encoding::Json),
+        ("box/bytes-cbor", Encoding::Cbor),
+    ] {
         s.with_executor_encoded(slot, "induction", &argv, Some(&bridge), encoding, |sess| {
             sess.call("bytes_emit", &json!({ "bytes": payload }))
         })
@@ -923,13 +868,9 @@ fn induction_untyped_host_frame_fails_at_decode() {
     let s = executors();
     let argv = induction_bin();
     let out = s
-        .with_executor(
-            "box/untyped",
-            "induction",
-            &argv,
-            Some(&bridge),
-            |sess| sess.call("bad_host_frame", &json!({"q": 1})),
-        )
+        .with_executor("box/untyped", "induction", &argv, Some(&bridge), |sess| {
+            sess.call("bad_host_frame", &json!({"q": 1}))
+        })
         .unwrap();
     assert!(
         seen.lock().unwrap().is_empty(),
@@ -1034,24 +975,16 @@ fn induction_executor_rearms_the_bridge_per_call() {
     let args = json!({ "type": "t", "key": "k", "handler": "h", "args": { "q": 1 } });
     let b1 = recording_bridge(&first, "first");
     let out1 = s
-        .with_executor(
-            "box/bridge-clock",
-            "induction",
-            &argv,
-            Some(&b1),
-            |sess| sess.call("ctx_round_trip", &args),
-        )
+        .with_executor("box/bridge-clock", "induction", &argv, Some(&b1), |sess| {
+            sess.call("ctx_round_trip", &args)
+        })
         .unwrap();
     assert_eq!(out1["answered_by"], "first");
     let b2 = recording_bridge(&second, "second");
     let out2 = s
-        .with_executor(
-            "box/bridge-clock",
-            "induction",
-            &argv,
-            Some(&b2),
-            |sess| sess.call("ctx_round_trip", &args),
-        )
+        .with_executor("box/bridge-clock", "induction", &argv, Some(&b2), |sess| {
+            sess.call("ctx_round_trip", &args)
+        })
         .unwrap();
     assert_eq!(
         out2["answered_by"], "second",
@@ -1129,24 +1062,21 @@ fn an_interrupt_releases_the_wait_and_reaches_the_guest() {
     let arm = control.clone();
     let fire = control.clone();
     let started = std::time::Instant::now();
-    let out = s.with_executor(
-        "box/interrupt",
-        "induction",
-        &argv,
-        None,
-        move |sess| {
-            sess.arm_interrupt(&arm);
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                assert!(fire.interrupt(), "the guest carrier can be told");
-            });
-            sess.call("wait", &json!({}))
-        },
-    );
+    let out = s.with_executor("box/interrupt", "induction", &argv, None, move |sess| {
+        sess.arm_interrupt(&arm);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert!(fire.interrupt(), "the guest carrier can be told");
+        });
+        sess.call("wait", &json!({}))
+    });
 
     // The caller is released with an error — the work is not "answered", it is
     // abandoned, and the terminal value belongs to the control plane that asked.
-    assert!(out.is_err(), "the wait ended by interrupt, not by answer: {out:?}");
+    assert!(
+        out.is_err(),
+        "the wait ended by interrupt, not by answer: {out:?}"
+    );
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "released by the interrupt, not by the guest's own clock: {:?}",

@@ -101,7 +101,12 @@ fn run_json() {
                 .args
                 .get("bytes")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(Value::as_u64).map(|b| b as u8).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|b| b as u8)
+                        .collect()
+                })
                 .unwrap_or_default();
             emit_json(&serde_json::json!({
                 "host": {
@@ -175,11 +180,15 @@ fn run_cbor() {
                 .args
                 .get("bytes")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(Value::as_u64).map(|b| b as u8).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|b| b as u8)
+                        .collect()
+                })
                 .unwrap_or_default();
             let mut out = std::io::stdout();
-            ciborium::ser::into_writer(&byte_emit_frame(&payload), &mut out)
-                .expect("cbor encode");
+            ciborium::ser::into_writer(&byte_emit_frame(&payload), &mut out).expect("cbor encode");
             out.flush().unwrap();
             let mut out = std::io::stdout();
             ciborium::ser::into_writer(

@@ -19,7 +19,11 @@ use std::time::{Duration, Instant};
 fn guest() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../deploy/runners/runner_py_guest.py");
-    assert!(path.exists(), "the python guest is gone: {}", path.display());
+    assert!(
+        path.exists(),
+        "the python guest is gone: {}",
+        path.display()
+    );
     format!("python3 {}", path.display())
 }
 
@@ -52,7 +56,9 @@ fn two_python_requests_run_at_once_in_one_process() {
                     &argv,
                     induction_protocol::Encoding::Json,
                     None,
-                    |shared| shared.iterate(run(code, json!({ "n": n }), &format!("s{n}")), None, None),
+                    |shared| {
+                        shared.iterate(run(code, json!({ "n": n }), &format!("s{n}")), None, None)
+                    },
                 )
                 .unwrap()
         }));
@@ -99,7 +105,13 @@ fn a_ctx_call_is_answered_by_its_own_requests_bridge() {
                     &argv,
                     induction_protocol::Encoding::Json,
                     Some(&bridge),
-                    |shared| shared.iterate(run(code, json!({}), &format!("s{tag}")), Some(&bridge), None),
+                    |shared| {
+                        shared.iterate(
+                            run(code, json!({}), &format!("s{tag}")),
+                            Some(&bridge),
+                            None,
+                        )
+                    },
                 )
                 .unwrap()
         }));

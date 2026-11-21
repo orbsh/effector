@@ -59,9 +59,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::{mpsc, Arc, Mutex};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
 
 // ----------------------------------------------------------- frames --
 
@@ -130,7 +130,10 @@ struct Shared {
 /// the nu adapter — two readers on one fifo race, measured (ADR-0035 §8).
 enum Out {
     Pipes(ChildStdin),
-    Fifo { req: PathBuf, rep: PathBuf },
+    Fifo {
+        req: PathBuf,
+        rep: PathBuf,
+    },
     /// Torn down: the writer is gone, so every further frame is that error
     /// rather than a guess at a half-closed channel.
     Closed,
@@ -178,9 +181,8 @@ impl Shared {
         match &mut *out {
             Out::Pipes(stdin) => {
                 match self.encoding {
-                    Encoding::Json => writeln!(stdin, "{frame}").map_err(|e| {
-                        anyhow!("induction carrier: write frame: {e}")
-                    })?,
+                    Encoding::Json => writeln!(stdin, "{frame}")
+                        .map_err(|e| anyhow!("induction carrier: write frame: {e}"))?,
                     Encoding::Cbor => ciborium::ser::into_writer(frame, &mut *stdin)
                         .map_err(|e| anyhow!("induction carrier: write cbor frame: {e}"))?,
                 }
@@ -358,7 +360,8 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
                 match reader.read_line(&mut line) {
                     Ok(0) => {
                         shared.fail(
-                            "induction carrier: child closed stdout (exited or crashed)".to_string(),
+                            "induction carrier: child closed stdout (exited or crashed)"
+                                .to_string(),
                         );
                         return;
                     }
@@ -375,9 +378,7 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
                 match serde_json::from_str(trimmed) {
                     Ok(v) => (v, None),
                     Err(e) => {
-                        shared.fail(format!(
-                            "induction carrier: malformed frame {trimmed}: {e}"
-                        ));
+                        shared.fail(format!("induction carrier: malformed frame {trimmed}: {e}"));
                         return;
                     }
                 }
@@ -412,7 +413,9 @@ fn read_loop(shared: Arc<Shared>, mut reader: BufReader<std::process::ChildStdou
                 return;
             }
             let Some(id) = result.id.as_u64() else {
-                shared.fail(format!("induction carrier: result without a request id: {msg}"));
+                shared.fail(format!(
+                    "induction carrier: result without a request id: {msg}"
+                ));
                 return;
             };
             let waiter = shared
@@ -600,10 +603,8 @@ impl InductionExecutor {
         // is visible to the child by construction (the old jail could not see it, which is the only
         // reason this used to follow a policy cwd).
         let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "effector-induction-nu-{}-{id}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("effector-induction-nu-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
         let req = dir.join("req");
         let rep = dir.join("rep");
@@ -708,7 +709,6 @@ impl InductionExecutor {
             .fail("induction carrier: executor torn down".to_string());
     }
 }
-
 
 /// Write one line to a fifo with a fresh writer fd, close (EOF) after —
 /// the per-batch writer-close discipline the child's read wakes on.
@@ -920,8 +920,7 @@ impl ExecOneShot {
         args: &Value,
         control: Option<&crate::carrier::CallControl>,
     ) -> Result<Value> {
-        let (child, mut stdin, mut stdout) =
-            spawn_child(&self.argv, self.encoding)?;
+        let (child, mut stdin, mut stdout) = spawn_child(&self.argv, self.encoding)?;
         // THE CHILD IS THE WORK HERE (ADR-0047 stage two, the kill-shaped carrier): it
         // has no in-band channel to be told anything, and a script mid-run would not
         // read one. So the handle that can reach it is its pid — the strongest form of
@@ -1155,7 +1154,9 @@ impl induction_host::HostOps for BridgeOps<'_> {
         bytes: &induction_protocol::FrameBytes,
     ) -> Result<(), String> {
         if let Some(f) = &self.bridge.emit_bytes {
-            return (f)(event, data, bytes).map(|_| ()).map_err(|e| e.to_string());
+            return (f)(event, data, bytes)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
         }
         let mut data = data.clone();
         if !bytes.embed(&mut data) {
@@ -1183,8 +1184,8 @@ impl induction_host::HostOps for BridgeOps<'_> {
         // node's own bridge: the transfer happens here, and the script gets a path.
         let f = self.bridge.functions.get("resource").cloned();
         Box::pin(async move {
-            let f = f
-                .ok_or_else(|| "induction carrier: host fn 'resource' not bridged".to_string())?;
+            let f =
+                f.ok_or_else(|| "induction carrier: host fn 'resource' not bridged".to_string())?;
             (f)(op.clone()).map_err(|e| e.to_string())
         })
     }

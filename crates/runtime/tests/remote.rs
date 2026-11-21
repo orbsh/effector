@@ -133,7 +133,7 @@ async fn outbound_registration_and_task_downlink() {
     let config = EffectorConfig {
         class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{port}"),
-                token: TOKEN.into(),
+        token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "test-node".into(),
@@ -316,7 +316,7 @@ async fn code_ref_fetch_verify_cache_and_mismatch_rejection() {
     let config = EffectorConfig {
         class: effector_config::Class::Host,
         control_plane_url: format!("ws://127.0.0.1:{ws_port}"),
-                token: TOKEN.into(),
+        token: TOKEN.into(),
         capabilities: CapabilitySurface {
             carriers: vec!["steel".into()],
             node_alias: "link-node".into(),
@@ -490,4 +490,3 @@ async fn a_plane_that_accepts_and_goes_silent_ends_a_leased_node() {
     );
     drop(plane);
 }
-

@@ -60,9 +60,12 @@ fn an_object_goes_up_and_comes_back() {
     let path = resource::ensure(&spec, &material, &remote, None, root, None)
         .expect("an empty workspace, not a failure");
     std::fs::write(&path, b"effector was here").unwrap();
-    let reference =
-        resource::sync(&spec, &material, &remote, None, root, None).expect("the object is published");
-    assert!(!reference.is_empty(), "a publish answers with what it stored");
+    let reference = resource::sync(&spec, &material, &remote, None, root, None)
+        .expect("the object is published");
+    assert!(
+        !reference.is_empty(),
+        "a publish answers with what it stored"
+    );
     eprintln!("published {url} -> {reference}");
 
     // A read half in a clean directory: what comes down is what went up.
@@ -71,8 +74,8 @@ fn an_object_goes_up_and_comes_back() {
         mode: Mode::ReadOnly,
         ..spec
     };
-    let read_path =
-        resource::ensure(&read_spec, &material, &remote, None, other.path(), None).expect("fetched");
+    let read_path = resource::ensure(&read_spec, &material, &remote, None, other.path(), None)
+        .expect("fetched");
     assert_eq!(
         std::fs::read(read_path).unwrap(),
         b"effector was here",

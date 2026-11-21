@@ -55,6 +55,9 @@ def shell(args):
     println!("PY AUTH: {schema}");
     assert_eq!(schema["receives"]["ui:turn.submit"]["auth"], true);
     assert_eq!(schema["receives"]["ui:turn.submit"]["key"], "device");
-    assert!(schema["receives"]["ui:connect"].get("auth").is_none(), "{schema}");
+    assert!(
+        schema["receives"]["ui:connect"].get("auth").is_none(),
+        "{schema}"
+    );
     assert!(schema.get("auth").is_none(), "no second table: {schema}");
 }

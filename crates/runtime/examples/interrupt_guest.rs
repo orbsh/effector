@@ -8,7 +8,7 @@
 //! exercises the shipped path rather than a hand-written frame loop.
 
 use induction_guest::{Ctx, Guest};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {

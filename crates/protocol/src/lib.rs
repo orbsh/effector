@@ -130,7 +130,6 @@ pub struct CodeRef {
     pub sha256: String,
 }
 
-
 /// The Effector's answer, message-sized by discipline.
 ///
 /// Large artifacts never enter the control plane: the operation handles them
@@ -250,9 +249,7 @@ pub enum Frame {
     /// treats quiet as stuck kills a healthy clone the moment it is big enough to matter. The node
     /// therefore states the fact: throttled by the sender, addressed by `call_id`, carrying nothing
     /// (a rate is a measurement, and a measurement that nobody asked for is a second vocabulary).
-    Progress {
-        call_id: String,
-    },
+    Progress { call_id: String },
     /// Control plane to effector: stop waiting for this call (aura ADR-0047 stage
     /// two — the realm lifted an in-flight operation). Addressed by `call_id` because
     /// that is the only handle the control plane holds; the node answers with
@@ -394,7 +391,8 @@ pub struct HostResult {
 mod job;
 
 pub use job::{
-    Attachment, Job, JobSource, Mode, Need, OnError, Op, Placement, ResourceKind, ResourceReq, Scope,
+    Attachment, Job, JobSource, Mode, Need, OnError, Op, Placement, ResourceKind, ResourceReq,
+    Scope,
 };
 
 /// A byte payload that stays bytes.
@@ -485,10 +483,7 @@ pub mod resource {
     pub fn archive_credential(credential: &str) -> Result<ArchiveCredential<'_>> {
         let parts: Vec<&str> = credential.split(':').collect();
         match parts.as_slice() {
-            [password] if !password.is_empty() => Ok(ArchiveCredential {
-                s3: None,
-                password,
-            }),
+            [password] if !password.is_empty() => Ok(ArchiveCredential { s3: None, password }),
             [access, secret, region, password]
                 if !access.is_empty()
                     && !secret.is_empty()

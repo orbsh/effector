@@ -54,22 +54,10 @@ fn py_state_persists() {
         s.call("push", &serde_json::json!({"item": "book"}))
     };
     executors
-        .with_executor(
-            "i",
-            "python",
-            src,
-            host,
-            call,
-        )
+        .with_executor("i", "python", src, host, call)
         .unwrap();
     let out = executors
-        .with_executor(
-            "i",
-            "python",
-            src,
-            host,
-            call,
-        )
+        .with_executor("i", "python", src, host, call)
         .unwrap();
     assert_eq!(out, serde_json::json!(["book", "book"]));
 }

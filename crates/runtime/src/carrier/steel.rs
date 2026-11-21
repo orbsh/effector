@@ -271,7 +271,9 @@ fn collect_on(event: String, opts: SteelVal, handler: SteelVal) -> Result<SteelV
     }
     if event.starts_with("__") {
         if !RESERVED_HOOKS.contains(&event.as_str()) {
-            return Err(format!("`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"));
+            return Err(format!(
+                "`{event}` is not a reserved hook name (allowed: {RESERVED_HOOKS:?})"
+            ));
         }
         HOOKS.with(|h| {
             if !h.borrow().contains(&event) {

@@ -42,7 +42,10 @@ pub fn host_and_prefix(control_plane: &str) -> Result<(String, String), String> 
             "control plane `{control_plane}`: credentials do not belong in the URL"
         ));
     }
-    Ok((authority.to_string(), prefix.trim_end_matches('/').to_string()))
+    Ok((
+        authority.to_string(),
+        prefix.trim_end_matches('/').to_string(),
+    ))
 }
 
 /// The address the node dials: the same host and port, the mount path, over `ws://`.
@@ -64,8 +67,8 @@ pub fn mint_token(control_plane: &str, alias: &str) -> Result<Minted, String> {
         body.len()
     );
 
-    let mut stream = TcpStream::connect(&authority)
-        .map_err(|e| format!("control plane {authority}: {e}"))?;
+    let mut stream =
+        TcpStream::connect(&authority).map_err(|e| format!("control plane {authority}: {e}"))?;
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("control plane {authority}: {e}"))?;
@@ -166,7 +169,11 @@ mod tests {
 
     #[test]
     fn the_container_gets_no_token_on_its_command_line() {
-        let argv = docker_argv("img:tag", "ws://h:1/effector/a", &["--network".into(), "host".into()]);
+        let argv = docker_argv(
+            "img:tag",
+            "ws://h:1/effector/a",
+            &["--network".into(), "host".into()],
+        );
         assert_eq!(argv[..5], ["docker", "run", "--rm", "--init", "-i"]);
         assert_eq!(&argv[5], "--network");
         assert_eq!(&argv[6], "host");

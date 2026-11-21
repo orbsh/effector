@@ -264,10 +264,7 @@ struct Minted {
 }
 
 type PendingMaterial = std::sync::Mutex<
-    std::collections::HashMap<
-        String,
-        tokio::sync::oneshot::Sender<anyhow::Result<Minted>>,
-    >,
+    std::collections::HashMap<String, tokio::sync::oneshot::Sender<anyhow::Result<Minted>>>,
 >;
 
 /// What this node has materialised, by `kind/seq`. The directories are a cache with a known
@@ -449,27 +446,27 @@ async fn execute_call_inner(
                 // `Interrupted` frame then reports rather than hides.
                 s.arm_interrupt(&control);
                 match kind {
-                effector_protocol::CallKind::IterateStart => {
-                    s.iterate(crate::carrier::executor::StreamOp::Start {
-                        stream_id,
-                        handler: entry,
-                        args,
-                    })
-                }
-                effector_protocol::CallKind::IterateNext => {
-                    s.iterate(crate::carrier::executor::StreamOp::Next {
-                        stream_id,
-                        handler: entry,
-                        args,
-                    })
-                }
-                effector_protocol::CallKind::IterateDispose => {
-                    s.iterate(crate::carrier::executor::StreamOp::Dispose {
-                        stream_id,
-                        handler: entry,
-                        args,
-                    })
-                }
+                    effector_protocol::CallKind::IterateStart => {
+                        s.iterate(crate::carrier::executor::StreamOp::Start {
+                            stream_id,
+                            handler: entry,
+                            args,
+                        })
+                    }
+                    effector_protocol::CallKind::IterateNext => {
+                        s.iterate(crate::carrier::executor::StreamOp::Next {
+                            stream_id,
+                            handler: entry,
+                            args,
+                        })
+                    }
+                    effector_protocol::CallKind::IterateDispose => {
+                        s.iterate(crate::carrier::executor::StreamOp::Dispose {
+                            stream_id,
+                            handler: entry,
+                            args,
+                        })
+                    }
                 }
             },
         )
@@ -686,12 +683,14 @@ fn build_host_bridge(
                 }
                 other => other.clone(),
             };
-            let text = |k: &str| m.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+            let text = |k: &str| {
+                m.get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            };
             let (Some(op), Some(kind), Some(remote)) = (text("op"), text("kind"), text("remote"))
             else {
-                anyhow::bail!(
-                    "a resource op names `op` (`get` or `publish`), `kind` and `remote`"
-                );
+                anyhow::bail!("a resource op names `op` (`get` or `publish`), `kind` and `remote`");
             };
             let write = match op.as_str() {
                 "get" => false,
@@ -707,7 +706,8 @@ fn build_host_bridge(
                 anyhow::bail!("`{kind}:{remote}` was cancelled before the transfer started");
             }
             let reach = ask_material_blocking(&tx, &pending, &call_id, &kind, write)?;
-            let spec = crate::resource::Spec::from_plane(&kind, &reach.mode, text("ref").as_deref())?;
+            let spec =
+                crate::resource::Spec::from_plane(&kind, &reach.mode, text("ref").as_deref())?;
             let material = crate::resource::Material {
                 base: reach.base,
                 credential: reach.credential,
@@ -775,7 +775,10 @@ impl Drop for Materialised {
             if let Err(e) = std::fs::remove_dir_all(&path) {
                 // Leaving it is reported, never hidden: a node that cannot clean up is a node
                 // whose disk will fill, and silence would make that a mystery later.
-                eprintln!("resource `{identity}`: left behind at {}: {e}", path.display());
+                eprintln!(
+                    "resource `{identity}`: left behind at {}: {e}",
+                    path.display()
+                );
             }
         }
     }
@@ -896,15 +899,13 @@ pub async fn register_once(config: &EffectorConfig) -> Result<()> {
 /// process knows whether it is inside a container.
 fn class_refusal(config: &EffectorConfig, call: &ToolCall) -> Option<String> {
     match (call.requires, config.class) {
-        (effector_protocol::NodeClass::Container, effector_config::Class::Host) => Some(
-            format!(
-                "call {} requires a container, and this node is `{}` — it cannot become one on \
+        (effector_protocol::NodeClass::Container, effector_config::Class::Host) => Some(format!(
+            "call {} requires a container, and this node is `{}` — it cannot become one on \
                  demand. Bare metal is the exception a caller asks for; this call did not, and \
                  the plane routes container calls to a node started with `docker run`",
-                call.call_id,
-                config.class.as_str()
-            ),
-        ),
+            call.call_id,
+            config.class.as_str()
+        )),
         _ => None,
     }
 }
@@ -1150,7 +1151,10 @@ mod tests {
         let needs = call_requiring(effector_protocol::NodeClass::Container);
         let why = class_refusal(&host, &needs).expect("a host node cannot pretend");
         assert!(why.contains("requires a container"), "{why}");
-        assert!(why.contains("host"), "the refusal names what this node is: {why}");
+        assert!(
+            why.contains("host"),
+            "the refusal names what this node is: {why}"
+        );
 
         // THE DEFAULT IS THE CONTAINER: a call that says nothing about the class still requires
         // one, so silence is never a way onto bare metal.
@@ -1165,19 +1169,25 @@ mod tests {
         }))
         .expect("a call with no class field decodes");
         assert_eq!(silent.requires, effector_protocol::NodeClass::Container);
-        assert!(class_refusal(&host, &silent).is_some(), "silence still refuses");
+        assert!(
+            class_refusal(&host, &silent).is_some(),
+            "silence still refuses"
+        );
 
         // Bare metal is the exception a caller WRITES DOWN.
-        assert!(class_refusal(&host, &call_requiring(effector_protocol::NodeClass::Host)).is_none());
+        assert!(
+            class_refusal(&host, &call_requiring(effector_protocol::NodeClass::Host)).is_none()
+        );
 
         // A container node can run both — it is strictly more contained, so a `host` requirement
         // is satisfied by a container, not the other way round.
         let mut inside = config(CapabilitySurface::default());
         inside.class = effector_config::Class::Container;
         assert!(class_refusal(&inside, &needs).is_none());
-        assert!(class_refusal(&inside, &call_requiring(effector_protocol::NodeClass::Host)).is_none());
+        assert!(
+            class_refusal(&inside, &call_requiring(effector_protocol::NodeClass::Host)).is_none()
+        );
     }
-
 }
 
 #[cfg(test)]
@@ -1185,7 +1195,8 @@ mod machine_tests {
     use super::*;
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("effector-machine-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("effector-machine-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

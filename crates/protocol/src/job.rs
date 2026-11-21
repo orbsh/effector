@@ -318,7 +318,11 @@ mod tests {
         assert_eq!(retry, OnError::Retry { times: 2 });
         let never: OnError = serde_json::from_str(r#"{"kind":"never"}"#).expect("parses");
         assert_eq!(never, OnError::Never);
-        assert_eq!(OnError::default(), OnError::Fail, "silence means one attempt");
+        assert_eq!(
+            OnError::default(),
+            OnError::Fail,
+            "silence means one attempt"
+        );
     }
 
     // --- attachments: a carrying slot, not a type (ADR-0005 §attachments) -------------------
@@ -383,7 +387,10 @@ mod tests {
         );
 
         let text = serde_json::to_string(&Payload(payload.clone())).expect("json");
-        assert!(text.contains("222,173,190,239"), "JSON's only spelling is a number array: {text}");
+        assert!(
+            text.contains("222,173,190,239"),
+            "JSON's only spelling is a number array: {text}"
+        );
         let back: Payload = serde_json::from_str(&text).expect("json back");
         assert_eq!(back.0, payload);
     }

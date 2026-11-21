@@ -185,9 +185,9 @@ pub struct ExecRequest<'a> {
 pub type ExecResult = anyhow::Result<Value>;
 
 pub mod exec;
+pub mod executor;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod executor;
 #[cfg(feature = "steel")]
 pub mod steel;
 

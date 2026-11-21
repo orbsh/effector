@@ -192,7 +192,9 @@ fn run_child(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().with_context(|| format!("starting {what}"))?;
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("starting {what}"))?;
     let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
         pipe.map(|mut p| {
             std::thread::spawn(move || {
@@ -202,8 +204,18 @@ fn run_child(
             })
         })
     };
-    let out_thread = drain(child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
-    let err_thread = drain(child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
+    let out_thread = drain(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
+    let err_thread = drain(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
     let status = loop {
         if cancelled(cancel) {
             // Kill and REPAP: a zombie that nobody waits on is a leaked pid, and the caller is about
@@ -212,7 +224,10 @@ fn run_child(
             let _ = child.wait();
             bail!("`{what}` was cancelled");
         }
-        match child.try_wait().with_context(|| format!("waiting on {what}"))? {
+        match child
+            .try_wait()
+            .with_context(|| format!("waiting on {what}"))?
+        {
             Some(status) => break status,
             None => {
                 // The child is still working: the one fact only this loop can observe.
@@ -311,7 +326,14 @@ fn ensure_object(
         spec,
         material,
         remote,
-        &["-sSL", "--output", &into, "--write-out", "%{http_code}", &url],
+        &[
+            "-sSL",
+            "--output",
+            &into,
+            "--write-out",
+            "%{http_code}",
+            &url,
+        ],
         cancel,
     )?;
     let code = code.trim();
@@ -581,7 +603,9 @@ fn curl(
     // Both arms are idempotent (a GET writes the same bytes; a PUT stores the same object), and a
     // store that answers 503 once while it settles is not a task failure. The retry is bounded so a
     // store that is actually down still fails the task, with its own status in the message.
-    command.args(["--retry", "3", "--retry-delay", "1"]).args(args);
+    command
+        .args(["--retry", "3", "--retry-delay", "1"])
+        .args(args);
     if let Some(credential) = &material.credential {
         // `access_key:secret_key[:region]` — one string, the shape a secret holds. The region is
         // part of the signature and most object-store deployments either want their own or ignore
@@ -620,7 +644,14 @@ fn ensure_git(
     let url = address(material, remote);
     if path.join(".git").exists() {
         // Present: fetch, then put it on the ref the task asked for.
-        run_git(spec, material, remote, path, &["fetch", "--prune", "origin"], cancel)?;
+        run_git(
+            spec,
+            material,
+            remote,
+            path,
+            &["fetch", "--prune", "origin"],
+            cancel,
+        )?;
     } else {
         let mut argv = vec!["clone", "--quiet"];
         if let Some(reference) = &spec.at {
@@ -760,10 +791,12 @@ fn git_command(material: &Material, cwd: &Path) -> Command {
     if let Some(credential) = &material.credential {
         // The secret travels in the CHILD's environment, which lives for one git invocation — not
         // in argv (ps), not in the node's environment (inherited by the guest), not on disk.
-        command.env("EFFECTOR_RESOURCE_CREDENTIAL", credential).args([
-            "-c",
-            "credential.helper=!f() { echo username=effector; echo \"password=*** }; f",
-        ]);
+        command
+            .env("EFFECTOR_RESOURCE_CREDENTIAL", credential)
+            .args([
+                "-c",
+                "credential.helper=!f() { echo username=effector; echo \"password=*** }; f",
+            ]);
     }
     command
 }
@@ -887,9 +920,16 @@ mod tests {
         let root = dir.path().join("resources");
         let m = material(&bare);
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let err = ensure(&spec(Mode::ReadOnly), &m, "bare.git", None, &root, Some(&Stub(flag)))
-            .unwrap_err()
-            .to_string();
+        let err = ensure(
+            &spec(Mode::ReadOnly),
+            &m,
+            "bare.git",
+            None,
+            &root,
+            Some(&Stub(flag)),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("cancelled"), "{err}");
         assert!(
             !root.join("bare.git").exists(),
@@ -925,8 +965,14 @@ mod tests {
     fn a_snapshot_id_is_read_from_what_rustic_says() {
         let line = "[INFO] snapshot 3f2a9c81d4e5 successfully saved.\n";
         assert_eq!(snapshot_id(line).as_deref(), Some("3f2a9c81d4e5"));
-        assert!(snapshot_id("[INFO] backup done.").is_none(), "nothing minted, nothing to read");
-        assert!(snapshot_id("snapshot abc").is_none(), "too short to be an id");
+        assert!(
+            snapshot_id("[INFO] backup done.").is_none(),
+            "nothing minted, nothing to read"
+        );
+        assert!(
+            snapshot_id("snapshot abc").is_none(),
+            "too short to be an id"
+        );
     }
 
     /// The point of the kind: a tree goes up as a snapshot and comes back as a tree, and the second
@@ -936,7 +982,11 @@ mod tests {
     /// stub would only be testing the stub.
     #[test]
     fn an_archive_round_trips_through_snapshots() {
-        if Command::new(rustic_bin()).arg("--version").output().is_err() {
+        if Command::new(rustic_bin())
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             eprintln!(
                 "skipping an_archive_round_trips: no `{}` on this machine (set EFFECTOR_RUSTIC)",
                 rustic_bin()
@@ -962,12 +1012,18 @@ mod tests {
         // A fresh root restores the NEWEST snapshot: `latest` is what an unpinned read means here.
         let fresh = dir.path().join("fresh");
         let restored = ensure(&spec, &m, "notes", None, &fresh, None).expect("restored");
-        assert_eq!(std::fs::read_to_string(restored.join("a.txt")).unwrap(), "second");
+        assert_eq!(
+            std::fs::read_to_string(restored.join("a.txt")).unwrap(),
+            "second"
+        );
 
         // And a second ensure leaves the task's own bytes alone — a workspace, not a cache.
         std::fs::write(restored.join("a.txt"), "mine").unwrap();
         let again = ensure(&spec, &m, "notes", None, &fresh, None).expect("second ensure");
-        assert_eq!(std::fs::read_to_string(again.join("a.txt")).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(again.join("a.txt")).unwrap(),
+            "mine"
+        );
     }
 
     /// A one-request HTTP server: it answers exactly what an object store answers for the verb it
@@ -1023,7 +1079,10 @@ mod tests {
     fn a_remote_is_a_relative_name_and_cannot_climb_out_of_its_slice() {
         let root = Path::new("/work/resources");
         for bad in ["", "/abs", "a/", "a//b", "..", "a/../../b", "a\\b", "."] {
-            assert!(location(root, None, bad).is_err(), "`{bad}` must be refused");
+            assert!(
+                location(root, None, bad).is_err(),
+                "`{bad}` must be refused"
+            );
         }
         assert_eq!(
             location(root, None, "org/repo").unwrap(),
@@ -1091,7 +1150,8 @@ mod tests {
         };
         // A task's job may be to produce the first object; an empty workspace says so, and nothing
         // half-written is left behind for the task to trip over.
-        let path = ensure(&rw, &m, "out.tar", None, &root, None).expect("nothing there yet is fine");
+        let path =
+            ensure(&rw, &m, "out.tar", None, &root, None).expect("nothing there yet is fine");
         assert!(!path.exists(), "no stub file is invented");
 
         // The same answer on a READABLE name is the truth the task asked for: it is not there.
@@ -1105,9 +1165,12 @@ mod tests {
             &dir2.path().join("resources"),
             None,
         )
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("404"), "the store's own word is passed on: {err}");
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("404"),
+            "the store's own word is passed on: {err}"
+        );
     }
 
     #[test]

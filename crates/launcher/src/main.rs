@@ -24,7 +24,10 @@ fn main() -> Result<(), String> {
     if args.dry_run {
         // The dry run goes through the SAME argv builder the real path uses, so a printed
         // command cannot drift from the one that runs.
-        println!("{}", docker_argv(&args.image, &mount, &args.extra).join(" "));
+        println!(
+            "{}",
+            docker_argv(&args.image, &mount, &args.extra).join(" ")
+        );
         return Ok(());
     }
 
@@ -45,11 +48,15 @@ fn main() -> Result<(), String> {
             .as_mut()
             .ok_or_else(|| "the node's stdin is not piped".to_string())?;
         writeln!(stdin, "{}", minted.token).map_err(|e| format!("writing the token: {e}"))?;
-        stdin.flush().map_err(|e| format!("writing the token: {e}"))?;
+        stdin
+            .flush()
+            .map_err(|e| format!("writing the token: {e}"))?;
     }
     drop(child.stdin.take());
 
-    let status = child.wait().map_err(|e| format!("waiting for the node: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("waiting for the node: {e}"))?;
     if !status.success() {
         return Err(format!("the node left with {status}"));
     }
