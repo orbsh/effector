@@ -40,9 +40,9 @@ impl okm::pyo3_impl::Engine for ClosureEngine {
 /// (a declaration registry); deriving schema semantics from it is the
 /// caller's (aura's) job.
 /// Reserved names (ADR-0043 §3) — the only `__` events `@on` / `ctx.on` accept; they
-/// land in the schema's `hooks` array, never in `receives`. `__on_timer` is here because
-/// the host delivers a due timer as a queue job under that name (ADR-0016 §1).
-pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake", "__on_timer"];
+/// land in the schema's `hooks` array, never in `receives`. Re-exported from induction's
+/// protocol crate, because four spellings of one array is how carriers disagree.
+pub use induction_protocol::schema::RESERVED_HOOKS;
 
 fn load_module<'py>(
     py: Python<'py>,
