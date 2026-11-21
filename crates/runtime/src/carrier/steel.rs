@@ -239,9 +239,10 @@ thread_local! {
     static SEALED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
 }
 
-/// Reserved lifecycle names (ADR-0043 §3) — the only names `ctx.on`
-/// accepts; they land in the schema's `hooks` array, never in `receives`.
-pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake"];
+/// Reserved names (ADR-0043 §3) — the only names `ctx.on` accepts; they land in the
+/// schema's `hooks` array, never in `receives`. `__on_timer` is the timer plane's handler
+/// name (ADR-0016 §1): the host delivers it, no sender on the wire can.
+pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake", "__on_timer"];
 
 /// Event-declaration collector, bound before the source runs: `(on "event" (hash "key" "field")
 /// "key" handler)` records the declaration and returns the handler

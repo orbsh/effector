@@ -39,10 +39,10 @@ impl okm::pyo3_impl::Engine for ClosureEngine {
 /// registry while the module body runs. The collector is language-shape
 /// (a declaration registry); deriving schema semantics from it is the
 /// caller's (aura's) job.
-/// Reserved lifecycle names (ADR-0043 §3) — the only `__` events `@on` /
-/// `ctx.on` accept; they land in the schema's `hooks` array, never in
-/// `receives`.
-pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake"];
+/// Reserved names (ADR-0043 §3) — the only `__` events `@on` / `ctx.on` accept; they
+/// land in the schema's `hooks` array, never in `receives`. `__on_timer` is here because
+/// the host delivers a due timer as a queue job under that name (ADR-0016 §1).
+pub const RESERVED_HOOKS: &[&str] = &["__sleep", "__wake", "__on_timer"];
 
 fn load_module<'py>(
     py: Python<'py>,
