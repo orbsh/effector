@@ -336,17 +336,23 @@ def serve_frames(first_frame):
     return 0
 
 
-def main():
+def declared_codec_is_json():
+    """The codec is a property of the FRAMED wire (INDUCTION_ENCODING), so that is where it is
+    checked: the one-shot shape has no frames to encode — the carrier writes one JSON document and
+    reads one back regardless of what the mount declared — and refusing there would break a mount
+    over a field that shape never consults."""
     declared = os.environ.get(ENCODING_ENV, "json").lower()
-    if declared != "json":
-        # The codec is a property of the WIRE, so this refusal holds whichever shape arrives: this
-        # runner ships the JSON-lines codec only.
-        print(
-            f"[runner_py] declared codec '{declared}' is not json — this runner ships the "
-            f"JSON-lines codec only",
-            file=sys.stderr,
-        )
-        return 1
+    if declared == "json":
+        return True
+    print(
+        f"[runner_py] declared codec '{declared}' is not json — this runner ships the "
+        f"JSON-lines codec only",
+        file=sys.stderr,
+    )
+    return False
+
+
+def main():
     first = WIRE_IN.readline()
     if not first:
         # A parent that says nothing at all: nothing to serve, and nobody to report it to.
@@ -361,6 +367,8 @@ def main():
     # a one-shot request carries `handler`/`args`. Nothing else distinguishes them, and nothing
     # else needs to.
     if doc.get("type") == "initialize" or "id" in doc or "event" in doc:
+        if not declared_codec_is_json():
+            return 1
         # The wire is the protocol, so delivered code must not read it: stdin is emptied for it
         # (WIRE_IN is already pinned and stays the reader).
         sys.stdin = io.StringIO("")

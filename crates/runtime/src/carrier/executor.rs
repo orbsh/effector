@@ -664,10 +664,17 @@ fn spawn_executor(
         // IS the argv (whitespace-separated, quoted-free — the spawn spec);
         // the child lives as long as the executor and runs the framed loop
         // over the line protocol. A `nu` head selects the two-fifo adapter
-        // shape inside the carrier (the nushell PTY carrier retired — one
-        // execution shape per language, the nu form is `induction` with
-        // spec `nu <author.nu>`). Nothing wraps the spawn: the node's class is
-        // what contains the process (ADR-0003 §1).
+        // shape inside the carrier (the nushell PTY carrier retired). That
+        // adapter serves a HAND-WRITTEN nu guest: the .nu file named in the
+        // spec is the program, and it speaks the frames itself. Delivered rows
+        // cannot take this shape for nu — `source` demands a parse-time
+        // constant path (measured: `let p = …; source $p` is `not_a_constant`),
+        // so a runner could only shell out per call, which is `exec` with a
+        // protocol on top and no state or ctx to show for it. nu therefore
+        // rides `exec`; python rides whichever carrier the mount declares,
+        // because its runner can execute a delivered row in-process.
+        // Nothing wraps the spawn: the node's class is what contains the
+        // process (ADR-0003 §1).
         "induction" => {
             let argv: Vec<String> = shellish_split(source);
             Box::new(super::exec::InductionExecutor::spawn_encoded(
