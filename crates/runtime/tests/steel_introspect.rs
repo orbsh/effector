@@ -19,7 +19,11 @@ fn steel_introspect_derives_and_merges() {
     let schema = introspect(src).unwrap();
     println!("STEEL: {schema}");
     assert_eq!(schema["receives"]["add_to_cart"]["key"], "user_id");
-    assert_eq!(schema["wildcard_receives"][0], "order.*");
+    assert_eq!(schema["wildcard_receives"][0]["pattern"], "order.*");
+    assert!(
+        schema["wildcard_receives"][0].get("auth").is_none(),
+        "a public wildcard carries no gate: {schema}"
+    );
     assert_eq!(schema["lifecycle"]["idle_ttl"], "5m");
 }
 
@@ -52,8 +56,35 @@ fn steel_explicit_receives_survive_merge() {
         schema["receives"]["evt.a"]["key"], "k",
         "explicit receives survive merge: {schema}"
     );
+    // A hand-written array of bare patterns still merges as the patterns it spells.
     assert_eq!(schema["wildcard_receives"][0], "evt.w.*");
     assert_eq!(schema["lifecycle"]["idle_ttl"], "3m");
+}
+
+/// A gate a script declares on a WILDCARD must reach the host: the pattern used to travel as a
+/// bare string, so `auth` had nowhere to go and `(on "ui:*" (hash "auth" #t) h)` silently declared
+/// a public route. The entry carries its knobs now.
+#[test]
+fn steel_wildcard_keeps_its_declared_gate() {
+    let src = r##"
+(on "ui:*" (hash "auth" #t) (lambda (args) #t))
+(on "order.*" (hash) (lambda (args) #t))
+"##;
+    let schema = introspect(src).unwrap();
+    let gated = schema["wildcard_receives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["pattern"] == "ui:*")
+        .expect("the gated wildcard is in the schema");
+    assert_eq!(gated["auth"], true, "the declared gate crossed: {schema}");
+    let public = schema["wildcard_receives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["pattern"] == "order.*")
+        .expect("the public wildcard is in the schema");
+    assert!(public.get("auth").is_none(), "no gate where none was declared");
 }
 
 #[test]

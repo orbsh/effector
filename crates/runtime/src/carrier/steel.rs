@@ -424,8 +424,20 @@ pub fn introspect(source: &str) -> ExecResult {
     let mut receives = serde_json::Map::new();
     let mut wildcards: Vec<Value> = Vec::new();
     for decl in declarations.iter() {
-        if decl.event.ends_with(".*") {
-            wildcards.push(Value::String(decl.event.clone()));
+        // A pattern is a PREFIX plus `*`, whatever namespace it lives in: `order.*` was the
+        // only spelling the split recognised, so `ui:*` — the aura namespaces prism speaks —
+        // fell through to `receives` as a literal event name that could never match.
+        if decl.event.ends_with('*') {
+            // ONE shape for a wildcard entry, and its knobs travel with it: `(on "ui:*" (hash
+            // "auth" #t) h)` must not lose the gate on the way to the schema, which is exactly
+            // what a bare pattern string did — the declaration said `auth`, the schema said
+            // nothing, and a script could not reach a gated wildcard at all.
+            let mut entry = serde_json::Map::new();
+            entry.insert("pattern".into(), Value::String(decl.event.clone()));
+            if decl.auth {
+                entry.insert("auth".into(), Value::Bool(true));
+            }
+            wildcards.push(Value::Object(entry));
             continue;
         }
         let mut entry = serde_json::Map::new();

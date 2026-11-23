@@ -274,8 +274,18 @@ def ctx_iterate(booth_type, booth_key, handler, args=None):
                     )))
                 }
             };
-            if pair.0.ends_with(".*") {
-                wildcards.push(Value::String(pair.0));
+            // Prefix plus `*`, in any namespace (`order.*` and `ui:*` alike): the narrower
+            // `.*` test sent `ui:*` to `receives` as a literal name that never matched.
+            if pair.0.ends_with('*') {
+                // The wildcard's own knobs ride its entry, like every other declaration's: a
+                // bare pattern string dropped `auth` on the way to the schema, so `@on("ui:*",
+                // auth=True)` declared a gate the host never saw.
+                let mut entry = serde_json::Map::new();
+                entry.insert("pattern".into(), Value::String(pair.0));
+                if pair.2 {
+                    entry.insert("auth".into(), Value::Bool(true));
+                }
+                wildcards.push(Value::Object(entry));
                 continue;
             }
             let mut entry = serde_json::Map::new();
