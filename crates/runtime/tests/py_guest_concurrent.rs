@@ -2,7 +2,7 @@
 //! ADR-0002, aura ADR-0046 `unbounded`): one process, several requests at once,
 //! each ctx frame attributed to the request it serves.
 //!
-//! The runner is a deployment artifact (`deploy/runners/runner_py_guest.py`), not
+//! The runner is a deployment artifact (`deploy/runners/runner_py.py`), not
 //! a cargo target: these tests spawn `python3 <that file>` the way a node mount
 //! does. A missing `python3` fails the test loudly — a stale environment is a
 //! recipe error, never a skip.
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 fn guest() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../deploy/runners/runner_py_guest.py");
+        .join("../../deploy/runners/runner_py.py");
     assert!(
         path.exists(),
         "the python guest is gone: {}",

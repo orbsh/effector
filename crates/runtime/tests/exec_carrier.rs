@@ -1009,7 +1009,7 @@ fn the_resident_runner_keeps_its_ctx_frames_on_the_wire() {
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let bridge = recording_bridge(&seen, "host");
     let s = executors();
-    let spec = runner_spec("runner_py_guest.py");
+    let spec = runner_spec("runner_py.py");
     let out = s
         .with_executor_encoded(
             "box/runner-guest",
