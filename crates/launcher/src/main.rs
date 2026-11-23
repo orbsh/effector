@@ -26,13 +26,13 @@ fn main() -> Result<(), String> {
         // command cannot drift from the one that runs.
         println!(
             "{}",
-            docker_argv(&args.image, &mount, &args.extra).join(" ")
+            docker_argv(&args.image, &mount, &args.alias, &args.extra).join(" ")
         );
         return Ok(());
     }
 
     let minted = mint_token(&args.control_plane, &args.alias)?;
-    let argv = docker_argv(&args.image, &mount, &args.extra);
+    let argv = docker_argv(&args.image, &mount, &args.alias, &args.extra);
 
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])

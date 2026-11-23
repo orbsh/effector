@@ -13,6 +13,7 @@ fn main() -> anyhow::Result<()> {
     let mut control_plane: Option<String> = None;
     let mut token: Option<String> = None;
     let mut token_from_stdin = false;
+    let mut alias: Option<String> = None;
     let mut idle_secs: Option<u64> = None;
     let mut exit_on_disconnect = false;
     let mut once = false;
@@ -52,6 +53,15 @@ fn main() -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!("--idle-secs: {e}"))?,
                 );
             }
+            // The name this node answers to. A call names its executor by alias, and one image
+            // serves many nodes, so the launcher — which minted the token for that name — is the
+            // party that knows it.
+            "--alias" => {
+                alias = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow::anyhow!("--alias needs a name"))?,
+                );
+            }
             // A node that IS the container has no second life: when the connection ends there is
             // nothing left to serve it, so it leaves instead of reconnecting (ADR-0003 §11).
             "--exit-on-disconnect" => exit_on_disconnect = true,
@@ -80,6 +90,12 @@ fn main() -> anyhow::Result<()> {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         config.token = take_token_line(&line).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(name) = alias {
+        // A call names its executor by ALIAS (the executor check in `remote`), so an image cannot
+        // ship one alias for every node it becomes: the launcher knows the name it minted the token
+        // for, and this is how the node is told.
+        config.capabilities.node_alias = name;
     }
     if let Some(secs) = idle_secs {
         config.lease.idle_secs = secs;
@@ -112,7 +128,7 @@ effector — a node's dial-in agent
 
   effector [config.json]                 load the config and serve (default: ./effector.json)
   effector register [config.json]        one handshake against the control plane, then exit
-  effector [config.json] --control-plane <ws://url> --token <token>
+  effector [config.json] --control-plane <ws://url> --token <token> [--alias <name>]
                                          launcher overrides (the container form, ADR-0003)
   effector [config.json] --control-plane <ws://url> --token-stdin [--idle-secs N] \
       [--exit-on-disconnect]

@@ -22,16 +22,19 @@
 # lifetime is the container's. A task's later calls arrive on the same connection and cancel the
 # timer; when it expires the node exits and docker reaps the container.
 #
-# `--network` is a launch fact, not a node field: `none` gives an air-gapped container, and a
-# container that needs egress reaches the node's proxies through a socket mounted in (ADR-0001's
-# surviving promise), not through an allowlist the node keeps.
+# `--network` is a launch fact, not a node field. The default is `bridge` and it has to be: the
+# node's first act is a dial to the plane, and `none` leaves the container a loopback with no route —
+# a container started that way dies at startup, before anything is delivered. `none` stays available
+# for a container that needs no dial (it reaches the plane through a socket mounted in, ADR-0001's
+# surviving promise); a guest's own egress goes through the node's proxies, never an allowlist the
+# node keeps.
 
 def main [
     --alias: string          # what the plane mints the token for
     --image: string          # what ships `effector` and its config
     --plane: string          # control-plane base URL (the mount is derived from it)
     --token: string          # the one credential; rides the node's stdin, never its argv
-    --network: string = "none"   # docker's network for this container
+    --network: string = "bridge"  # docker's network for this container
     --idle-secs: int = 15        # the grace period; the node exits when it expires
     --root: string = "/work/resources"  # where resources land INSIDE the container
     --memory: string = "2g"
@@ -53,7 +56,7 @@ def main [
         --cpus $cpus
         --env $"EFFECTOR_RESOURCES_ROOT=($root)"
         $image
-        effector --control-plane $plane --token-stdin --idle-secs $idle_secs --exit-on-disconnect
+        effector --control-plane $plane --alias $alias --token-stdin --idle-secs $idle_secs --exit-on-disconnect
     ]
 
     # The token goes in on stdin: argv is world-readable (`ps`), and the node's environment is

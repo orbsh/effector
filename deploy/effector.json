@@ -1,0 +1,9 @@
+{
+  "control_plane_url": "ws://127.0.0.1:1/effector/unset",
+  "class": "container",
+  "token": "",
+  "capabilities": {
+    "node_alias": "unset",
+    "carriers": ["exec", "induction", "steel"]
+  }
+}

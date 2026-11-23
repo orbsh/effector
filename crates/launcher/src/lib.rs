@@ -95,25 +95,47 @@ pub fn mint_token(control_plane: &str, alias: &str) -> Result<Minted, String> {
     Ok(Minted { token })
 }
 
+/// The container's grace period: how long an idle node lives before it leaves, and therefore how long
+/// a task's later calls can still land on the same container. Short enough that a forgotten container
+/// is not a leak, long enough that one task's calls do not pay a start each time.
+const CONTAINER_IDLE_SECS: u64 = 15;
+
 /// The argv that turns an image into a node: `docker run --rm --init -i <image> effector …`.
 ///
 /// `--rm` and `--init` are not conveniences: with the node as PID 1 (ADR-0003 §10) the container
 /// ends when the process does, and `--init` gives delivered scripts a reaper that is not the
 /// node itself.
-pub fn docker_argv(image: &str, mount: &str, extra: &[String]) -> Vec<String> {
+pub fn docker_argv(image: &str, mount: &str, alias: &str, extra: &[String]) -> Vec<String> {
     let mut argv: Vec<String> = vec![
         "docker".into(),
         "run".into(),
         "--rm".into(),
         "--init".into(),
         "-i".into(),
+        // The node's first act is a dial: `--network none` leaves it a loopback and no route, so a
+        // container started that way can never register — it dies at startup, before anything is
+        // delivered. Bridge is the floor; an operator who wants a different reach says so in
+        // `extra` (a later `--network` wins in docker's argv).
+        "--network".into(),
+        "bridge".into(),
     ];
     argv.extend(extra.iter().cloned());
     argv.push(image.to_string());
     argv.push("effector".into());
     argv.push("--control-plane".into());
     argv.push(mount.to_string());
+    // A call names its executor by alias, so the node is told which name it answers to; the image
+    // ships one shape, not one alias per node.
+    argv.push("--alias".into());
+    argv.push(alias.to_string());
     argv.push("--token-stdin".into());
+    // The container node is the container: it must leave when the connection ends, and a plane it
+    // never reached must be a non-zero exit rather than an endless reconnect — the launcher's status
+    // is the only thing an operator reads (ADR-0003 §10). Without these two the process retries
+    // forever, `status` never returns, and the lease rule above is not in effect at all.
+    argv.push("--idle-secs".into());
+    argv.push(CONTAINER_IDLE_SECS.to_string());
+    argv.push("--exit-on-disconnect".into());
     argv
 }
 
@@ -172,14 +194,22 @@ mod tests {
         let argv = docker_argv(
             "img:tag",
             "ws://h:1/effector/a",
+            "a",
             &["--network".into(), "host".into()],
         );
         assert_eq!(argv[..5], ["docker", "run", "--rm", "--init", "-i"]);
-        assert_eq!(&argv[5], "--network");
-        assert_eq!(&argv[6], "host");
-        assert_eq!(&argv[7], "img:tag");
-        assert_eq!(&argv[8], "effector");
+        // The bridge floor comes before the caller's own flags, so an explicit `--network` later in
+        // the argv is the one docker honours.
+        assert_eq!(&argv[5..7], ["--network", "bridge"]);
+        assert_eq!(&argv[7..9], ["--network", "host"]);
+        assert_eq!(&argv[9], "img:tag");
+        assert_eq!(&argv[10], "effector");
+        // A call names its executor by alias, so the node is told which name it answers to.
+        assert_eq!(&argv[13..15], ["--alias", "a"]);
         assert!(argv.contains(&"--token-stdin".to_string()));
+        // The container form's tail: a node that IS the container leaves with its connection, and a
+        // plane it never reached is a status, not a retry loop.
+        assert_eq!(&argv[15..19], ["--token-stdin", "--idle-secs", "15", "--exit-on-disconnect"]);
         assert!(
             !argv.iter().any(|a| a == "--token" || a.contains("token=")),
             "the token rides stdin, never argv: {argv:?}"

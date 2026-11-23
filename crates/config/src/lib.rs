@@ -137,10 +137,26 @@ impl Class {
     }
 
     /// Whether THIS machine is inside a container right now — the markers the runtimes leave.
+    ///
+    /// Three paths, because the runtimes disagree on where they leave it: Docker writes
+    /// `/.dockerenv`; Podman (and CRI-O) write `/run/.containerenv`. The root-level
+    /// `/.containerenv` this used to check is a path nobody writes — measured against Podman
+    /// 6.1.4, where a container node was refused its own class until the `/run/` form was added,
+    /// which is the failure mode a marker check exists to avoid in the first place.
     fn marker_present() -> bool {
-        std::path::Path::new("/.dockerenv").exists()
-            || std::path::Path::new("/.containerenv").exists()
+        marker_in(&[
+            std::path::Path::new("/.dockerenv"),
+            std::path::Path::new("/.containerenv"),
+            std::path::Path::new("/run/.containerenv"),
+        ])
     }
+}
+
+/// The marker rule itself, with the paths as arguments: a claim about being contained is checked
+/// against facts on disk, and which facts is a list — not one hard-coded path that a runtime can
+/// move out from under us (see `Class::marker_present`).
+fn marker_in(paths: &[&std::path::Path]) -> bool {
+    paths.iter().any(|p| p.exists())
 }
 
 /// Unknown fields are REFUSED, not ignored: after the jail's fields were deleted (2026-11-17), a
@@ -248,6 +264,26 @@ mod tests {
         assert_eq!(secs(5), 240);
         assert_eq!(secs(6), 300, "the cap");
         assert_eq!(secs(9), 300, "and it stays capped");
+    }
+
+    #[test]
+    fn the_container_marker_rule_reads_every_path_a_runtime_writes() {
+        // A container claim is checked against facts, and the facts are per-runtime: Docker leaves
+        // `/.dockerenv`, Podman and CRI-O leave `/run/.containerenv`. A rule that knew only the
+        // first refuses a Podman container its own class — which is how this one was found.
+        let dir = std::env::temp_dir().join(format!("effector-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let absent = dir.join("not-a-marker");
+        let podman = dir.join("containerenv");
+        std::fs::write(&podman, b"").expect("marker file");
+
+        assert!(
+            !marker_in(&[absent.as_path()]),
+            "no marker is not a container"
+        );
+        assert!(marker_in(&[absent.as_path(), podman.as_path()]), "a marker is");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
