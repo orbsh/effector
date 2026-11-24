@@ -1,0 +1,11 @@
+# The build context is this repository and the image reads only three things from it: the two
+# manifests, `crates/`, and `deploy/`. Everything generated or local stays out, or every build pays
+# for it in upload time and cache invalidation.
+
+target/
+.git/
+.github/
+node_modules/
+.venv/
+**/__pycache__/
+*.swp
